@@ -1,5 +1,5 @@
 //@version=5
-strategy("Trend Following Strategy V2 - Enhanced Position Sizing",
+strategy("Trend Following Strategy V2 Enhanced Position Sizing",
     overlay=true,
     pyramiding=3,
     initial_capital=5000000,
