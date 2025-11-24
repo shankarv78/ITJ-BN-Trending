@@ -1,0 +1,207 @@
+//@version=5
+strategy("Trend Following Strategy (Relaxed)",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=1000000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     calc_on_every_tick=false,
+     calc_on_order_fills=false,
+     process_orders_on_close=true,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1)
+
+// ========================================
+// PARAMETERS - RELAXED FOR MORE SIGNALS
+// ========================================
+
+// RSI Parameters
+rsi_period = input.int(6, "RSI Period", minval=1)
+rsi_threshold = input.float(65, "RSI Threshold", minval=0, maxval=100)  // Reduced from 70 to 65
+
+// EMA Parameters
+ema_period = input.int(200, "EMA Period", minval=1)
+
+// Donchian Channel Parameters
+dc_period = input.int(20, "DC Period", minval=1)
+
+// ADX Parameters
+adx_period = input.int(30, "ADX Period", minval=1)
+adx_threshold = input.float(30, "ADX Threshold", minval=0)  // Increased from 25 to 30
+
+// Efficiency Ratio Parameters (RELAXED)
+er_period = input.int(3, "ER Period", minval=1)
+er_directional = input.bool(false, "ER Directional")
+er_threshold = input.float(0.6, "ER Threshold", minval=0, maxval=1)  // Reduced from 0.8 to 0.6
+
+// SuperTrend Parameters
+st_period = input.int(10, "ST Period", minval=1)
+st_multiplier = input.float(1.5, "ST Multiplier", minval=0.1, step=0.1)
+
+// Doji Detection Parameter
+doji_threshold = input.float(0.15, "Doji Body/Range Ratio", minval=0.01, maxval=0.3, step=0.01, tooltip="Body size as % of candle range. Lower = stricter doji detection")  // Relaxed from 0.1 to 0.15
+
+// Debug Mode
+show_debug = input.bool(true, "Show Debug Panel", tooltip="Show detailed condition status in separate pane")
+
+// ========================================
+// INDICATOR CALCULATIONS
+// ========================================
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// EMA
+ema = ta.ema(close, ema_period)
+
+// Donchian Channel
+dc_upper = ta.highest(high, dc_period)
+dc_lower = ta.lowest(low, dc_period)
+dc_middle = (dc_upper + dc_lower) / 2
+
+// ADX Calculation
+[diPlus, diMinus, adx] = ta.dmi(adx_period, adx_period)
+
+// Efficiency Ratio (Using exact code provided by user)
+ER(src, p, dir) =>
+    a = dir ? src - src[p] : math.abs(src - src[p])
+    b = 0.0
+    for i = 0 to p-1
+        b := b + math.abs(src[i] - src[i+1])
+    result = b != 0 ? a / b : 0
+    result
+
+er = ER(close, er_period, er_directional)
+
+// SuperTrend (10, 1.5)
+[supertrend, direction] = ta.supertrend(st_multiplier, st_period)
+
+// Doji Detection
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) <= doji_threshold : false
+
+// ========================================
+// STRATEGY CONDITIONS
+// ========================================
+
+// Entry Conditions (ALL must be true at candle close)
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+not_doji = not is_doji
+
+// Combine all conditions for long entry
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and not_doji
+
+// Exit Condition: Candle closes below SuperTrend
+long_exit = close < supertrend
+
+// ========================================
+// STRATEGY EXECUTION
+// ========================================
+
+if long_entry and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, comment="BUY Signal")
+
+if long_exit and strategy.position_size > 0
+    strategy.close("Long", comment="EXIT - Below ST")
+
+// ========================================
+// PLOTTING
+// ========================================
+
+// Plot EMA
+plot(ema, "EMA 200", color=color.blue, linewidth=2)
+
+// Plot Donchian Channel
+plot(dc_upper, "DC Upper", color=color.green, linewidth=1, style=plot.style_line)
+plot(dc_lower, "DC Lower", color=color.red, linewidth=1, style=plot.style_line)
+plot(dc_middle, "DC Middle", color=color.gray, linewidth=1, style=plot.style_circles)
+
+// Plot SuperTrend
+plot(supertrend, "SuperTrend (10,1.5)", color=direction < 0 ? color.new(color.green, 0) : color.new(color.red, 0), linewidth=2, style=plot.style_line)
+
+// Visual markers for entries and exits
+plotshape(long_entry and strategy.position_size == 0,
+     title="Entry Signal",
+     location=location.belowbar,
+     color=color.new(color.lime, 0),
+     style=shape.arrowup,
+     size=size.tiny,
+     text="")
+
+plotshape(long_exit and strategy.position_size > 0,
+     title="Exit Signal",
+     location=location.abovebar,
+     color=color.new(color.red, 0),
+     style=shape.arrowdown,
+     size=size.tiny,
+     text="")
+
+// Mark doji candles
+plotshape(is_doji, title="Doji Candle", location=location.abovebar, color=color.new(color.orange, 70), style=shape.diamond, size=size.tiny)
+
+// Info Table showing all conditions in real-time
+var table infoTable = table.new(position.top_right, 3, 10, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Indicator", bgcolor=color.gray, text_color=color.white)
+    table.cell(infoTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    table.cell(infoTable, 2, 0, "Status", bgcolor=color.gray, text_color=color.white)
+
+    table.cell(infoTable, 0, 1, "Close")
+    table.cell(infoTable, 1, 1, str.tostring(close, "#.##"))
+    table.cell(infoTable, 2, 1, "Current Price")
+
+    table.cell(infoTable, 0, 2, "RSI(6)")
+    table.cell(infoTable, 1, 2, str.tostring(rsi, "#.##"))
+    table.cell(infoTable, 2, 2, rsi_condition ? "✓ >65" : "✗ " + str.tostring(rsi, "#.##"), text_color=rsi_condition ? color.green : color.red)
+
+    table.cell(infoTable, 0, 3, "EMA(200)")
+    table.cell(infoTable, 1, 3, str.tostring(ema, "#.##"))
+    table.cell(infoTable, 2, 3, ema_condition ? "✓ Above" : "✗ Below", text_color=ema_condition ? color.green : color.red)
+
+    table.cell(infoTable, 0, 4, "DC Upper")
+    table.cell(infoTable, 1, 4, str.tostring(dc_upper, "#.##"))
+    table.cell(infoTable, 2, 4, dc_condition ? "✓ Above" : "✗ Below", text_color=dc_condition ? color.green : color.red)
+
+    table.cell(infoTable, 0, 5, "ADX(30)")
+    table.cell(infoTable, 1, 5, str.tostring(adx, "#.##"))
+    table.cell(infoTable, 2, 5, adx_condition ? "✓ <30" : "✗ " + str.tostring(adx, "#.##"), text_color=adx_condition ? color.green : color.red)
+
+    table.cell(infoTable, 0, 6, "ER(3)")
+    table.cell(infoTable, 1, 6, str.tostring(er, "#.####"))
+    table.cell(infoTable, 2, 6, er_condition ? "✓ >0.6" : "✗ " + str.tostring(er, "#.####"), text_color=er_condition ? color.green : color.red)
+
+    table.cell(infoTable, 0, 7, "SuperTrend")
+    table.cell(infoTable, 1, 7, str.tostring(supertrend, "#.##"))
+    table.cell(infoTable, 2, 7, st_condition ? "✓ Above" : "✗ Below", text_color=st_condition ? color.green : color.red)
+
+    table.cell(infoTable, 0, 8, "Doji Check")
+    table.cell(infoTable, 1, 8, str.tostring(body_size/(candle_range == 0 ? 1 : candle_range), "#.###"))
+    table.cell(infoTable, 2, 8, not_doji ? "✓ Not Doji" : "✗ Is Doji", text_color=not_doji ? color.green : color.red)
+
+    table.cell(infoTable, 0, 9, "ENTRY SIGNAL", bgcolor=long_entry ? color.new(color.green, 70) : color.new(color.red, 70))
+    table.cell(infoTable, 1, 9, long_entry ? "✓ ALL MET" : "✗ WAITING", text_color=color.white, bgcolor=long_entry ? color.new(color.green, 50) : color.new(color.red, 50))
+    table.cell(infoTable, 2, 9, strategy.position_size > 0 ? "IN TRADE" : "NO POSITION", text_color=color.white, bgcolor=strategy.position_size > 0 ? color.new(color.blue, 50) : color.new(color.gray, 50))
+
+// Background color for entry/exit signals
+bgcolor(long_entry ? color.new(color.green, 90) : na, title="Long Entry Signal")
+bgcolor(long_exit and strategy.position_size > 0 ? color.new(color.red, 90) : na, title="Long Exit Signal")
+
+// ========================================
+// DEBUG PANEL
+// ========================================
+
+plot(show_debug ? (rsi_condition ? 1 : 0) : na, "RSI>65", color=color.new(color.red, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (ema_condition ? 1 : 0) : na, "C>EMA", color=color.new(color.blue, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (dc_condition ? 1 : 0) : na, "C>DC", color=color.new(color.green, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (adx_condition ? 1 : 0) : na, "ADX<30", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (er_condition ? 1 : 0) : na, "ER>0.6", color=color.new(color.purple, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (st_condition ? 1 : 0) : na, "C>ST", color=color.new(color.teal, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (not_doji ? 1 : 0) : na, "Not Doji", color=color.new(color.maroon, 0), style=plot.style_stepline, linewidth=1, display=display.pane)
+plot(show_debug ? (long_entry ? 7 : 0) : na, "ALL CONDITIONS", color=color.new(color.lime, 0), style=plot.style_columns, linewidth=3, display=display.pane)

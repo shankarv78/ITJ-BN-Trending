@@ -1,15 +1,137 @@
 //@version=5
-strategy("Trend Following Strategy",
+// ========================================
+// BANK NIFTY TREND FOLLOWING STRATEGY v5
+// ✨ EXTENDED PYRAMIDING + OPTIMIZED DEFAULTS
+// ========================================
+//
+// Version: v5.0
+// Date: 2025-11-15 (v5.0 release)
+// Asset: Bank Nifty (Synthetic Future via ATM PE Sell + CE Buy)
+// Base Strategy: ITJ Trend Following V2 (with Triple-Constraint Pyramiding)
+//
+// ========================================
+// v5 CHANGES (from v4.1):
+// ========================================
+// 1. ✨ EXTENDED PYRAMIDING: 3 → 5 pyramids (6 total positions)
+//    - Allows up to 6 simultaneous positions (1 base + 5 pyramids)
+//    - All 3 stop loss modes updated (SuperTrend, Van Tharp, Tom Basso)
+//    - Independent tracking for Long_5 and Long_6
+//    - Triple-constraint system scales automatically
+//
+// 2. ✨ OPTIMIZED DEFAULT PARAMETERS (Empirically Validated):
+//    - ADX Threshold: 25 → 30 (more selective entries)
+//    - ER Period: 3 → 5 (smoother efficiency calculation)
+//    - ER Threshold: 0.8 → 0.77 (slightly relaxed)
+//    - ROC Threshold: 3.0% → 2.0% (allows more pyramids)
+//    - Risk %: 2.0% → 1.5% (more conservative position sizing)
+//    - ATR Pyramid Threshold: 0.75 → 0.5 (tighter pyramiding)
+//    - Commission: 0.1% → 0.05% (updated rate)
+//
+// 3. ✨ MAINTAINED FROM v4.1:
+//    - Historical lot sizing (accurate NSE lot size changes)
+//    - calc_on_every_tick=FALSE (reduce whipsaw)
+//    - Tom Basso mode as default
+//    - Margin cushion (2.7L per lot)
+//    - ROC filter enabled
+//
+// Expected Impact:
+// - 50% more pyramiding capacity (6 vs 4 positions)
+// - More conservative base position sizing (1.5% vs 2.0% risk)
+// - Tighter pyramids (0.5 ATR vs 0.75 ATR spacing)
+// - Better capital preservation with extended pyramiding
+//
+// ========================================
+// Inherited from v4:
+// ========================================
+// - calc_on_every_tick=FALSE (was TRUE in v3)
+// - ROC Filter ENABLED (was DISABLED in v3)
+// - Margin Cushion: 2.7L (was 2.6L in v3)
+// - Tom Basso Mode as Default (was SuperTrend in v3)
+// - Historical Lot Sizing (v4.1 feature)
+//
+// See BANKNIFTY_V4_CHANGELOG.md for v4 optimization rationale
+// See v5 changelog for extended pyramiding implementation details
+//
+// ========================================
+
+strategy("Bank Nifty Trend Following v5.0",
      overlay=true,
-     pyramiding=3,
+     pyramiding=5,
      initial_capital=5000000,
      default_qty_type=strategy.fixed,
      default_qty_value=1,
-     calc_on_every_tick=true,
+     calc_on_every_tick=false,
      calc_on_order_fills=false,
      process_orders_on_close=true,
      commission_type=strategy.commission.percent,
-     commission_value=0.1)
+     commission_value=0.05)
+
+// ========================================
+// HISTORICAL LOT SIZE FUNCTION (v4.1)
+// ========================================
+// Returns historically accurate Bank Nifty lot size based on NSE changes
+// Bank Nifty lot size has changed 10 times from 2005-2025
+// Sources: NSE F&O circulars, verified from NSE archives
+// See BANKNIFTY_LOT_SIZE_HISTORY.md for complete documentation
+//
+// Usage:
+//   lot_size = getBankNiftyLotSize(time)  // Returns correct lot size for current bar
+//
+getBankNiftyLotSize(barTime) =>
+    var int lotSize = 25  // default fallback
+
+    // Define all historical lot size change dates
+    // Format: timestamp(year, month, day, hour, minute)
+
+    // Period 1: Launch (Jun 13, 2005) - 100 lots
+    t_launch = timestamp(2005, 6, 13, 0, 0)
+
+    // Period 2: Feb 23, 2007 - Reduced to 50 lots (NSE/F&O/010/2007)
+    t_feb2007 = timestamp(2007, 2, 23, 0, 0)
+
+    // Period 3: Apr 30, 2010 - Reduced to 25 lots (NSE/F&O/030/2010) - Longest stable period
+    t_apr2010 = timestamp(2010, 4, 30, 0, 0)
+
+    // Period 4: Aug 28, 2015 - Increased to 30 lots (NSE/F&O/071/2015)
+    t_aug2015 = timestamp(2015, 8, 28, 0, 0)
+
+    // Period 5: Apr 29, 2016 - Increased to 40 lots (NSE/F&O/034/2016) - Historical maximum
+    t_apr2016 = timestamp(2016, 4, 29, 0, 0)
+
+    // Period 6: Oct 26, 2018 - Reduced to 20 lots (NSE/F&O/091/2018)
+    t_oct2018 = timestamp(2018, 10, 26, 0, 0)
+
+    // Period 7: May 4, 2020 - Increased to 25 lots (NSE/F&O/035/2020)
+    t_may2020 = timestamp(2020, 5, 4, 0, 0)
+
+    // Period 8: Jul 1, 2023 - Reduced to 15 lots (FAOP64625) - Recent minimum
+    t_jul2023 = timestamp(2023, 7, 1, 0, 0)
+
+    // Period 9: Nov 20, 2024 - Increased to 30 lots
+    t_nov2024 = timestamp(2024, 11, 20, 0, 0)
+
+    // Period 10: Apr 25, 2025 - Increased to 35 lots (NSE/FAOP/67372)
+    t_apr2025 = timestamp(2025, 4, 25, 0, 0)
+
+    // Period 11: Dec 31, 2025 - Reduced to 30 lots (NSE/FAOP/70616) - Scheduled future change
+    t_dec2025 = timestamp(2025, 12, 31, 0, 0)
+
+    // Determine lot size based on bar time (newest to oldest for efficiency)
+    lotSize :=
+         barTime >= t_dec2025 ? 30 :  // Dec 2025 onwards (scheduled reduction)
+         barTime >= t_apr2025 ? 35 :  // Apr 2025 - Dec 2025 (current as of Nov 2025)
+         barTime >= t_nov2024 ? 30 :  // Nov 2024 - Apr 2025
+         barTime >= t_jul2023 ? 15 :  // Jul 2023 - Nov 2024 (recent minimum)
+         barTime >= t_may2020 ? 25 :  // May 2020 - Jun 2023 (post-pandemic)
+         barTime >= t_oct2018 ? 20 :  // Oct 2018 - May 2020 (COVID crash period)
+         barTime >= t_apr2016 ? 40 :  // Apr 2016 - Oct 2018 (historical maximum)
+         barTime >= t_aug2015 ? 30 :  // Aug 2015 - Apr 2016
+         barTime >= t_apr2010 ? 25 :  // Apr 2010 - Aug 2015 (longest stable period)
+         barTime >= t_feb2007 ? 50 :  // Feb 2007 - Apr 2010 (includes 2009 crisis recovery)
+         barTime >= t_launch  ? 100 : // Launch - Feb 2007
+         25                            // Fallback (should never reach)
+
+    lotSize
 
 // ========================================
 // PARAMETERS
@@ -28,17 +150,17 @@ dc_period = input.int(20, "DC Period", minval=1)
 
 // ADX Parameters
 adx_period = input.int(30, "ADX Period", minval=1)
-adx_threshold = input.float(25, "ADX Threshold", minval=0)
+adx_threshold = input.float(30, "ADX Threshold", minval=0, tooltip="✨ v5: 30 (more selective, conservative entries)")
 
 // Efficiency Ratio Parameters (as per provided code)
-er_period = input.int(3, "ER Period", minval=1)
+er_period = input.int(5, "ER Period", minval=1, tooltip="✨ v5: 5 (smoother ER calculation)")
 er_directional = input.bool(false, "ER Directional")
-er_threshold = input.float(0.8, "ER Threshold", minval=0, maxval=1)
+er_threshold = input.float(0.77, "ER Threshold", minval=0, maxval=1, tooltip="✨ v5: 0.77 (slightly relaxed from 0.8)")
 
 // ROC (Rate of Change) Parameters
 roc_period = input.int(15, "ROC Period", minval=1, tooltip="Rate of Change lookback period")
-use_roc_for_pyramids = input.bool(false, "Use ROC Filter for Pyramids", tooltip="Enable ROC momentum check before pyramiding")
-roc_threshold = input.float(0.0, "ROC Threshold %", minval=-10, maxval=20, step=0.5, tooltip="Minimum ROC % required for pyramiding (0 = must be positive)")
+use_roc_for_pyramids = input.bool(true, "Use ROC Filter for Pyramids", tooltip="✨ v4: Enable ROC momentum check before pyramiding (Gold-inspired quality control)")
+roc_threshold = input.float(2.0, "ROC Threshold %", minval=-10, maxval=20, step=0.5, tooltip="✨ v5: 2% (allows more pyramids than v4's 3%)")
 
 // SuperTrend Parameters
 st_period = input.int(10, "ST Period", minval=1)
@@ -61,24 +183,37 @@ show_atr = input.bool(false, "Show ATR", tooltip="Display ATR in separate pane")
 smart_panel = input.bool(true, "Smart Info Panel", tooltip="Show indicators when flat, trade info when in position")
 show_all_info = input.bool(false, "Show All Info (Debug)", tooltip="Show both indicators and trade info always (for debugging)")
 
+// ========================================
+// LOT SIZE CONFIGURATION (v4.1)
+// ========================================
+// Toggle between historical (realistic) and static (testing) lot sizes
+
+use_historical_lot_size = input.bool(true, "Use Historical Lot Sizes", group="Position Sizing", tooltip="✨ v4.1: TRUE (default) = Historically accurate lot sizes | FALSE = Fixed lot size for parameter testing. Bank Nifty lot size changed 10 times from 2005-2025 (15-50 lots range). Historical mode provides realistic position sizing.")
+
+static_lot_size = input.int(35, "Static Lot Size", minval=1, maxval=100, group="Position Sizing", tooltip="Fixed lot size when historical mode disabled. Current Bank Nifty lot size = 35 (Apr-Dec 2025). Only used if 'Use Historical Lot Sizes' = FALSE.")
+
+// Optional: Show lot size info and change markers on chart (hidden by default for clean charts)
+show_lot_size_info = input.bool(false, "Show Lot Size Info Panel", group="Position Sizing", tooltip="Display current lot size and mode in table on chart for verification")
+
+show_lot_size_changes = input.bool(false, "Mark Lot Size Changes on Chart", group="Position Sizing", tooltip="Show vertical lines when NSE changes lot size - only in historical mode for visual debugging")
+
 // Position Sizing Parameters
-risk_percent = input.float(2.0, "Risk % of Capital", minval=0.1, maxval=10, step=0.1, tooltip="Percentage of capital to risk per trade")
-lot_size = input.int(35, "Lot Size", minval=1, tooltip="Contract lot size (Bank Nifty = 15, but using 35 as specified)")
+risk_percent = input.float(1.5, "Risk % of Capital", minval=0.1, maxval=10, step=0.1, group="Position Sizing", tooltip="✨ v5: 1.5% (more conservative than v4's 2.0%)")
 
 // Margin Management (for Synthetic Futures: ATM PE Sell + ATM CE Buy)
 use_margin_check = input.bool(true, "Enable Margin Check", tooltip="Prevent pyramiding if insufficient margin available")
-margin_per_lot = input.float(2.6, "Margin per Lot (Lakhs)", minval=0.1, step=0.1, tooltip="Approximate margin required per lot for synthetic future (ATM PE Sell + CE Buy)")
+margin_per_lot = input.float(2.7, "Margin per Lot (Lakhs)", minval=0.1, step=0.1, tooltip="✨ v4: Rs 2.7L (+4% cushion for margin spikes, Gold-inspired safety)")
 use_leverage = input.bool(false, "Use Leverage", tooltip="Enable leverage for margin calculations")
 leverage_multiplier = input.float(1.0, "Leverage Multiplier", minval=0.1, maxval=10, step=0.1, tooltip="Multiply available margin by this factor (1.0 = no leverage, 2.0 = 2x leverage)")
 
 // Pyramiding Parameters
 enable_pyramiding = input.bool(true, "Enable Pyramiding", tooltip="Allow adding to winning positions")
-max_pyramids = input.int(3, "Max Pyramids", minval=1, maxval=3, tooltip="Maximum number of pyramid entries (3 = 4 total positions)")
-atr_pyramid_threshold = input.float(0.75, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25, tooltip="ATR multiplier for pyramid triggers (0.75 = add every 0.75 ATR move)")
+max_pyramids = input.int(5, "Max Pyramids", minval=1, maxval=5, tooltip="✨ v5: Maximum number of pyramid entries (5 = 6 total positions)")
+atr_pyramid_threshold = input.float(0.5, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25, tooltip="✨ v5: 0.5 (tighter pyramiding than v4's 0.75)")
 pyramid_size_ratio = input.float(0.5, "Pyramid Size Ratio", minval=0.25, maxval=1.0, step=0.05, tooltip="Size of each pyramid as ratio of previous entry (0.5 = 50%)")
 
 // Stop Loss Management
-stop_loss_mode = input.string("SuperTrend", "Stop Loss Mode", options=["SuperTrend", "Van Tharp", "Tom Basso"], tooltip="SuperTrend: All entries use ST as SL | Van Tharp: Trail previous entries to breakeven | Tom Basso: ATR-based trailing stop")
+stop_loss_mode = input.string("Tom Basso", "Stop Loss Mode", options=["SuperTrend", "Van Tharp", "Tom Basso"], tooltip="✨ v4: Tom Basso default (independent trailing stops, Gold learning) | SuperTrend: All entries use ST as SL | Van Tharp: Trail previous entries to breakeven")
 atr_period_pyramid = input.int(10, "ATR Period (Pyramiding)", minval=1, tooltip="ATR period for calculating pyramid triggers")
 
 // Tom Basso ATR Trailing Stop Parameters (only used if mode = "Tom Basso")
@@ -89,6 +224,26 @@ basso_atr_period = input.int(10, "Basso ATR Period", minval=5, maxval=50, toolti
 // Trade Start Date Filter
 use_start_date = input.bool(true, "Use Start Date Filter", tooltip="Only allow trades from specified date onwards")
 start_date = input.time(timestamp("11 Nov 2025 00:00 +0000"), "Trade Start Date", tooltip="Strategy will only take trades from this date onwards")
+
+// ========================================
+// DETERMINE ACTIVE LOT SIZE (v4.1)
+// ========================================
+// Calculate lot size for current bar based on toggle setting
+// This will be used throughout the strategy for position sizing
+
+lot_size = use_historical_lot_size ?
+               getBankNiftyLotSize(time) :  // Dynamic: Get historical lot size based on bar date
+               static_lot_size               // Static: Use fixed lot size
+
+// Track lot size changes for visualization (only in historical mode)
+var int prev_lot_size = na
+lot_size_changed = use_historical_lot_size and not na(prev_lot_size) and lot_size != prev_lot_size
+prev_lot_size := lot_size
+
+// Store lot size mode info for display
+lot_size_mode = use_historical_lot_size ?
+     "📊 Dynamic (Historical)" :
+     "📌 Static (" + str.tostring(static_lot_size) + ")"
 
 // ========================================
 // INDICATOR CALCULATIONS
@@ -175,7 +330,7 @@ long_exit = close < supertrend
 // - Entry price = close price of signal bar
 
 // ========================================
-// PYRAMIDING & POSITION MANAGEMENT
+// PYRAMIDING & POSITION MANAGEMENT (v5: Extended to 6 positions)
 // ========================================
 // Van Tharp Principle: Use unrealized profits from current trade for pyramiding decisions
 // Risk Management: For new trades use realized equity, for pyramiding use current trade P&L
@@ -185,8 +340,10 @@ var float initial_entry_price = na  // First entry price (Long_1)
 var float pyr1_entry_price = na  // Pyramid 1 entry price (Long_2)
 var float pyr2_entry_price = na  // Pyramid 2 entry price (Long_3)
 var float pyr3_entry_price = na  // Pyramid 3 entry price (Long_4)
+var float pyr4_entry_price = na  // ✨ v5: Pyramid 4 entry price (Long_5)
+var float pyr5_entry_price = na  // ✨ v5: Pyramid 5 entry price (Long_6)
 var float last_pyramid_price = na  // Most recent pyramid entry price
-var int pyramid_count = 0  // Number of pyramids added
+var int pyramid_count = 0  // Number of pyramids added (0-5 in v5)
 var float initial_position_size = 0  // Size of first entry
 
 // Tom Basso Mode: Track stops and highest close for each entry
@@ -194,31 +351,37 @@ var float basso_stop_long1 = na
 var float basso_stop_long2 = na
 var float basso_stop_long3 = na
 var float basso_stop_long4 = na
+var float basso_stop_long5 = na  // ✨ v5: Long_5 stop
+var float basso_stop_long6 = na  // ✨ v5: Long_6 stop
 var float highest_close_long1 = na
 var float highest_close_long2 = na
 var float highest_close_long3 = na
 var float highest_close_long4 = na
+var float highest_close_long5 = na  // ✨ v5: Long_5 highest close
+var float highest_close_long6 = na  // ✨ v5: Long_6 highest close
 
-// Update equity high watermark - ONLY with REALIZED profits (closed trades only)
+// V2: Use CURRENT EQUITY (realized + unrealized) for all risk calculations
+// This allows dynamic position sizing based on actual current capital
+current_equity = strategy.equity  // Includes both realized and unrealized P&L
+
+// Still track equity_high for reference/display
 realized_equity = strategy.initial_capital + strategy.netprofit
 if realized_equity > equity_high
     equity_high := realized_equity
 
-// Track current equity separately for display (includes unrealized P&L)
-current_equity = strategy.equity
-
-// Calculate unrealized profit from current open position (Van Tharp approach for pyramiding)
-// This is the "house money" we can use to justify adding more
+// Calculate unrealized profit from current open position
 unrealized_pnl = strategy.openprofit
 // R-multiple: How many times the initial risk we've made in profit
-unrealized_pnl_r = strategy.position_size > 0 ? unrealized_pnl / (equity_high * (risk_percent / 100)) : 0
+unrealized_pnl_r = strategy.position_size > 0 ? unrealized_pnl / (current_equity * (risk_percent / 100)) : 0
 
-// Margin tracking (for synthetic futures: ATM PE Sell + ATM CE Buy)
-// For OPTIONS: Use only REALIZED profits (closed trades), NOT unrealized
-// Unrealized profits don't get credited until position is closed (no daily MTM like futures)
-realized_equity_lakhs = realized_equity / 100000  // Convert to lakhs
-current_equity_lakhs = current_equity / 100000  // For display only
-available_margin_lakhs = use_leverage ? realized_equity_lakhs * leverage_multiplier : realized_equity_lakhs
+// V2: Accumulated Profit (for pyramid gate check)
+accumulated_profit = current_equity - strategy.initial_capital
+
+// V2: Margin tracking uses CURRENT EQUITY (includes unrealized profits)
+// Allows pyramiding based on current capital, not just realized
+realized_equity_lakhs = realized_equity / 100000  // For reference
+current_equity_lakhs = current_equity / 100000  // Primary for calculations
+available_margin_lakhs = use_leverage ? current_equity_lakhs * leverage_multiplier : current_equity_lakhs
 current_margin_used_display = strategy.position_size * margin_per_lot
 margin_remaining = available_margin_lakhs - current_margin_used_display
 margin_utilization_pct = available_margin_lakhs > 0 ? (current_margin_used_display / available_margin_lakhs) * 100 : 0
@@ -228,6 +391,8 @@ var float display_stop_long1 = na
 var float display_stop_long2 = na
 var float display_stop_long3 = na
 var float display_stop_long4 = na
+var float display_stop_long5 = na  // ✨ v5
+var float display_stop_long6 = na  // ✨ v5
 
 if strategy.position_size > 0
     if stop_loss_mode == "SuperTrend"
@@ -236,30 +401,42 @@ if strategy.position_size > 0
         display_stop_long2 := not na(pyr1_entry_price) ? supertrend : na
         display_stop_long3 := not na(pyr2_entry_price) ? supertrend : na
         display_stop_long4 := not na(pyr3_entry_price) ? supertrend : na
+        display_stop_long5 := not na(pyr4_entry_price) ? supertrend : na  // ✨ v5
+        display_stop_long6 := not na(pyr5_entry_price) ? supertrend : na  // ✨ v5
     else if stop_loss_mode == "Van Tharp"
         // Trail to next pyramid or SuperTrend
         display_stop_long1 := not na(initial_entry_price) ? (not na(pyr1_entry_price) ? pyr1_entry_price : supertrend) : na
         display_stop_long2 := not na(pyr1_entry_price) ? (not na(pyr2_entry_price) ? pyr2_entry_price : supertrend) : na
         display_stop_long3 := not na(pyr2_entry_price) ? (not na(pyr3_entry_price) ? pyr3_entry_price : supertrend) : na
-        display_stop_long4 := not na(pyr3_entry_price) ? supertrend : na
+        display_stop_long4 := not na(pyr3_entry_price) ? (not na(pyr4_entry_price) ? pyr4_entry_price : supertrend) : na  // ✨ v5
+        display_stop_long5 := not na(pyr4_entry_price) ? (not na(pyr5_entry_price) ? pyr5_entry_price : supertrend) : na  // ✨ v5
+        display_stop_long6 := not na(pyr5_entry_price) ? supertrend : na  // ✨ v5: Highest level uses SuperTrend
     else if stop_loss_mode == "Tom Basso"
         // Individual ATR trailing stops
         display_stop_long1 := basso_stop_long1
         display_stop_long2 := basso_stop_long2
         display_stop_long3 := basso_stop_long3
         display_stop_long4 := basso_stop_long4
+        display_stop_long5 := basso_stop_long5  // ✨ v5
+        display_stop_long6 := basso_stop_long6  // ✨ v5
 
 // Calculate risk exposure per position (if stopped out)
 risk_long1 = not na(initial_entry_price) and not na(display_stop_long1) ? math.max(0, (initial_entry_price - display_stop_long1) * initial_position_size * lot_size) : 0
 risk_long2 = not na(pyr1_entry_price) and not na(display_stop_long2) ? math.max(0, (pyr1_entry_price - display_stop_long2) * initial_position_size * pyramid_size_ratio * lot_size) : 0
 risk_long3 = not na(pyr2_entry_price) and not na(display_stop_long3) ? math.max(0, (pyr2_entry_price - display_stop_long3) * initial_position_size * math.pow(pyramid_size_ratio, 2) * lot_size) : 0
 risk_long4 = not na(pyr3_entry_price) and not na(display_stop_long4) ? math.max(0, (pyr3_entry_price - display_stop_long4) * initial_position_size * math.pow(pyramid_size_ratio, 3) * lot_size) : 0
-total_risk_exposure = risk_long1 + risk_long2 + risk_long3 + risk_long4
+risk_long5 = not na(pyr4_entry_price) and not na(display_stop_long5) ? math.max(0, (pyr4_entry_price - display_stop_long5) * initial_position_size * math.pow(pyramid_size_ratio, 4) * lot_size) : 0  // ✨ v5
+risk_long6 = not na(pyr5_entry_price) and not na(display_stop_long6) ? math.max(0, (pyr5_entry_price - display_stop_long6) * initial_position_size * math.pow(pyramid_size_ratio, 5) * lot_size) : 0  // ✨ v5
+total_risk_exposure = risk_long1 + risk_long2 + risk_long3 + risk_long4 + risk_long5 + risk_long6  // ✨ v5: Updated
+
+// V2: Dynamic Base Risk (recalculates as stop trails)
+// Base risk is ONLY for Long_1 (initial entry), used for pyramid gate check
+base_risk = risk_long1
 
 // INITIAL ENTRY: When all conditions are met and no position exists
 if long_entry and strategy.position_size == 0
-    // Calculate risk amount (2% of HIGHEST REALIZED equity)
-    risk_amount = equity_high * (risk_percent / 100)
+    // V2: Calculate risk amount (1.5% of CURRENT equity - includes unrealized)
+    risk_amount = current_equity * (risk_percent / 100)
 
     // Entry price and stop
     entry_price = close
@@ -299,50 +476,65 @@ if long_entry and strategy.position_size == 0
         entry_comment = is_eod_candle ? "EOD-ENTRY-" + str.tostring(final_lots) + "L" : "ENTRY-" + str.tostring(final_lots) + "L"
         strategy.entry("Long_1", strategy.long, qty=final_lots, comment=entry_comment)
 
-// PYRAMIDING: Add to winning positions
-// Van Tharp: Only pyramid when current position is profitable (using unrealized profits)
+// V2: Initialize lot constraint variables at appropriate scope for info panel access
+float lot_a = 0.0
+float lot_b = 0.0
+float lot_c = 0.0
+float pyramid_lots = 0.0
+
+// PYRAMIDING: V2 Triple-Constraint System (✨ v5: Extended to 5 pyramids)
+// Only pyramid when meaningful profit exists beyond base risk coverage
 if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyramids
     // Calculate how far price has moved from last entry
     price_move_from_last = close - last_pyramid_price
     atr_moves = price_move_from_last / atr_pyramid
 
-    // Van Tharp condition: Current trade must be profitable to justify pyramiding
-    position_is_profitable = unrealized_pnl > 0
+    // ========================================
+    // V2 PYRAMID GATE CHECK
+    // ========================================
+    // Gate: Accumulated profit must exceed base trade risk
+    // This ensures we only pyramid when we have "house money" beyond covering base risk
+    pyramid_gate_open = accumulated_profit > base_risk
 
-    // Margin Check: Calculate current and required margin (realized profits only for options)
-    current_margin_used = strategy.position_size * margin_per_lot
-    free_margin = available_margin_lakhs - current_margin_used
-
-    // Calculate pyramid size based on GEOMETRIC SCALING (risk-based)
-    previous_size = pyramid_count == 0 ? initial_position_size : initial_position_size * math.pow(pyramid_size_ratio, pyramid_count)
-    pyramid_lots_from_ratio = math.floor(previous_size * pyramid_size_ratio)  // Always round DOWN
-
-    // Calculate max pyramid lots based on AVAILABLE FREE MARGIN
-    pyramid_lots_from_margin = free_margin > 0 ? math.floor(free_margin / margin_per_lot) : 0
-
-    // Take MINIMUM (ensures we never exceed available margin)
-    pyramid_lots = math.min(pyramid_lots_from_ratio, pyramid_lots_from_margin)
-
-    // Safety check: Ensure pyramid doesn't cause >100% margin utilization
-    pyramid_margin_required = pyramid_lots * margin_per_lot
-    total_margin_after_pyramid = current_margin_used + pyramid_margin_required
-
-    // If adding this pyramid would exceed available margin, reduce pyramid size
-    if total_margin_after_pyramid > available_margin_lakhs
-        // Recalculate max affordable lots to stay at exactly 100% or below
-        max_affordable_lots = math.floor((available_margin_lakhs - current_margin_used) / margin_per_lot)
-        pyramid_lots := math.max(0, max_affordable_lots)
-        pyramid_margin_required := pyramid_lots * margin_per_lot
-        total_margin_after_pyramid := current_margin_used + pyramid_margin_required
-
-    // Check if sufficient margin available (must have at least 1 lot affordable)
-    margin_available = use_margin_check ? (pyramid_lots >= 1 and total_margin_after_pyramid <= available_margin_lakhs) : (pyramid_lots >= 1)
+    // Calculate profit after base risk coverage (for lot-c calculation)
+    profit_after_base_risk = accumulated_profit - base_risk
 
     // ROC momentum check (optional filter for pyramids)
     roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
 
-    // Trigger: Price moved enough AND position is profitable AND sufficient margin AND ROC momentum
-    pyramid_trigger = atr_moves >= atr_pyramid_threshold and position_is_profitable and margin_available and roc_ok_for_pyramid
+    // ========================================
+    // V2 TRIPLE CONSTRAINT CALCULATION
+    // ========================================
+    if pyramid_gate_open and atr_moves >= atr_pyramid_threshold and roc_ok_for_pyramid
+        // CONSTRAINT 1: lot-a (Margin Safety)
+        // Maximum lots affordable based on available margin
+        current_margin_used = strategy.position_size * margin_per_lot
+        free_margin = available_margin_lakhs - current_margin_used
+        lot_a := free_margin > 0 ? math.floor(free_margin / margin_per_lot) : 0
+
+        // CONSTRAINT 2: lot-b (Discipline Safety)
+        // Maintain 50% geometric scaling from base position
+        lot_b := math.floor(initial_position_size * 0.5)
+
+        // CONSTRAINT 3: lot-c (Profit Safety)
+        // Only risk 50% of excess profit (profit beyond base risk)
+        available_risk_budget = profit_after_base_risk * 0.5
+
+        // Calculate risk per lot for this pyramid
+        pyramid_stop = stop_loss_mode == "SuperTrend" ? supertrend : (stop_loss_mode == "Tom Basso" ? (not na(basso_stop_long1) ? basso_stop_long1 : supertrend) : supertrend)
+        pyramid_stop_distance = close - pyramid_stop
+        risk_per_lot_pyramid = pyramid_stop_distance * lot_size
+
+        // Calculate lot-c (with zero protection)
+        lot_c := risk_per_lot_pyramid > 0 ? math.floor(available_risk_budget / risk_per_lot_pyramid) : 0
+
+        // FINAL PYRAMID SIZE: Minimum of all three constraints
+        pyramid_lots := math.min(lot_a, math.min(lot_b, lot_c))
+        pyramid_lots := math.max(0, pyramid_lots)  // Ensure non-negative
+    // Note: If gate closed or conditions not met, variables remain at initial 0 values
+
+    // Trigger: Gate open AND price moved AND ROC OK AND >= 1 lot
+    pyramid_trigger = pyramid_gate_open and atr_moves >= atr_pyramid_threshold and roc_ok_for_pyramid and pyramid_lots >= 1
 
     if pyramid_trigger
 
@@ -369,24 +561,39 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
             if stop_loss_mode == "Tom Basso"
                 basso_stop_long4 := close - (basso_initial_atr_mult * atr_basso)
                 highest_close_long4 := close
+        else if pyramid_count == 4  // ✨ v5: New pyramid level
+            pyr4_entry_price := close
+            // Initialize Tom Basso stop for Long_5
+            if stop_loss_mode == "Tom Basso"
+                basso_stop_long5 := close - (basso_initial_atr_mult * atr_basso)
+                highest_close_long5 := close
+        else if pyramid_count == 5  // ✨ v5: New pyramid level
+            pyr5_entry_price := close
+            // Initialize Tom Basso stop for Long_6
+            if stop_loss_mode == "Tom Basso"
+                basso_stop_long6 := close - (basso_initial_atr_mult * atr_basso)
+                highest_close_long6 := close
 
         // Enter pyramid
         strategy.entry("Long_" + str.tostring(pyramid_count + 1), strategy.long, qty=pyramid_lots, comment="PYR" + str.tostring(pyramid_count) + "-" + str.tostring(pyramid_lots) + "L")
 
-// STOP LOSS MANAGEMENT
+// STOP LOSS MANAGEMENT (✨ v5: Extended for Long_5 and Long_6)
 if strategy.position_size > 0
     if stop_loss_mode == "SuperTrend"
         // ========================================
         // Mode 1: SuperTrend (Simple)
         // ========================================
         // All positions use SuperTrend as stop
-        if close < supertrend
+        // ONLY check at bar close (not on every tick) to avoid premature exits
+        if close < supertrend and barstate.isconfirmed
             strategy.close_all(comment="EXIT - Below ST")
             // Reset tracking
             initial_entry_price := na
             pyr1_entry_price := na
             pyr2_entry_price := na
             pyr3_entry_price := na
+            pyr4_entry_price := na  // ✨ v5
+            pyr5_entry_price := na  // ✨ v5
             last_pyramid_price := na
             pyramid_count := 0
             initial_position_size := 0
@@ -397,9 +604,10 @@ if strategy.position_size > 0
         // ========================================
         // Trail earlier pyramid entries to the entry price of later pyramids
         // Check each position independently (not based on pyramid_count)
+        // ONLY check at bar close (not on every tick) to avoid premature exits
 
         // Long_1 (Initial Entry): Trail to PYR1 or SuperTrend
-        if not na(initial_entry_price)
+        if not na(initial_entry_price) and barstate.isconfirmed
             if not na(pyr1_entry_price)
                 // PYR1 exists above us, trail to it
                 if close < pyr1_entry_price
@@ -412,7 +620,7 @@ if strategy.position_size > 0
                     initial_entry_price := na
 
         // Long_2 (PYR1): Trail to PYR2 or SuperTrend
-        if not na(pyr1_entry_price)
+        if not na(pyr1_entry_price) and barstate.isconfirmed
             if not na(pyr2_entry_price)
                 // PYR2 exists above us, trail to it
                 if close < pyr2_entry_price
@@ -425,7 +633,7 @@ if strategy.position_size > 0
                     pyr1_entry_price := na
 
         // Long_3 (PYR2): Trail to PYR3 or SuperTrend
-        if not na(pyr2_entry_price)
+        if not na(pyr2_entry_price) and barstate.isconfirmed
             if not na(pyr3_entry_price)
                 // PYR3 exists above us, trail to it
                 if close < pyr3_entry_price
@@ -437,11 +645,37 @@ if strategy.position_size > 0
                     strategy.close("Long_3", comment="EXIT - Below ST")
                     pyr2_entry_price := na
 
-        // Long_4 (PYR3): Always trail to SuperTrend (highest level)
-        if not na(pyr3_entry_price)
+        // Long_4 (PYR3): Trail to PYR4 or SuperTrend
+        if not na(pyr3_entry_price) and barstate.isconfirmed
+            if not na(pyr4_entry_price)
+                // PYR4 exists above us, trail to it (✨ v5)
+                if close < pyr4_entry_price
+                    strategy.close("Long_4", comment="EXIT - Trail to PYR4")
+                    pyr3_entry_price := na
+            else
+                // No pyramid above, use SuperTrend
+                if close < supertrend
+                    strategy.close("Long_4", comment="EXIT - Below ST")
+                    pyr3_entry_price := na
+
+        // ✨ v5: Long_5 (PYR4): Trail to PYR5 or SuperTrend
+        if not na(pyr4_entry_price) and barstate.isconfirmed
+            if not na(pyr5_entry_price)
+                // PYR5 exists above us, trail to it
+                if close < pyr5_entry_price
+                    strategy.close("Long_5", comment="EXIT - Trail to PYR5")
+                    pyr4_entry_price := na
+            else
+                // No pyramid above, use SuperTrend
+                if close < supertrend
+                    strategy.close("Long_5", comment="EXIT - Below ST")
+                    pyr4_entry_price := na
+
+        // ✨ v5: Long_6 (PYR5): Always trail to SuperTrend (highest level)
+        if not na(pyr5_entry_price) and barstate.isconfirmed
             if close < supertrend
-                strategy.close("Long_4", comment="EXIT - Below ST")
-                pyr3_entry_price := na
+                strategy.close("Long_6", comment="EXIT - Below ST")
+                pyr5_entry_price := na
 
         // If all positions closed, reset everything
         if strategy.position_size == 0
@@ -449,29 +683,32 @@ if strategy.position_size > 0
             pyr1_entry_price := na
             pyr2_entry_price := na
             pyr3_entry_price := na
+            pyr4_entry_price := na  // ✨ v5
+            pyr5_entry_price := na  // ✨ v5
             last_pyramid_price := na
             pyramid_count := 0
             initial_position_size := 0
 
     else if stop_loss_mode == "Tom Basso"
         // ========================================
-        // Mode 3: Tom Basso ATR Trailing Stop
+        // Mode 3: Tom Basso ATR Trailing Stop (✨ v5: Extended for 6 positions)
         // ========================================
         // Each position has its own ATR-based trailing stop
         // Stop = max(Initial Stop, Highest Close - Trailing ATR)
         // Using manual tracking instead of ta.highest() to avoid buffer issues
+        // ONLY check at bar close (not on every tick) to avoid premature exits
 
         // Update trailing stops for each position
         // Long_1 (Initial Entry)
         if not na(initial_entry_price)
-            // Update highest close since entry
+            // Update highest close since entry (on every tick to track the highest)
             highest_close_long1 := math.max(highest_close_long1, close)
             // Calculate trailing stop
             trailing_stop_long1 = highest_close_long1 - (basso_trailing_atr_mult * atr_basso)
             basso_stop_long1 := math.max(basso_stop_long1, trailing_stop_long1)  // Only move up
 
-            // Exit Long_1 if close below trailing stop
-            if close < basso_stop_long1
+            // Exit Long_1 if close below trailing stop (ONLY at bar close)
+            if close < basso_stop_long1 and barstate.isconfirmed
                 strategy.close("Long_1", comment="EXIT - Basso Stop")
                 initial_entry_price := na
                 basso_stop_long1 := na
@@ -483,7 +720,7 @@ if strategy.position_size > 0
             trailing_stop_long2 = highest_close_long2 - (basso_trailing_atr_mult * atr_basso)
             basso_stop_long2 := math.max(basso_stop_long2, trailing_stop_long2)
 
-            if close < basso_stop_long2
+            if close < basso_stop_long2 and barstate.isconfirmed
                 strategy.close("Long_2", comment="EXIT - Basso Stop")
                 pyr1_entry_price := na
                 basso_stop_long2 := na
@@ -495,7 +732,7 @@ if strategy.position_size > 0
             trailing_stop_long3 = highest_close_long3 - (basso_trailing_atr_mult * atr_basso)
             basso_stop_long3 := math.max(basso_stop_long3, trailing_stop_long3)
 
-            if close < basso_stop_long3
+            if close < basso_stop_long3 and barstate.isconfirmed
                 strategy.close("Long_3", comment="EXIT - Basso Stop")
                 pyr2_entry_price := na
                 basso_stop_long3 := na
@@ -507,11 +744,35 @@ if strategy.position_size > 0
             trailing_stop_long4 = highest_close_long4 - (basso_trailing_atr_mult * atr_basso)
             basso_stop_long4 := math.max(basso_stop_long4, trailing_stop_long4)
 
-            if close < basso_stop_long4
+            if close < basso_stop_long4 and barstate.isconfirmed
                 strategy.close("Long_4", comment="EXIT - Basso Stop")
                 pyr3_entry_price := na
                 basso_stop_long4 := na
                 highest_close_long4 := na
+
+        // ✨ v5: Long_5 (PYR4)
+        if not na(pyr4_entry_price)
+            highest_close_long5 := math.max(highest_close_long5, close)
+            trailing_stop_long5 = highest_close_long5 - (basso_trailing_atr_mult * atr_basso)
+            basso_stop_long5 := math.max(basso_stop_long5, trailing_stop_long5)
+
+            if close < basso_stop_long5 and barstate.isconfirmed
+                strategy.close("Long_5", comment="EXIT - Basso Stop")
+                pyr4_entry_price := na
+                basso_stop_long5 := na
+                highest_close_long5 := na
+
+        // ✨ v5: Long_6 (PYR5)
+        if not na(pyr5_entry_price)
+            highest_close_long6 := math.max(highest_close_long6, close)
+            trailing_stop_long6 = highest_close_long6 - (basso_trailing_atr_mult * atr_basso)
+            basso_stop_long6 := math.max(basso_stop_long6, trailing_stop_long6)
+
+            if close < basso_stop_long6 and barstate.isconfirmed
+                strategy.close("Long_6", comment="EXIT - Basso Stop")
+                pyr5_entry_price := na
+                basso_stop_long6 := na
+                highest_close_long6 := na
 
         // If all positions closed, reset
         if strategy.position_size == 0
@@ -540,12 +801,12 @@ hline(show_rsi ? 50 : na, "RSI 50", color=color.new(color.gray, 70), linestyle=h
 
 // Optional: ADX (separate pane - different scale from price)
 plot(show_adx ? adx : na, "ADX(30)", color=color.new(color.orange, 0), linewidth=2)
-hline(show_adx ? 25 : na, "ADX 25", color=color.new(color.orange, 50), linestyle=hline.style_dashed)
+hline(show_adx ? 30 : na, "ADX 30", color=color.new(color.orange, 50), linestyle=hline.style_dashed)  // ✨ v5: Updated to 30
 hline(show_adx ? 50 : na, "ADX 50", color=color.new(color.red, 50), linestyle=hline.style_dotted)
 
 // Optional: Efficiency Ratio (separate pane - different scale from price)
-plot(show_er ? er : na, "ER(3)", color=color.new(color.blue, 0), linewidth=2)
-hline(show_er ? 0.8 : na, "ER 0.8", color=color.new(color.green, 50), linestyle=hline.style_dashed)
+plot(show_er ? er : na, "ER(5)", color=color.new(color.blue, 0), linewidth=2)  // ✨ v5: Updated label to ER(5)
+hline(show_er ? 0.77 : na, "ER 0.77", color=color.new(color.green, 50), linestyle=hline.style_dashed)  // ✨ v5: Updated to 0.77
 hline(show_er ? 0.5 : na, "ER 0.5", color=color.new(color.gray, 50), linestyle=hline.style_dotted)
 hline(show_er ? 0 : na, "ER 0", color=color.new(color.gray, 70), linestyle=hline.style_solid)
 
@@ -582,7 +843,7 @@ plotshape(long_exit and strategy.position_size > 0,
      force_overlay=true)
 
 // ========================================
-// SMART INFO PANEL - Context-Aware Display
+// SMART INFO PANEL - Context-Aware Display (✨ v5: Extended for 6 positions)
 // ========================================
 var table infoTable = na
 
@@ -593,8 +854,8 @@ if barstate.islast
     show_indicators = (smart_panel and not in_position) or show_all_info
     show_trade_info = (smart_panel and in_position) or show_all_info
 
-    // Dynamic table size
-    num_rows = show_all_info ? 26 : (in_position ? 16 : 14)
+    // Dynamic table size - v5 adds 4 rows for Long_5 and Long_6 display
+    num_rows = show_all_info ? 42 : (in_position ? 32 : 14)
     infoTable := table.new(position.top_right, 3, num_rows, border_width=2, bgcolor=color.new(color.white, 0), frame_color=color.black, frame_width=2)
 
     // Header
@@ -628,12 +889,12 @@ if barstate.islast
 
         table.cell(infoTable, 0, row, "ADX(30)")
         table.cell(infoTable, 1, row, str.tostring(adx, "#.##"))
-        table.cell(infoTable, 2, row, adx_condition ? "✓ <25" : "✗ " + str.tostring(adx, "#.##"), text_color=adx_condition ? color.green : color.red)
+        table.cell(infoTable, 2, row, adx_condition ? "✓ <30" : "✗ " + str.tostring(adx, "#.##"), text_color=adx_condition ? color.green : color.red)  // ✨ v5: Updated to <30
         row := row + 1
 
-        table.cell(infoTable, 0, row, "ER(3)")
+        table.cell(infoTable, 0, row, "ER(5)")  // ✨ v5: Updated to ER(5)
         table.cell(infoTable, 1, row, str.tostring(er, "#.####"))
-        table.cell(infoTable, 2, row, er_condition ? "✓ >0.8" : "✗ " + str.tostring(er, "#.####"), text_color=er_condition ? color.green : color.red)
+        table.cell(infoTable, 2, row, er_condition ? "✓ >0.77" : "✗ " + str.tostring(er, "#.####"), text_color=er_condition ? color.green : color.red)  // ✨ v5: Updated to >0.77
         row := row + 1
 
         table.cell(infoTable, 0, row, "SuperTrend")
@@ -683,6 +944,22 @@ if barstate.islast
             table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long4, "#.##"), bgcolor=color.new(color.green, 80))
             row := row + 1
 
+        // ✨ v5: Long_5 (Pyr4) display
+        if not na(pyr4_entry_price)
+            pyr4_lots = math.round(initial_position_size * math.pow(pyramid_size_ratio, 4))
+            table.cell(infoTable, 0, row, "Long_5 (Pyr4)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 1, row, str.tostring(pyr4_entry_price, "#.##") + " (" + str.tostring(pyr4_lots) + "L)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long5, "#.##"), bgcolor=color.new(color.green, 80))
+            row := row + 1
+
+        // ✨ v5: Long_6 (Pyr5) display
+        if not na(pyr5_entry_price)
+            pyr5_lots = math.round(initial_position_size * math.pow(pyramid_size_ratio, 5))
+            table.cell(infoTable, 0, row, "Long_6 (Pyr5)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 1, row, str.tostring(pyr5_entry_price, "#.##") + " (" + str.tostring(pyr5_lots) + "L)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long6, "#.##"), bgcolor=color.new(color.green, 80))
+            row := row + 1
+
         // Total position
         table.cell(infoTable, 0, row, "Total Position", bgcolor=color.new(color.purple, 80))
         table.cell(infoTable, 1, row, str.tostring(strategy.position_size) + " Lots", bgcolor=color.new(color.purple, 80))
@@ -714,10 +991,58 @@ if barstate.islast
         table.cell(infoTable, 2, row, str.tostring(pyramid_count) + "/" + str.tostring(max_pyramids) + " Pyrs", bgcolor=color.new(color.blue, 80))
         row := row + 1
 
+        // V2: PYRAMID GATE SECTION
+        gate_color = accumulated_profit > base_risk ? color.green : color.red
+        gate_status = accumulated_profit > base_risk ? "✓ OPEN" : "✗ BLOCKED"
+        table.cell(infoTable, 0, row, "Pyramid Gate", bgcolor=color.new(gate_color, 80))
+        table.cell(infoTable, 1, row, gate_status, bgcolor=color.new(gate_color, 80))
+        table.cell(infoTable, 2, row, "Profit > Risk", bgcolor=color.new(gate_color, 80))
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "Base Risk", bgcolor=color.new(color.orange, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(base_risk/100000, "#.##") + "L", bgcolor=color.new(color.orange, 80))
+        table.cell(infoTable, 2, row, "Long_1 Risk", bgcolor=color.new(color.orange, 80))
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "Accum Profit", bgcolor=color.new(color.blue, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(accumulated_profit/100000, "#.##") + "L", bgcolor=color.new(color.blue, 80))
+        table.cell(infoTable, 2, row, "R+U Profit", bgcolor=color.new(color.blue, 80))
+        row := row + 1
+
+        profit_after_risk_display = accumulated_profit - base_risk
+        table.cell(infoTable, 0, row, "Profit-Risk", bgcolor=color.new(color.purple, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(profit_after_risk_display/100000, "#.##") + "L", bgcolor=color.new(color.purple, 80))
+        table.cell(infoTable, 2, row, "Available", bgcolor=color.new(color.purple, 80))
+        row := row + 1
+
+        // V2: LOT BREAKDOWN SECTION (when gate is evaluated)
+        if enable_pyramiding and pyramid_count < max_pyramids
+            table.cell(infoTable, 0, row, "Lot-A (Margin)", bgcolor=color.new(color.gray, 80))
+            table.cell(infoTable, 1, row, str.tostring(lot_a) + " lots", bgcolor=color.new(color.gray, 80))
+            table.cell(infoTable, 2, row, "From Margin", bgcolor=color.new(color.gray, 80))
+            row := row + 1
+
+            table.cell(infoTable, 0, row, "Lot-B (50%)", bgcolor=color.new(color.gray, 80))
+            table.cell(infoTable, 1, row, str.tostring(lot_b) + " lots", bgcolor=color.new(color.gray, 80))
+            table.cell(infoTable, 2, row, "Base × 50%", bgcolor=color.new(color.gray, 80))
+            row := row + 1
+
+            table.cell(infoTable, 0, row, "Lot-C (Risk)", bgcolor=color.new(color.gray, 80))
+            table.cell(infoTable, 1, row, str.tostring(lot_c) + " lots", bgcolor=color.new(color.gray, 80))
+            table.cell(infoTable, 2, row, "From Budget", bgcolor=color.new(color.gray, 80))
+            row := row + 1
+
+            min_lot = math.min(lot_a, math.min(lot_b, lot_c))
+            limiter = min_lot == lot_a ? "Margin" : (min_lot == lot_b ? "50% Rule" : "Risk Budget")
+            table.cell(infoTable, 0, row, "Next Pyramid", bgcolor=color.new(color.yellow, 80))
+            table.cell(infoTable, 1, row, str.tostring(min_lot) + " lots", bgcolor=color.new(color.yellow, 80))
+            table.cell(infoTable, 2, row, limiter, bgcolor=color.new(color.yellow, 80))
+            row := row + 1
+
     // === CAPITAL INFO (when flat or debug mode) ===
     if not in_position or show_all_info
-        // Calculate position sizing for display (use same logic as actual entry)
-        risk_amount = equity_high * (risk_percent / 100)
+        // V2: Calculate position sizing for display (use same logic as actual entry)
+        risk_amount = current_equity * (risk_percent / 100)
         risk_per_point = close - supertrend
         risk_per_lot = risk_per_point * lot_size
         risk_lots_preview = risk_per_lot > 0 ? (risk_amount / risk_per_lot) * er : 0
@@ -746,6 +1071,65 @@ if barstate.islast
         row := row + 1
 
 // ========================================
+// LOT SIZE INFO TABLE (v4.1)
+// ========================================
+// Optional table showing current lot size and mode
+// Hidden by default (show_lot_size_info = false)
+
+if show_lot_size_info and barstate.islast
+    // Create lot size info table in top-right corner
+    var table lotTable = table.new(position.top_right, 2, 3,
+                                     border_width=1,
+                                     border_color=color.gray,
+                                     frame_color=color.gray,
+                                     frame_width=1)
+
+    // Header row - Lot Size Mode
+    table.cell(lotTable, 0, 0, "Lot Size Mode",
+               bgcolor=color.new(color.blue, 80),
+               text_color=color.white,
+               text_size=size.small)
+    table.cell(lotTable, 1, 0, lot_size_mode,
+               bgcolor=color.new(color.blue, 80),
+               text_color=color.white,
+               text_size=size.small)
+
+    // Current lot size
+    table.cell(lotTable, 0, 1, "Current Lot Size",
+               text_size=size.small)
+    table.cell(lotTable, 1, 1, str.tostring(lot_size) + " lots",
+               text_color=use_historical_lot_size ? color.green : color.orange,
+               text_size=size.small)
+
+    // Current bar date
+    table.cell(lotTable, 0, 2, "Bar Date",
+               text_size=size.tiny)
+    table.cell(lotTable, 1, 2, str.format("{0,date,yyyy-MM-dd}", time),
+               text_size=size.tiny)
+
+// ========================================
+// LOT SIZE CHANGE MARKERS (v4.1)
+// ========================================
+// Optional visual markers when NSE changes lot size
+// Hidden by default (show_lot_size_changes = false)
+// Only shown in historical mode
+
+if show_lot_size_changes and lot_size_changed
+    // Draw vertical line on lot size change
+    line.new(bar_index, low * 0.95, bar_index, high * 1.05,
+             color=color.new(color.yellow, 70),
+             width=2,
+             style=line.style_dashed)
+
+    // Add label showing lot size change
+    label.new(bar_index, high * 1.05,
+              "Lot: " + str.tostring(prev_lot_size) + "→" + str.tostring(lot_size),
+              color=color.new(color.yellow, 80),
+              textcolor=color.black,
+              size=size.tiny,
+              style=label.style_label_down)
+
+// ========================================
 // DEBUG PANEL - Shows condition states over time
 // ========================================
 // Plot all conditions (1 = true, 0 = false) in separate pane
@@ -754,8 +1138,8 @@ if barstate.islast
 plot(show_debug ? (rsi_condition ? 1 : 0) : na, "RSI>70", color=color.new(color.red, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (ema_condition ? 1 : 0) : na, "C>EMA", color=color.new(color.blue, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (dc_condition ? 1 : 0) : na, "C>DC", color=color.new(color.green, 0), style=plot.style_stepline, linewidth=1)
-plot(show_debug ? (adx_condition ? 1 : 0) : na, "ADX<25", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
-plot(show_debug ? (er_condition ? 1 : 0) : na, "ER>0.8", color=color.new(color.purple, 0), style=plot.style_stepline, linewidth=1)
+plot(show_debug ? (adx_condition ? 1 : 0) : na, "ADX<30", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)  // ✨ v5: Updated label
+plot(show_debug ? (er_condition ? 1 : 0) : na, "ER>0.77", color=color.new(color.purple, 0), style=plot.style_stepline, linewidth=1)  // ✨ v5: Updated label
 plot(show_debug ? (st_condition ? 1 : 0) : na, "C>ST", color=color.new(color.teal, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (not_doji ? 1 : 0) : na, "Not Doji", color=color.new(color.maroon, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (long_entry ? 7 : 0) : na, "ALL CONDITIONS", color=color.new(color.lime, 0), style=plot.style_columns, linewidth=3)

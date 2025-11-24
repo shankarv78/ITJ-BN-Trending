@@ -1,0 +1,151 @@
+// Smart Info Panel - Context-Aware Display
+if barstate.islast
+    // Determine what to show based on position status
+    in_position = strategy.position_size > 0
+    show_indicators = (smart_panel and not in_position) or show_all_info
+    show_trade_info = (smart_panel and in_position) or show_all_info
+
+    // Dynamic table size
+    num_rows = show_all_info ? 23 : (in_position ? 15 : 12)
+    infoTable := table.new(position.top_right, 3, num_rows, border_width=2, bgcolor=color.new(color.white, 0), frame_color=color.black, frame_width=2)
+
+    // Header
+    table.cell(infoTable, 0, 0, in_position ? "Position" : "Indicator", bgcolor=color.gray, text_color=color.white, text_size=size.normal)
+    table.cell(infoTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white, text_size=size.normal)
+    table.cell(infoTable, 2, 0, "Status", bgcolor=color.gray, text_color=color.white, text_size=size.normal)
+
+    row = 1
+
+    // === INDICATOR SECTION (when flat or debug mode) ===
+    if show_indicators
+        table.cell(infoTable, 0, row, "Close")
+        table.cell(infoTable, 1, row, str.tostring(close, "#.##"))
+        table.cell(infoTable, 2, row, "Current Price")
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "RSI(6)")
+        table.cell(infoTable, 1, row, str.tostring(rsi, "#.##"))
+        table.cell(infoTable, 2, row, rsi_condition ? "✓ >70" : "✗ " + str.tostring(rsi, "#.##"), text_color=rsi_condition ? color.green : color.red)
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "EMA(200)")
+        table.cell(infoTable, 1, row, str.tostring(ema, "#.##"))
+        table.cell(infoTable, 2, row, ema_condition ? "✓ Above" : "✗ Below", text_color=ema_condition ? color.green : color.red)
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "DC Upper")
+        table.cell(infoTable, 1, row, str.tostring(dc_upper, "#.##"))
+        table.cell(infoTable, 2, row, dc_condition ? "✓ Above" : "✗ Below", text_color=dc_condition ? color.green : color.red)
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "ADX(30)")
+        table.cell(infoTable, 1, row, str.tostring(adx, "#.##"))
+        table.cell(infoTable, 2, row, adx_condition ? "✓ <25" : "✗ " + str.tostring(adx, "#.##"), text_color=adx_condition ? color.green : color.red)
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "ER(3)")
+        table.cell(infoTable, 1, row, str.tostring(er, "#.####"))
+        table.cell(infoTable, 2, row, er_condition ? "✓ >0.8" : "✗ " + str.tostring(er, "#.####"), text_color=er_condition ? color.green : color.red)
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "SuperTrend")
+        table.cell(infoTable, 1, row, str.tostring(supertrend, "#.##"))
+        table.cell(infoTable, 2, row, st_condition ? "✓ Above" : "✗ Below", text_color=st_condition ? color.green : color.red)
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "Doji Check")
+        table.cell(infoTable, 1, row, str.tostring(body_size/(candle_range == 0 ? 1 : candle_range), "#.###"))
+        table.cell(infoTable, 2, row, not_doji ? "✓ Not Doji" : "✗ Is Doji", text_color=not_doji ? color.green : color.red)
+        row := row + 1
+
+    // === ENTRY SIGNAL (always show) ===
+    table.cell(infoTable, 0, row, "ENTRY SIGNAL", bgcolor=long_entry ? color.new(color.green, 70) : color.new(color.red, 70))
+    table.cell(infoTable, 1, row, long_entry ? "✓ ALL MET" : "✗ WAITING", text_color=color.white, bgcolor=long_entry ? color.new(color.green, 50) : color.new(color.red, 50))
+    table.cell(infoTable, 2, row, in_position ? "IN TRADE" : "NO POSITION", text_color=color.white, bgcolor=in_position ? color.new(color.blue, 50) : color.new(color.gray, 50))
+    row := row + 1
+
+    // === TRADE INFO SECTION (when in position or debug mode) ===
+    if show_trade_info
+        // Position entries and stops
+        if not na(initial_entry_price)
+            entry_lots = math.round(initial_position_size)
+            table.cell(infoTable, 0, row, "Long_1 Entry", bgcolor=color.new(color.blue, 80))
+            table.cell(infoTable, 1, row, str.tostring(initial_entry_price, "#.##") + " (" + str.tostring(entry_lots) + "L)", bgcolor=color.new(color.blue, 80))
+            table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long1, "#.##"), bgcolor=color.new(color.blue, 80))
+            row := row + 1
+
+        if not na(pyr1_entry_price)
+            pyr1_lots = math.round(initial_position_size * pyramid_size_ratio)
+            table.cell(infoTable, 0, row, "Long_2 (Pyr1)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 1, row, str.tostring(pyr1_entry_price, "#.##") + " (" + str.tostring(pyr1_lots) + "L)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long2, "#.##"), bgcolor=color.new(color.green, 80))
+            row := row + 1
+
+        if not na(pyr2_entry_price)
+            pyr2_lots = math.round(initial_position_size * math.pow(pyramid_size_ratio, 2))
+            table.cell(infoTable, 0, row, "Long_3 (Pyr2)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 1, row, str.tostring(pyr2_entry_price, "#.##") + " (" + str.tostring(pyr2_lots) + "L)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long3, "#.##"), bgcolor=color.new(color.green, 80))
+            row := row + 1
+
+        if not na(pyr3_entry_price)
+            pyr3_lots = math.round(initial_position_size * math.pow(pyramid_size_ratio, 3))
+            table.cell(infoTable, 0, row, "Long_4 (Pyr3)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 1, row, str.tostring(pyr3_entry_price, "#.##") + " (" + str.tostring(pyr3_lots) + "L)", bgcolor=color.new(color.green, 80))
+            table.cell(infoTable, 2, row, "Stop: " + str.tostring(display_stop_long4, "#.##"), bgcolor=color.new(color.green, 80))
+            row := row + 1
+
+        // Total position
+        table.cell(infoTable, 0, row, "Total Position", bgcolor=color.new(color.purple, 80))
+        table.cell(infoTable, 1, row, str.tostring(strategy.position_size) + " Lots", bgcolor=color.new(color.purple, 80))
+        table.cell(infoTable, 2, row, "@ " + str.tostring(close, "#.##"), bgcolor=color.new(color.purple, 80))
+        row := row + 1
+
+        // Risk exposure
+        risk_color = total_risk_exposure > equity_high * 0.05 ? color.red : color.orange
+        table.cell(infoTable, 0, row, "Risk Exposure", bgcolor=color.new(risk_color, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(total_risk_exposure/100000, "#.##") + "L", bgcolor=color.new(risk_color, 80))
+        table.cell(infoTable, 2, row, "If stopped out", bgcolor=color.new(risk_color, 80))
+        row := row + 1
+
+        // Open P&L
+        table.cell(infoTable, 0, row, "Open P&L", bgcolor=color.new(unrealized_pnl >= 0 ? color.green : color.red, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(unrealized_pnl/100000, "#.##") + "L", bgcolor=color.new(unrealized_pnl >= 0 ? color.green : color.red, 80))
+        table.cell(infoTable, 2, row, str.tostring(unrealized_pnl_r, "#.##") + "R", bgcolor=color.new(unrealized_pnl >= 0 ? color.green : color.red, 80))
+        row := row + 1
+
+        // Margin info
+        margin_color = margin_utilization_pct > 90 ? color.red : (margin_utilization_pct > 75 ? color.orange : color.green)
+        table.cell(infoTable, 0, row, "Margin Used", bgcolor=color.new(margin_color, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(current_margin_used_display, "#.#") + "L", bgcolor=color.new(margin_color, 80))
+        table.cell(infoTable, 2, row, str.tostring(margin_utilization_pct, "#.#") + "%", bgcolor=color.new(margin_color, 80))
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "Margin Free", bgcolor=color.new(color.blue, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(margin_remaining, "#.#") + "L", bgcolor=color.new(color.blue, 80))
+        table.cell(infoTable, 2, row, str.tostring(pyramid_count) + "/" + str.tostring(max_pyramids) + " Pyrs", bgcolor=color.new(color.blue, 80))
+        row := row + 1
+
+    // === CAPITAL INFO (when flat or debug mode) ===
+    if not in_position or show_all_info
+        // Calculate position sizing for display
+        risk_amount = equity_high * (risk_percent / 100)
+        risk_per_point = close - supertrend
+        risk_per_lot = risk_per_point * lot_size
+        num_lots_preview = risk_per_lot > 0 ? (risk_amount / risk_per_lot) * er : 0
+        final_lots_preview = math.max(1, math.round(num_lots_preview))
+
+        table.cell(infoTable, 0, row, "Capital", bgcolor=color.new(color.blue, 80))
+        table.cell(infoTable, 1, row, "₹50L", bgcolor=color.new(color.blue, 80))
+        table.cell(infoTable, 2, row, "Initial Capital", bgcolor=color.new(color.blue, 80))
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "Lot Size", bgcolor=color.new(color.purple, 80))
+        table.cell(infoTable, 1, row, str.tostring(final_lots_preview) + " Lots", bgcolor=color.new(color.purple, 80))
+        table.cell(infoTable, 2, row, "If entry now", bgcolor=color.new(color.purple, 80))
+        row := row + 1
+
+        table.cell(infoTable, 0, row, "Margin Avail", bgcolor=color.new(color.green, 80))
+        table.cell(infoTable, 1, row, "₹" + str.tostring(max_margin_available, "#.#") + "L", bgcolor=color.new(color.green, 80))
+        table.cell(infoTable, 2, row, "Ready", bgcolor=color.new(color.green, 80))
+        row := row + 1

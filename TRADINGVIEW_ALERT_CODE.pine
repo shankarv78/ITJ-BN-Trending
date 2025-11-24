@@ -1,0 +1,245 @@
+// TradingView Alert Code Snippets for Bank Nifty v6
+// Add these alert() calls to your trend_following_strategy_v6.pine script
+
+// ============================================================================
+// PHASE 1: TELEGRAM ALERTS (Human-readable)
+// ============================================================================
+
+// Add this near the top after your input variables
+show_alerts = input.bool(true, 'Enable Alerts', tooltip='Turn on/off all alert messages')
+
+// -----------------------------------------------------------------------------
+// BASE ENTRY ALERT
+// Add this right after: strategy.entry("Long_1", strategy.long, qty=final_lots)
+// -----------------------------------------------------------------------------
+
+if base_entry and show_alerts
+    alert_msg = '🟢 BASE ENTRY\n' +
+         'Price: ' + str.tostring(math.round(close)) + '\n' +
+         'Lots: ' + str.tostring(final_lots) + '\n' +
+         'Stop: ' + str.tostring(math.round(close - atr)) + '\n' +
+         'ATR: ' + str.tostring(math.round(atr)) + '\n' +
+         'Time: ' + str.tostring(hour) + ':' + str.tostring(minute, '#00') + '\n' +
+         'RSI: ' + str.tostring(rsi, '#.##') + '\n' +
+         'ADX: ' + str.tostring(adx, '#.##') + '\n' +
+         'ER: ' + str.tostring(er, '#.##')
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// -----------------------------------------------------------------------------
+// PYRAMID ALERTS (Add after each pyramid entry)
+// -----------------------------------------------------------------------------
+
+// PYRAMID 1 (Long_2)
+// Add this right after: strategy.entry("Long_2", strategy.long, qty=pyramid_size)
+if pyramid_entry and pyramid_count == 0 and show_alerts
+    alert_msg = '🔵 PYRAMID 1 (Long_2)\n' +
+         'Price: ' + str.tostring(math.round(close)) + '\n' +
+         'Lots: ' + str.tostring(pyramid_size) + '\n' +
+         'ATR Moves: ' + str.tostring(atr_moves, '#.##') + '\n' +
+         'Base Entry: ' + str.tostring(math.round(base_entry_price)) + '\n' +
+         'Move: +' + str.tostring(math.round(close - base_entry_price)) + ' pts\n' +
+         'Total P&L: ₹' + str.tostring(math.round(unrealized_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// PYRAMID 2 (Long_3)
+if pyramid_entry and pyramid_count == 1 and show_alerts
+    alert_msg = '🔵 PYRAMID 2 (Long_3)\n' +
+         'Price: ' + str.tostring(math.round(close)) + '\n' +
+         'Lots: ' + str.tostring(pyramid_size) + '\n' +
+         'ATR Moves: ' + str.tostring(atr_moves, '#.##') + '\n' +
+         'Last Entry: ' + str.tostring(math.round(pyr1_entry_price)) + '\n' +
+         'Total P&L: ₹' + str.tostring(math.round(unrealized_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// PYRAMID 3 (Long_4)
+if pyramid_entry and pyramid_count == 2 and show_alerts
+    alert_msg = '🔵 PYRAMID 3 (Long_4)\n' +
+         'Price: ' + str.tostring(math.round(close)) + '\n' +
+         'Lots: ' + str.tostring(pyramid_size) + '\n' +
+         'Total P&L: ₹' + str.tostring(math.round(unrealized_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// PYRAMID 4 (Long_5)
+if pyramid_entry and pyramid_count == 3 and show_alerts
+    alert_msg = '🔵 PYRAMID 4 (Long_5)\n' +
+         'Price: ' + str.tostring(math.round(close)) + '\n' +
+         'Lots: ' + str.tostring(pyramid_size) + '\n' +
+         'Total P&L: ₹' + str.tostring(math.round(unrealized_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// PYRAMID 5 (Long_6)
+if pyramid_entry and pyramid_count == 4 and show_alerts
+    alert_msg = '🔵 PYRAMID 5 (Long_6)\n' +
+         'Price: ' + str.tostring(math.round(close)) + '\n' +
+         'Lots: ' + str.tostring(pyramid_size) + '\n' +
+         'Total P&L: ₹' + str.tostring(math.round(unrealized_pnl)) + '\n' +
+         '⚠️ MAX PYRAMIDS REACHED'
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// -----------------------------------------------------------------------------
+// TOM BASSO EXIT ALERTS (Add after each strategy.close() call)
+// -----------------------------------------------------------------------------
+
+// EXIT LONG_1
+// Add after: strategy.close("Long_1", comment="Tom Basso Stop")
+if basso_exit_long1 and show_alerts
+    position_pnl = (close - base_entry_price) * initial_position_size * lot_size
+    alert_msg = '🔴 EXIT LONG_1\n' +
+         'Stop: ' + str.tostring(math.round(basso_stop_long1)) + '\n' +
+         'Current: ' + str.tostring(math.round(close)) + '\n' +
+         'Entry: ' + str.tostring(math.round(base_entry_price)) + '\n' +
+         'P&L: ₹' + str.tostring(math.round(position_pnl)) + '\n' +
+         'Lots: ' + str.tostring(initial_position_size)
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// EXIT LONG_2
+if basso_exit_long2 and show_alerts
+    position_pnl = (close - pyr1_entry_price) * pyr1_size * lot_size
+    alert_msg = '🔴 EXIT LONG_2\n' +
+         'Stop: ' + str.tostring(math.round(basso_stop_long2)) + '\n' +
+         'Current: ' + str.tostring(math.round(close)) + '\n' +
+         'Entry: ' + str.tostring(math.round(pyr1_entry_price)) + '\n' +
+         'P&L: ₹' + str.tostring(math.round(position_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// EXIT LONG_3
+if basso_exit_long3 and show_alerts
+    position_pnl = (close - pyr2_entry_price) * pyr2_size * lot_size
+    alert_msg = '🔴 EXIT LONG_3\n' +
+         'Stop: ' + str.tostring(math.round(basso_stop_long3)) + '\n' +
+         'P&L: ₹' + str.tostring(math.round(position_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// EXIT LONG_4
+if basso_exit_long4 and show_alerts
+    position_pnl = (close - pyr3_entry_price) * pyr3_size * lot_size
+    alert_msg = '🔴 EXIT LONG_4\n' +
+         'Stop: ' + str.tostring(math.round(basso_stop_long4)) + '\n' +
+         'P&L: ₹' + str.tostring(math.round(position_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// EXIT LONG_5
+if basso_exit_long5 and show_alerts
+    position_pnl = (close - pyr4_entry_price) * pyr4_size * lot_size
+    alert_msg = '🔴 EXIT LONG_5\n' +
+         'Stop: ' + str.tostring(math.round(basso_stop_long5)) + '\n' +
+         'P&L: ₹' + str.tostring(math.round(position_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// EXIT LONG_6
+if basso_exit_long6 and show_alerts
+    position_pnl = (close - pyr5_entry_price) * pyr5_size * lot_size
+    alert_msg = '🔴 EXIT LONG_6\n' +
+         'Stop: ' + str.tostring(math.round(basso_stop_long6)) + '\n' +
+         'P&L: ₹' + str.tostring(math.round(position_pnl))
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// ============================================================================
+// PHASE 2: JSON WEBHOOK ALERTS (For automation)
+// ============================================================================
+
+// Once you're ready for Phase 2 automation, replace above alerts with JSON format
+
+// BASE ENTRY (JSON)
+if base_entry and show_alerts
+    alert_msg = '{"type":"BASE_ENTRY",' +
+         '"price":' + str.tostring(close) + ',' +
+         '"lots":' + str.tostring(final_lots) + ',' +
+         '"stop":' + str.tostring(close - atr) + ',' +
+         '"atr":' + str.tostring(atr) + ',' +
+         '"timestamp":"' + str.tostring(year) + '-' + str.tostring(month, '#00') + '-' +
+         str.tostring(dayofmonth, '#00') + 'T' + str.tostring(hour, '#00') + ':' +
+         str.tostring(minute, '#00') + ':00Z",' +
+         '"rsi":' + str.tostring(rsi) + ',' +
+         '"adx":' + str.tostring(adx) + ',' +
+         '"er":' + str.tostring(er) + '}'
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// PYRAMID ENTRY (JSON)
+if pyramid_entry and show_alerts
+    alert_msg = '{"type":"PYRAMID",' +
+         '"position":"Long_' + str.tostring(pyramid_count + 2) + '",' +
+         '"price":' + str.tostring(close) + ',' +
+         '"lots":' + str.tostring(pyramid_size) + ',' +
+         '"atr_moves":' + str.tostring(atr_moves) + ',' +
+         '"last_entry":' + str.tostring(last_pyramid_price) + ',' +
+         '"total_pnl":' + str.tostring(unrealized_pnl) + ',' +
+         '"timestamp":"' + str.tostring(year) + '-' + str.tostring(month, '#00') + '-' +
+         str.tostring(dayofmonth, '#00') + 'T' + str.tostring(hour, '#00') + ':' +
+         str.tostring(minute, '#00') + ':00Z"}'
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// EXIT (JSON)
+if basso_exit_long1 and show_alerts
+    position_pnl = (close - base_entry_price) * initial_position_size * lot_size
+    alert_msg = '{"type":"EXIT",' +
+         '"position":"Long_1",' +
+         '"reason":"TOM_BASSO_STOP",' +
+         '"stop_price":' + str.tostring(basso_stop_long1) + ',' +
+         '"current_price":' + str.tostring(close) + ',' +
+         '"entry_price":' + str.tostring(base_entry_price) + ',' +
+         '"pnl":' + str.tostring(position_pnl) + ',' +
+         '"lots":' + str.tostring(initial_position_size) + ',' +
+         '"timestamp":"' + str.tostring(year) + '-' + str.tostring(month, '#00') + '-' +
+         str.tostring(dayofmonth, '#00') + 'T' + str.tostring(hour, '#00') + ':' +
+         str.tostring(minute, '#00') + ':00Z"}'
+    alert(alert_msg, alert.freq_once_per_bar_close)
+
+// Repeat JSON exit alerts for Long_2 through Long_6
+
+// ============================================================================
+// HELPER: Get Current Month Expiry (for Stoxxo symbol generation)
+// ============================================================================
+
+// Add this function to help calculate option expiry
+getCurrentMonthExpiry() =>
+    // Bank Nifty expires on last Wednesday of month
+    // This is a simplified version - adjust for actual expiry calculation
+    current_month = str.tostring(month, '#00')
+    current_year = str.tostring(year)
+    expiry_string = current_year + current_month + '30'  // Approximate
+    expiry_string
+
+// ============================================================================
+// USAGE NOTES
+// ============================================================================
+
+// 1. PHASE 1 (Manual Trading):
+//    - Use human-readable alert format (first section)
+//    - Configure TradingView alert with webhook to Telegram
+//    - Execute orders manually when you receive alert
+
+// 2. PHASE 2 (Automation):
+//    - Switch to JSON alert format (second section)
+//    - Point TradingView webhook to your Python server
+//    - Server parses JSON and executes via Stoxxo API
+
+// 3. TradingView Alert Configuration:
+//    - Condition: [Your script name] - Any alert() function call
+//    - Alert name: BN v6 - {{timenow}}
+//    - Message: {{strategy.order.alert_message}}
+//    - Webhook URL: Your Telegram/Python webhook
+//    - Frequency: Once Per Bar Close
+
+// 4. Testing:
+//    - Start with show_alerts = false
+//    - Set show_alerts = true only when ready
+//    - Test with Paper Trading first
+
+// ============================================================================
+// TROUBLESHOOTING
+// ============================================================================
+
+// Problem: Too many alerts
+// Solution: Check alert.freq_once_per_bar_close is used (not alert.freq_all)
+
+// Problem: Alert not firing
+// Solution: Verify conditions are being met, check if show_alerts = true
+
+// Problem: Alert message truncated
+// Solution: Keep message under 4000 characters (should be fine with above)
+
+// Problem: JSON parsing error in Phase 2
+// Solution: Validate JSON format at https://jsonlint.com/
+
+// ============================================================================
