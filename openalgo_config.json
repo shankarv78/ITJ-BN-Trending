@@ -1,0 +1,22 @@
+{
+  "openalgo_url": "http://localhost:5000",
+  "openalgo_api_key": "YOUR_API_KEY_HERE",
+  "broker": "zerodha",
+  "risk_percent": 1.5,
+  "margin_per_lot": 270000,
+  "max_pyramids": 5,
+  "bank_nifty_lot_size": 35,
+  "strike_interval": 100,
+  "execution_mode": "analyzer",
+  "enable_telegram": false,
+  "market_start_hour": 9,
+  "market_start_minute": 15,
+  "market_end_hour": 15,
+  "market_end_minute": 25,
+  "duplicate_window_seconds": 60,
+  "order_timeout_seconds": 30,
+  "enable_partial_fill_protection": true,
+  "use_monthly_expiry": true
+}
+
+
