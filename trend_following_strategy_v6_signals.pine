@@ -1,0 +1,317 @@
+//@version=5
+// ========================================
+// BANK NIFTY TREND FOLLOWING SIGNALS v6.0
+// ========================================
+// Version: v6.0 (Signal Generation Only)
+// Date: 2025-11-25
+// Purpose: Generate signals for OpenAlgo Python Bridge
+// ========================================
+
+indicator("Bank Nifty Trend Following Signals v6.0", overlay=true)
+
+// ========================================
+// HISTORICAL LOT SIZE FUNCTION
+// ========================================
+getBankNiftyLotSize(barTime) =>
+    var int lotSize = 25
+    t_launch = timestamp(2005, 6, 13, 0, 0)
+    t_feb2007 = timestamp(2007, 2, 23, 0, 0)
+    t_apr2010 = timestamp(2010, 4, 30, 0, 0)
+    t_aug2015 = timestamp(2015, 8, 28, 0, 0)
+    t_apr2016 = timestamp(2016, 4, 29, 0, 0)
+    t_oct2018 = timestamp(2018, 10, 26, 0, 0)
+    t_may2020 = timestamp(2020, 5, 4, 0, 0)
+    t_jul2023 = timestamp(2023, 7, 1, 0, 0)
+    t_nov2024 = timestamp(2024, 11, 20, 0, 0)
+    t_apr2025 = timestamp(2025, 4, 25, 0, 0)
+    t_dec2025 = timestamp(2025, 12, 31, 0, 0)
+
+    lotSize := barTime >= t_dec2025 ? 30 : 
+               barTime >= t_apr2025 ? 35 : 
+               barTime >= t_nov2024 ? 30 : 
+               barTime >= t_jul2023 ? 15 : 
+               barTime >= t_may2020 ? 25 : 
+               barTime >= t_oct2018 ? 20 : 
+               barTime >= t_apr2016 ? 40 : 
+               barTime >= t_aug2015 ? 30 : 
+               barTime >= t_apr2010 ? 25 : 
+               barTime >= t_feb2007 ? 50 : 
+               barTime >= t_launch  ? 100 : 25
+    lotSize
+
+// ========================================
+// PARAMETERS
+// ========================================
+rsi_period = input.int(6, "RSI Period", minval=1)
+rsi_threshold = input.float(70, "RSI Overbought", minval=0, maxval=100)
+ema_period = input.int(200, "EMA Period", minval=1)
+dc_period = input.int(20, "DC Period", minval=1)
+adx_period = input.int(30, "ADX Period", minval=1)
+adx_threshold = input.float(30, "ADX Threshold", minval=0)
+er_period = input.int(5, "ER Period", minval=1)
+er_directional = input.bool(false, "ER Directional")
+er_threshold = input.float(0.77, "ER Threshold", minval=0, maxval=1)
+roc_period = input.int(15, "ROC Period", minval=1)
+use_roc_for_pyramids = input.bool(true, "Use ROC Filter for Pyramids")
+roc_threshold = input.float(2.0, "ROC Threshold %", minval=-10, maxval=20, step=0.5)
+st_period = input.int(10, "ST Period", minval=1)
+st_multiplier = input.float(1.5, "ST Multiplier", minval=0.1, step=0.1)
+doji_threshold = input.float(0.1, "Doji Body/Range Ratio", minval=0.01, maxval=0.3, step=0.01)
+
+// Position Sizing & Risk
+use_historical_lot_size = input.bool(true, "Use Historical Lot Sizes")
+static_lot_size = input.int(35, "Static Lot Size", minval=1, maxval=100)
+risk_percent = input.float(1.5, "Risk % of Capital", minval=0.1, maxval=10, step=0.1)
+margin_per_lot = input.float(2.7, "Margin per Lot (Lakhs)", minval=0.1, step=0.1)
+initial_capital = input.float(5000000, "Initial Capital", minval=100000)
+
+// Pyramiding
+max_pyramids = input.int(5, "Max Pyramids", minval=1, maxval=5)
+atr_pyramid_threshold = input.float(0.5, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25)
+pyramid_size_ratio = input.float(0.5, "Pyramid Size Ratio", minval=0.25, maxval=1.0, step=0.05)
+
+// Stop Loss
+stop_loss_mode = input.string("Tom Basso", "Stop Loss Mode", options=["SuperTrend", "Van Tharp", "Tom Basso"])
+atr_period_pyramid = input.int(10, "ATR Period (Pyramiding)", minval=1)
+basso_initial_atr_mult = input.float(1.0, "Basso Initial Stop (× ATR)", minval=0.5, maxval=5.0, step=0.5)
+basso_trailing_atr_mult = input.float(2.0, "Basso Trailing Stop (× ATR)", minval=1.0, maxval=5.0, step=0.5)
+basso_atr_period = input.int(10, "Basso ATR Period", minval=5, maxval=50)
+
+// Date Filter
+use_start_date = input.bool(true, "Use Start Date Filter")
+start_date = input.time(timestamp("11 Nov 2025 00:00 +0000"), "Trade Start Date")
+
+// ========================================
+// CALCULATIONS
+// ========================================
+lot_size = use_historical_lot_size ? getBankNiftyLotSize(time) : static_lot_size
+rsi = ta.rsi(close, rsi_period)
+ema = ta.ema(close, ema_period)
+dc_upper = ta.highest(high[1], dc_period)
+dc_lower = ta.lowest(low[1], dc_period)
+[diPlus, diMinus, adx] = ta.dmi(adx_period, adx_period)
+
+ER(src, p, dir) =>
+    a = dir ? src - src[p] : math.abs(src - src[p])
+    b = 0.0
+    for i = 0 to p-1
+        b := b + math.abs(src[i] - src[i+1])
+    b != 0 ? a / b : 0
+
+er = ER(close, er_period, er_directional)
+[supertrend, direction] = ta.supertrend(st_multiplier, st_period)
+atr_pyramid = ta.atr(atr_period_pyramid)
+atr_basso = ta.atr(basso_atr_period)
+roc = ta.roc(close, roc_period)
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) <= doji_threshold : false
+is_eod_candle = hour(time) >= 14 and minute(time) >= 15
+
+// ========================================
+// CONDITIONS
+// ========================================
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+not_doji = not is_doji
+date_filter = use_start_date ? time >= start_date : true
+
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and not_doji and date_filter
+long_exit = close < supertrend
+
+// ========================================
+// VIRTUAL POSITION TRACKING
+// ========================================
+// Since this is an indicator, we must track positions manually
+var bool in_position = false
+var int pyramid_count = 0
+var float entry_price = na
+var float last_pyramid_price = na
+var float accumulated_profit = 0.0
+var float current_equity = initial_capital
+var float base_risk = 0.0
+var int initial_lots = 0
+
+// Track individual pyramid entries
+var float pyr1_entry = na, var float pyr2_entry = na, var float pyr3_entry = na, var float pyr4_entry = na, var float pyr5_entry = na
+
+// Tom Basso Stops
+var float stop_long1 = na, var float stop_long2 = na, var float stop_long3 = na
+var float stop_long4 = na, var float stop_long5 = na, var float stop_long6 = na
+var float high_long1 = na, var float high_long2 = na, var float high_long3 = na
+var float high_long4 = na, var float high_long5 = na, var float high_long6 = na
+
+// Helper to format timestamp for JSON
+timestamp_str = str.format("{0,date,yyyy-MM-dd}T{0,date,HH:mm:ss}Z", time)
+
+// ========================================
+// BASE ENTRY LOGIC
+// ========================================
+if long_entry and not in_position
+    in_position := true
+    entry_price := close
+    last_pyramid_price := close
+    pyramid_count := 0
+    
+    // Initialize Tom Basso Stop
+    stop_long1 := close - (basso_initial_atr_mult * atr_basso)
+    high_long1 := close
+    
+    // Calculate Suggested Lots (Python will recalculate, but good for reference)
+    risk_amount = current_equity * (risk_percent / 100)
+    risk_per_point = close - supertrend
+    risk_per_lot = risk_per_point * lot_size
+    risk_lots = risk_per_lot > 0 ? math.floor((risk_amount / risk_per_lot) * er) : 0
+    margin_lots = math.floor((current_equity/100000) / margin_per_lot) // Approx
+    suggested_lots = math.max(0, math.min(risk_lots, margin_lots))
+    
+    if suggested_lots >= 1
+        initial_lots := int(suggested_lots)
+        base_risk := (close - stop_long1) * initial_lots * lot_size
+        
+        // JSON Alert Payload
+        json_entry = '{"type":"BASE_ENTRY", "position":"Long_1", "price":' + str.tostring(close) + 
+                     ', "lots":' + str.tostring(suggested_lots) + 
+                     ', "stop":' + str.tostring(supertrend) + 
+                     ', "basso_stop":' + str.tostring(stop_long1) + 
+                     ', "atr":' + str.tostring(atr_basso) + 
+                     ', "er":' + str.tostring(er) + 
+                     ', "supertrend":' + str.tostring(supertrend) + 
+                     ', "roc":' + str.tostring(roc) + 
+                     ', "timestamp":"' + timestamp_str + '"}'
+        alert(json_entry, alert.freq_once_per_bar_close)
+
+// ========================================
+// PYRAMIDING LOGIC
+// ========================================
+if in_position and pyramid_count < max_pyramids
+    price_move = close - last_pyramid_price
+    atr_moves = price_move / atr_pyramid
+    roc_ok = use_roc_for_pyramids ? roc > roc_threshold : true
+    
+    // Profit Check (Simplified for indicator)
+    current_profit = (close - entry_price) * initial_lots * lot_size
+    gate_open = current_profit > base_risk
+    
+    if gate_open and atr_moves >= atr_pyramid_threshold and roc_ok
+        pyramid_count := pyramid_count + 1
+        last_pyramid_price := close
+        
+        // Determine position ID
+        pos_id = "Long_" + str.tostring(pyramid_count + 1)
+        pyr_lots = math.floor(initial_lots * math.pow(pyramid_size_ratio, pyramid_count))
+        
+        // Initialize Stop for new pyramid
+        new_stop = close - (basso_initial_atr_mult * atr_basso)
+        
+        if pyramid_count == 1
+            pyr1_entry := close
+            stop_long2 := new_stop
+            high_long2 := close
+        else if pyramid_count == 2
+            pyr2_entry := close
+            stop_long3 := new_stop
+            high_long3 := close
+        else if pyramid_count == 3
+            pyr3_entry := close
+            stop_long4 := new_stop
+            high_long4 := close
+        else if pyramid_count == 4
+            pyr4_entry := close
+            stop_long5 := new_stop
+            high_long5 := close
+        else if pyramid_count == 5
+            pyr5_entry := close
+            stop_long6 := new_stop
+            high_long6 := close
+            
+        json_pyr = '{"type":"PYRAMID", "position":"' + pos_id + 
+                   '", "price":' + str.tostring(close) + 
+                   ', "lots":' + str.tostring(pyr_lots) + 
+                   ', "stop":' + str.tostring(supertrend) + 
+                   ', "basso_stop":' + str.tostring(new_stop) + 
+                   ', "atr":' + str.tostring(atr_basso) + 
+                   ', "roc":' + str.tostring(roc) + 
+                   ', "timestamp":"' + timestamp_str + '"}'
+        alert(json_pyr, alert.freq_once_per_bar_close)
+
+// ========================================
+// EXIT LOGIC (Tom Basso Trailing)
+// ========================================
+if in_position
+    // Update Highs & Trailing Stops
+    high_long1 := math.max(nz(high_long1), close)
+    stop_long1 := math.max(nz(stop_long1), high_long1 - (basso_trailing_atr_mult * atr_basso))
+    
+    // Check Long_1 Exit
+    if not na(entry_price) and close < stop_long1
+        json_exit = '{"type":"EXIT", "position":"Long_1", "price":' + str.tostring(close) + 
+                    ', "reason":"Tom Basso Stop", "timestamp":"' + timestamp_str + '"}'
+        alert(json_exit, alert.freq_once_per_bar_close)
+        entry_price := na
+        stop_long1 := na
+        
+        // If base position closes, close all (simplified logic)
+        in_position := false
+        pyramid_count := 0
+        accumulated_profit := accumulated_profit + (close - entry_price) * initial_lots * lot_size
+    
+    // Check Pyramid Exits (Independent)
+    // Long_2
+    if not na(pyr1_entry)
+        high_long2 := math.max(nz(high_long2), close)
+        stop_long2 := math.max(nz(stop_long2), high_long2 - (basso_trailing_atr_mult * atr_basso))
+        if close < stop_long2
+            alert('{"type":"EXIT", "position":"Long_2", "price":' + str.tostring(close) + ', "timestamp":"' + timestamp_str + '"}', alert.freq_once_per_bar_close)
+            pyr1_entry := na
+            stop_long2 := na
+
+    // Long_3
+    if not na(pyr2_entry)
+        high_long3 := math.max(nz(high_long3), close)
+        stop_long3 := math.max(nz(stop_long3), high_long3 - (basso_trailing_atr_mult * atr_basso))
+        if close < stop_long3
+            alert('{"type":"EXIT", "position":"Long_3", "price":' + str.tostring(close) + ', "timestamp":"' + timestamp_str + '"}', alert.freq_once_per_bar_close)
+            pyr2_entry := na
+            stop_long3 := na
+
+    // Long_4
+    if not na(pyr3_entry)
+        high_long4 := math.max(nz(high_long4), close)
+        stop_long4 := math.max(nz(stop_long4), high_long4 - (basso_trailing_atr_mult * atr_basso))
+        if close < stop_long4
+            alert('{"type":"EXIT", "position":"Long_4", "price":' + str.tostring(close) + ', "timestamp":"' + timestamp_str + '"}', alert.freq_once_per_bar_close)
+            pyr3_entry := na
+            stop_long4 := na
+
+    // Long_5
+    if not na(pyr4_entry)
+        high_long5 := math.max(nz(high_long5), close)
+        stop_long5 := math.max(nz(stop_long5), high_long5 - (basso_trailing_atr_mult * atr_basso))
+        if close < stop_long5
+            alert('{"type":"EXIT", "position":"Long_5", "price":' + str.tostring(close) + ', "timestamp":"' + timestamp_str + '"}', alert.freq_once_per_bar_close)
+            pyr4_entry := na
+            stop_long5 := na
+
+    // Long_6
+    if not na(pyr5_entry)
+        high_long6 := math.max(nz(high_long6), close)
+        stop_long6 := math.max(nz(stop_long6), high_long6 - (basso_trailing_atr_mult * atr_basso))
+        if close < stop_long6
+            alert('{"type":"EXIT", "position":"Long_6", "price":' + str.tostring(close) + ', "timestamp":"' + timestamp_str + '"}', alert.freq_once_per_bar_close)
+            pyr5_entry := na
+            stop_long6 := na
+
+// ========================================
+// PLOTTING
+// ========================================
+plot(ema, "EMA 200", color=color.blue, linewidth=2)
+plot(supertrend, "SuperTrend", color=color.red)
+plotshape(long_entry and not in_position, "Entry", shape.arrowup, location.belowbar, color.green, size=size.small)
+plot(stop_long1, "Stop Long 1", color=color.orange, style=plot.style_cross)
+
+

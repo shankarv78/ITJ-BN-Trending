@@ -1,0 +1,18 @@
+{
+  "openalgo_url": "http://localhost:5000",
+  "api_key": "YOUR_OPENALGO_API_KEY",
+  "broker": "zerodha",
+  "execution_mode": "auto",
+  "risk_percent": 1.5,
+  "margin_per_lot": 270000,
+  "max_pyramids": 5,
+  "initial_capital": 5000000,
+  "bank_nifty_lot_size": 30,
+  "enable_telegram": true,
+  "symbol_format": {
+    "zerodha": "BANKNIFTY{YY}{MON_MMM}{DD}{STRIKE}{TYPE}",
+    "dhan": "BANKNIFTY {DD} {MMM} {STRIKE} {TYPE}"
+  }
+}
+
+
