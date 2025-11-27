@@ -315,3 +315,6 @@ plotshape(long_entry and not in_position, "Entry", shape.arrowup, location.below
 plot(stop_long1, "Stop Long 1", color=color.orange, style=plot.style_cross)
 
 
+
+
+

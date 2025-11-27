@@ -56,3 +56,6 @@ This guide enables automated execution of the Bank Nifty Trend Following strateg
 - **Partial Fill**: Check log for "EMERGENCY EXIT" and verify flat position in broker.
 
 
+
+
+

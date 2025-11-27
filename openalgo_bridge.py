@@ -34,6 +34,10 @@ RISK_PERCENT = CONFIG.get("risk_percent", 1.5)
 MARGIN_PER_LOT = CONFIG.get("margin_per_lot", 270000)
 MAX_PYRAMIDS = CONFIG.get("max_pyramids", 5)
 BN_LOT_SIZE = CONFIG.get("bank_nifty_lot_size", 30)
+ENABLE_TELEGRAM = CONFIG.get("enable_telegram", False)
+TRUST_SIGNAL_QUANTITY = CONFIG.get("trust_signal_quantity", False)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", CONFIG.get("telegram_bot_token", ""))
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", CONFIG.get("telegram_chat_id", ""))
 
 # Setup Logging
 logging.basicConfig(
@@ -85,6 +89,22 @@ def get_openalgo_headers():
         "Content-Type": "application/json",
         "X-API-KEY": API_KEY
     }
+
+def send_telegram_message(message):
+    """Send notification to Telegram"""
+    if not ENABLE_TELEGRAM or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        logger.error(f"Failed to send Telegram message: {e}")
 
 def is_market_open():
     """Check if current time is within NSE F&O hours (9:15 - 15:30 IST)"""
@@ -223,12 +243,14 @@ def execute_synthetic_entry(position_id, atm_strike, quantity, signal_price):
     ce_symbol = format_symbol(expiry, atm_strike, "CE")
     
     logger.info(f"Executing Synthetic Entry for {position_id}: {quantity} qty @ {atm_strike}")
+    send_telegram_message(f"🚀 *ENTRY SIGNAL* ({position_id})\nStrike: {atm_strike}\nQty: {quantity}")
     
     # 1. Place PE Order (SELL) - Leg 1
     pe_res = place_order(pe_symbol, "SELL", quantity, f"{position_id}_ENTRY_PE")
     
     if pe_res.get("status") != "success":
         logger.error(f"PE Order Failed! Aborting CE order. Reason: {pe_res.get('message')}")
+        send_telegram_message(f"❌ *ENTRY FAILED* ({position_id})\nPE Order Rejected: {pe_res.get('message')}")
         return False
     
     pe_order_id = pe_res.get("order_id")
@@ -243,12 +265,14 @@ def execute_synthetic_entry(position_id, atm_strike, quantity, signal_price):
     
     if ce_res.get("status") != "success":
         logger.critical(f"CE Order Failed! NAKED PE EXPOSURE! Attempting Emergency Exit of PE...")
+        send_telegram_message(f"🚨 *CRITICAL ERROR* ({position_id})\nCE Failed! Naked PE Exposure! Exiting PE...")
         # EMERGENCY: Buy back PE immediately
         place_order(pe_symbol, "BUY", quantity, f"{position_id}_EMERGENCY_EXIT")
         return False
         
     ce_order_id = ce_res.get("order_id")
     logger.info(f"CE Order Placed: {ce_order_id}. Synthetic Position Open.")
+    send_telegram_message(f"✅ *POSITION OPEN* ({position_id})\nSynth Long @ {atm_strike}")
     
     # 4. Update State
     with state_lock:
@@ -285,6 +309,7 @@ def execute_synthetic_exit(position_id):
     quantity = pos["quantity"]
     
     logger.info(f"Executing Exit for {position_id}: {quantity} qty")
+    send_telegram_message(f"🔻 *EXIT SIGNAL* ({position_id})\nClosing {quantity} qty")
     
     # 1. Buy Back PE (Cover Short)
     pe_res = place_order(pe_symbol, "BUY", quantity, f"{position_id}_EXIT_PE")
@@ -297,9 +322,11 @@ def execute_synthetic_exit(position_id):
             position_state[position_id]["status"] = "closed"
             position_state[position_id]["exit_timestamp"] = datetime.now().isoformat()
             save_state()
+        send_telegram_message(f"✅ *POSITION CLOSED* ({position_id})")
         return True
     else:
         logger.error("Partial exit failure! Check broker terminal.")
+        send_telegram_message(f"⚠️ *PARTIAL EXIT FAILURE* ({position_id})\nCheck Broker Terminal!")
         return False
 
 # ==============================================================================
@@ -317,13 +344,15 @@ def webhook():
     signal_type = data.get("type")
     position_id = data.get("position")
     price = float(data.get("price", 0))
+    signal_lots = int(data.get("lots", 0))
     
-    # Calculate Quantity based on Config, not Signal (Safety)
-    # Using simple logic: 1 lot for now, logic needs to be expanded
-    quantity = BN_LOT_SIZE # Default 1 lot
-    
-    # TODO: Implement Dynamic Position Sizing here (Triple Constraint)
-    # For now, using minimal sizing for safety
+    # Quantity Logic
+    if TRUST_SIGNAL_QUANTITY and signal_lots > 0:
+        quantity = signal_lots * BN_LOT_SIZE
+        logger.info(f"Using Signal Quantity: {signal_lots} lots ({quantity} qty)")
+    else:
+        quantity = BN_LOT_SIZE # Default 1 lot
+        logger.info(f"Using Default Quantity: {quantity} qty (Safety Mode)")
     
     if signal_type == "BASE_ENTRY":
         atm = get_atm_strike(price)
@@ -348,5 +377,6 @@ def health():
 if __name__ == '__main__':
     print("🚀 OpenAlgo Bridge Started on Port 5001")
     app.run(host='0.0.0.0', port=5001)
+
 
 

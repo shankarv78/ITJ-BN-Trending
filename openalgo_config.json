@@ -8,11 +8,15 @@
   "max_pyramids": 5,
   "initial_capital": 5000000,
   "bank_nifty_lot_size": 30,
-  "enable_telegram": true,
+  "enable_telegram": false,
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "trust_signal_quantity": false,
   "symbol_format": {
     "zerodha": "BANKNIFTY{YY}{MON_MMM}{DD}{STRIKE}{TYPE}",
     "dhan": "BANKNIFTY {DD} {MMM} {STRIKE} {TYPE}"
   }
 }
+
 
 
