@@ -39,10 +39,28 @@ Portfolio Manager
 
 ## Installation
 
+### 1. Install Python Dependencies
+
 ```bash
 cd portfolio_manager
 pip install -r requirements.txt
 ```
+
+### 2. Database Setup (Optional - for HA/Persistence)
+
+For state persistence and high availability, PostgreSQL is required:
+
+```bash
+# Install PostgreSQL (see DATABASE_SETUP.md for details)
+# Then run migrations:
+psql -U pm_user -d portfolio_manager -f migrations/001_initial_schema.sql
+
+# Create database config:
+cp database_config.json.example database_config.json
+# Edit database_config.json with your database credentials
+```
+
+See [DATABASE_SETUP.md](DATABASE_SETUP.md) for detailed setup instructions.
 
 ## Testing
 
@@ -87,12 +105,28 @@ python portfolio_manager.py backtest \
 
 ### Live Trading Mode
 
+**Without Database (In-Memory Only):**
 ```bash
 python portfolio_manager.py live \
   --broker zerodha \
   --api-key YOUR_OPENALGO_API_KEY \
   --capital 5000000
 ```
+
+**With Database Persistence (Recommended for Production):**
+```bash
+python portfolio_manager.py live \
+  --broker zerodha \
+  --api-key YOUR_OPENALGO_API_KEY \
+  --capital 5000000 \
+  --db-config database_config.json \
+  --db-env local
+```
+
+**Database Configuration:**
+- `--db-config`: Path to database configuration JSON file
+- `--db-env`: Environment to use (`local` or `production`)
+- See [DATABASE_SETUP.md](DATABASE_SETUP.md) for setup instructions
 
 #### Webhook Setup (TradingView Integration)
 
