@@ -204,6 +204,7 @@ def run_live(args):
     from flask import Flask, request, jsonify
     from core.webhook_parser import DuplicateDetector, validate_json_structure, parse_webhook_signal
     from core.models import Signal
+    import json
 
     logger.info("=" * 60)
     logger.info("TOM BASSO PORTFOLIO - LIVE TRADING")
@@ -212,6 +213,31 @@ def run_live(args):
     logger.info(f"Mode: LIVE")
     logger.info(f"Auto Rollover: {'Enabled' if not args.disable_rollover else 'Disabled'}")
     logger.info("=" * 60)
+
+    # Initialize database manager if config provided
+    db_manager = None
+    if args.db_config:
+        try:
+            from core.db_state_manager import DatabaseStateManager
+            
+            with open(args.db_config, 'r') as f:
+                db_config = json.load(f)
+            
+            # Use 'local' or 'production' environment
+            env = getattr(args, 'db_env', 'local')
+            connection_config = db_config.get(env, db_config.get('local', {}))
+            
+            if connection_config:
+                db_manager = DatabaseStateManager(connection_config)
+                logger.info(f"Database persistence enabled ({env} environment)")
+            else:
+                logger.warning(f"Database config not found for environment '{env}', continuing without persistence")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            logger.warning("Continuing without database persistence")
+            db_manager = None
+    else:
+        logger.info("Database persistence disabled (no --db-config provided)")
 
     # Initialize OpenAlgo client (mock for now, replace with real client)
     class MockOpenAlgoClient:
@@ -236,10 +262,11 @@ def run_live(args):
 
     openalgo = MockOpenAlgoClient()
 
-    # Initialize live engine
+    # Initialize live engine with database manager
     engine = LiveTradingEngine(
         initial_capital=args.capital,
-        openalgo_client=openalgo
+        openalgo_client=openalgo,
+        db_manager=db_manager
     )
 
     # Initialize duplicate detector for webhook signals
@@ -467,6 +494,40 @@ def run_live(args):
             }
         }), 200
 
+    @app.route('/db/status', methods=['GET'])
+    def db_status():
+        """Get database connection status"""
+        if not db_manager:
+            return jsonify({
+                'status': 'disabled',
+                'message': 'Database persistence not configured'
+            }), 200
+        
+        try:
+            # Test connection
+            with db_manager.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            
+            # Get basic stats
+            portfolio_state = db_manager.get_portfolio_state()
+            open_positions = db_manager.get_all_open_positions()
+            
+            return jsonify({
+                'status': 'connected',
+                'connection': 'healthy',
+                'open_positions': len(open_positions),
+                'closed_equity': portfolio_state.get('closed_equity') if portfolio_state else None
+            }), 200
+        except Exception as e:
+            logger.error(f"Database status check failed: {e}")
+            return jsonify({
+                'status': 'error',
+                'connection': 'unhealthy',
+                'error': str(e)
+            }), 503
+
     @app.route('/status', methods=['GET'])
     def status():
         """Get current portfolio status"""
@@ -603,6 +664,11 @@ def main():
                             help='Initial capital')
     live_parser.add_argument('--disable-rollover', action='store_true',
                             help='Disable automatic rollover scheduler')
+    live_parser.add_argument('--db-config', type=str,
+                            help='Path to database config JSON file')
+    live_parser.add_argument('--db-env', type=str, default='local',
+                            choices=['local', 'production'],
+                            help='Database environment (local or production)')
     
     args = parser.parse_args()
     

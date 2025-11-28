@@ -1,0 +1,21 @@
+{
+  "local": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "portfolio_manager",
+    "user": "pm_user",
+    "password": "your_password_here",
+    "minconn": 2,
+    "maxconn": 10
+  },
+  "production": {
+    "host": "your-production-db-host",
+    "port": 5432,
+    "database": "portfolio_manager_prod",
+    "user": "pm_prod_user",
+    "password": "${DB_PASSWORD}",
+    "minconn": 5,
+    "maxconn": 20
+  }
+}
+

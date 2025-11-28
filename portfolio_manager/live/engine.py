@@ -28,7 +28,8 @@ class LiveTradingEngine:
         self, 
         initial_capital: float,
         openalgo_client,  # OpenAlgo client instance
-        config: PortfolioConfig = None
+        config: PortfolioConfig = None,
+        db_manager = None  # Optional DatabaseStateManager for persistence
     ):
         """
         Initialize live trading engine
@@ -37,9 +38,13 @@ class LiveTradingEngine:
             initial_capital: Starting capital (or current equity)
             openalgo_client: OpenAlgo API client
             config: Portfolio configuration
+            db_manager: Optional DatabaseStateManager for persistence
         """
         self.config = config or PortfolioConfig()
-        self.portfolio = PortfolioStateManager(initial_capital, self.config)
+        self.db_manager = db_manager
+        
+        # Initialize portfolio with database manager
+        self.portfolio = PortfolioStateManager(initial_capital, self.config, db_manager)
         self.stop_manager = TomBassoStopManager()
         self.pyramid_controller = PyramidGateController(self.portfolio, self.config)
         self.openalgo = openalgo_client
@@ -54,9 +59,29 @@ class LiveTradingEngine:
             )
         }
         
-        # Track for pyramiding (SAME as backtest)
-        self.last_pyramid_price = {}
-        self.base_positions = {}
+        # Load state from database if available
+        if self.db_manager:
+            # Load all open positions
+            self.portfolio.positions = self.db_manager.get_all_open_positions()
+            logger.info(f"Loaded {len(self.portfolio.positions)} open positions from database")
+            
+            # Load pyramiding state
+            pyr_state = self.db_manager.get_pyramiding_state()
+            for instrument, state in pyr_state.items():
+                self.last_pyramid_price[instrument] = float(state.get('last_pyramid_price', 0.0))
+                base_pos_id = state.get('base_position_id')
+                if base_pos_id:
+                    base_pos = self.portfolio.positions.get(base_pos_id)
+                    if base_pos:
+                        self.base_positions[instrument] = base_pos
+                    else:
+                        logger.warning(f"Base position {base_pos_id} not found in loaded positions")
+            
+            logger.info(f"Loaded pyramiding state for {len(pyr_state)} instruments")
+        else:
+            # Track for pyramiding (SAME as backtest)
+            self.last_pyramid_price = {}
+            self.base_positions = {}
         
         # Statistics
         self.stats = {
@@ -178,6 +203,7 @@ class LiveTradingEngine:
                 current_stop=initial_stop,
                 highest_close=signal.price,
                 limiter=constraints.limiter,
+                is_base_position=True,  # Mark as base position
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
                 **{k: v for k, v in execution_result.get('order_details', {}).items() 
@@ -185,8 +211,17 @@ class LiveTradingEngine:
             )
             
             self.portfolio.add_position(position)
-            self.last_pyramid_price[instrument] = signal.price
             self.base_positions[instrument] = position
+            self.last_pyramid_price[instrument] = signal.price
+            
+            # Persist to database
+            if self.db_manager:
+                self.db_manager.save_position(position)
+                self.db_manager.save_pyramiding_state(
+                    instrument, signal.price, position.position_id
+                )
+                logger.debug(f"Position and pyramiding state saved to database")
+            
             self.stats['entries_executed'] += 1
             
             logger.info(f"✓ [LIVE] Entry executed: {constraints.final_lots} lots")
@@ -301,6 +336,7 @@ class LiveTradingEngine:
                 initial_stop=initial_stop,
                 current_stop=initial_stop,
                 highest_close=signal.price,
+                is_base_position=False,  # Mark as pyramid position
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
                 **{k: v for k, v in execution_result.get('order_details', {}).items() 
@@ -309,6 +345,16 @@ class LiveTradingEngine:
             
             self.portfolio.add_position(position)
             self.last_pyramid_price[instrument] = signal.price
+            
+            # Persist to database
+            if self.db_manager:
+                self.db_manager.save_position(position)
+                base_pos_id = self.base_positions[instrument].position_id if instrument in self.base_positions else None
+                self.db_manager.save_pyramiding_state(
+                    instrument, signal.price, base_pos_id
+                )
+                logger.debug(f"Pyramid position and state saved to database")
+            
             self.stats['pyramids_executed'] += 1
             
             return {'status': 'executed', 'lots': lots}
@@ -329,6 +375,25 @@ class LiveTradingEngine:
         if execution_result['status'] == 'success':
             # Close position (SAME as backtest)
             pnl = self.portfolio.close_position(position_id, signal.price, signal.timestamp)
+            
+            # Persist closed position to database
+            if self.db_manager:
+                position = self.portfolio.positions.get(position_id)
+                if position:
+                    self.db_manager.save_position(position)  # Save with status='closed'
+                    logger.debug(f"Closed position saved to database")
+                
+                # Update pyramiding state if base position was closed
+                if position and position.is_base_position:
+                    # Clear base position reference
+                    self.db_manager.save_pyramiding_state(
+                        position.instrument, 
+                        self.last_pyramid_price.get(position.instrument, 0.0),
+                        None  # Clear base_position_id
+                    )
+                    if position.instrument in self.base_positions:
+                        del self.base_positions[position.instrument]
+            
             self.stats['exits_executed'] += 1
             
             return {'status': 'executed', 'pnl': pnl}

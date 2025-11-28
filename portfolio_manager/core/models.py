@@ -203,6 +203,7 @@ class Position:
     risk_contribution: float = 0.0  # % of portfolio equity
     vol_contribution: float = 0.0  # % of portfolio equity
     limiter: Optional[str] = None  # What constraint limited size
+    is_base_position: bool = False  # TRUE for base entry, FALSE for pyramids
     
     def calculate_risk(self, point_value: float) -> float:
         """

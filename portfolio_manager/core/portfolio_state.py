@@ -8,7 +8,7 @@ Tracks all positions, calculates portfolio-level metrics:
 - Equity calculations (closed, open, blended)
 """
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 from core.models import Position, PortfolioState, InstrumentType
 from core.config import PortfolioConfig, get_instrument_config
@@ -18,22 +18,36 @@ logger = logging.getLogger(__name__)
 class PortfolioStateManager:
     """Manages portfolio state and calculates metrics"""
     
-    def __init__(self, initial_capital: float, portfolio_config: PortfolioConfig = None):
+    def __init__(self, initial_capital: float, portfolio_config: PortfolioConfig = None,
+                 db_manager = None):
         """
         Initialize portfolio state manager
         
         Args:
             initial_capital: Starting capital in Rs
             portfolio_config: Portfolio configuration
+            db_manager: Optional DatabaseStateManager for persistence
         """
         self.initial_capital = initial_capital
         self.config = portfolio_config or PortfolioConfig()
+        self.db_manager = db_manager
+        
+        # Load closed_equity from database if available
+        if self.db_manager:
+            db_state = self.db_manager.get_portfolio_state()
+            if db_state:
+                self.closed_equity = float(db_state['closed_equity'])
+                logger.info(f"Loaded closed_equity from database: ₹{self.closed_equity:,.0f}")
+            else:
+                self.closed_equity = initial_capital
+                logger.info("No portfolio state in database, using initial_capital")
+        else:
+            self.closed_equity = initial_capital
         
         # Current state
-        self.closed_equity = initial_capital
         self.positions: Dict[str, Position] = {}
         
-        logger.info(f"Portfolio initialized: Capital=₹{initial_capital:,.0f}")
+        logger.info(f"Portfolio initialized: Capital=₹{initial_capital:,.0f}, Closed Equity=₹{self.closed_equity:,.0f}")
     
     def get_current_state(self, current_time: datetime = None) -> PortfolioState:
         """
@@ -193,6 +207,12 @@ class PortfolioStateManager:
         
         # Update closed equity
         self.closed_equity += pnl
+        
+        # Save portfolio state to database if db_manager available
+        if self.db_manager:
+            state = self.get_current_state(exit_time)
+            self.db_manager.save_portfolio_state(state, self.initial_capital)
+            logger.debug(f"Portfolio state saved to database")
         
         logger.info(f"Position closed: {position_id}, P&L=₹{pnl:,.0f}, "
                    f"New closed equity=₹{self.closed_equity:,.0f}")
