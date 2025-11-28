@@ -30,6 +30,13 @@
 //    - Ready for automated webhook processing
 //    - All fields validated and required for Tom Basso position sizing
 //
+// 4. ✨ 1R-BASED PYRAMID GATE (Optional)
+//    - Added "Use 1R Pyramid Gate" toggle (default: false)
+//    - When enabled: Gate based on price movement (1R) - capital-independent
+//    - When disabled: Gate based on accumulated profit - capital-dependent (original behavior)
+//    - Ensures same trend = same entries regardless of account size when enabled
+//    - Note: 1R concept from Van Tharp, ATR stops from Tom Basso
+//
 // ========================================
 // Inherited from v6.0:
 // ========================================
@@ -140,13 +147,13 @@ adx_period = input.int(30, "ADX Period", minval=1)
 adx_threshold = input.float(30, "ADX Threshold", minval=0, tooltip="✨ v5: 30 (more selective, conservative entries)")
 
 // Efficiency Ratio Parameters (as per provided code)
-er_period = input.int(5, "ER Period", minval=1, tooltip="✨ v5: 5 (smoother ER calculation)")
+er_period = input.int(3, "ER Period", minval=1, tooltip="✨ v7.0: 3 (faster ER calculation, v6.0 validated)")
 er_directional = input.bool(false, "ER Directional")
-er_threshold = input.float(0.77, "ER Threshold", minval=0, maxval=1, tooltip="✨ v5: 0.77 (slightly relaxed from 0.8)")
+er_threshold = input.float(0.8, "ER Threshold", minval=0, maxval=1, tooltip="✨ v7.0: 0.8 (stricter efficiency filter, v6.0 validated)")
 
 // ROC (Rate of Change) Parameters
 roc_period = input.int(15, "ROC Period", minval=1, tooltip="Rate of Change lookback period")
-use_roc_for_pyramids = input.bool(true, "Use ROC Filter for Pyramids", tooltip="✨ v4: Enable ROC momentum check before pyramiding (Gold-inspired quality control)")
+use_roc_for_pyramids = input.bool(false, "Use ROC Filter for Pyramids", tooltip="✨ v7.0: Disabled (unrestricted pyramiding, ATR-gated only, v6.0 validated)")
 roc_threshold = input.float(2.0, "ROC Threshold %", minval=-10, maxval=20, step=0.5, tooltip="✨ v5: 2% (allows more pyramids than v4's 3%)")
 
 // SuperTrend Parameters
@@ -196,8 +203,9 @@ leverage_multiplier = input.float(1.0, "Leverage Multiplier", minval=0.1, maxval
 // Pyramiding Parameters
 enable_pyramiding = input.bool(true, "Enable Pyramiding", tooltip="Allow adding to winning positions")
 max_pyramids = input.int(5, "Max Pyramids", minval=1, maxval=5, tooltip="✨ v5: Maximum number of pyramid entries (5 = 6 total positions)")
-atr_pyramid_threshold = input.float(0.5, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25, tooltip="✨ v5: 0.5 (tighter pyramiding than v4's 0.75)")
+atr_pyramid_threshold = input.float(0.75, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25, tooltip="✨ v7.0: 0.75 (wider pyramid spacing, v6.0 validated)")
 pyramid_size_ratio = input.float(0.5, "Pyramid Size Ratio", minval=0.25, maxval=1.0, step=0.05, tooltip="Size of each pyramid as ratio of previous entry (0.5 = 50%)")
+use_1r_gate = input.bool(true, "Use 1R Pyramid Gate", tooltip="✨ v7.0: Require price to move > 1R from entry before pyramiding. If disabled, uses profit-based gate (accumulated_profit > base_risk).")
 
 // Stop Loss Management
 stop_loss_mode = input.string("Tom Basso", "Stop Loss Mode", options=["SuperTrend", "Van Tharp", "Tom Basso"], tooltip="✨ v4: Tom Basso default (independent trailing stops, Gold learning) | SuperTrend: All entries use ST as SL | Van Tharp: Trail previous entries to breakeven")
@@ -324,6 +332,7 @@ long_exit = close < supertrend
 
 var float equity_high = strategy.initial_capital  // Track highest equity reached
 var float initial_entry_price = na  // First entry price (Long_1)
+var float initial_stop_price = na   // v7.0: Initial stop at entry (for 1R calculation)
 var float pyr1_entry_price = na  // Pyramid 1 entry price (Long_2)
 var float pyr2_entry_price = na  // Pyramid 2 entry price (Long_3)
 var float pyr3_entry_price = na  // Pyramid 3 entry price (Long_4)
@@ -458,6 +467,12 @@ if long_entry and strategy.position_size == 0
             basso_stop_long1 := close - (basso_initial_atr_mult * atr_basso)
             highest_close_long1 := close
 
+        // v7.0: Store initial stop for 1R calculation (capital-independent gate)
+        if stop_loss_mode == "Tom Basso"
+            initial_stop_price := close - (basso_initial_atr_mult * atr_basso)
+        else
+            initial_stop_price := supertrend
+
         // Enter with calculated lot size
         // Add EOD marker to comment for gap-up tracking
         entry_comment = is_eod_candle ? "EOD-ENTRY-" + str.tostring(final_lots) + "L" : "ENTRY-" + str.tostring(final_lots) + "L"
@@ -469,6 +484,11 @@ float lot_b = 0.0
 float lot_c = 0.0
 float pyramid_lots = 0.0
 
+// v7.0: Calculate price-based pyramid gate values (for display and logic)
+float initial_risk_points = not na(initial_entry_price) and not na(initial_stop_price) ? initial_entry_price - initial_stop_price : 0.0
+float price_move_from_entry = not na(initial_entry_price) ? close - initial_entry_price : 0.0
+float price_move_in_r = initial_risk_points > 0 ? price_move_from_entry / initial_risk_points : 0.0
+
 // PYRAMIDING: V2 Triple-Constraint System (✨ v5: Extended to 5 pyramids)
 // Only pyramid when meaningful profit exists beyond base risk coverage
 if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyramids
@@ -477,11 +497,12 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
     atr_moves = price_move_from_last / atr_pyramid
 
     // ========================================
-    // V2 PYRAMID GATE CHECK
+    // V2 PYRAMID GATE CHECK (v7.0: 1R-based or profit-based)
     // ========================================
-    // Gate: Accumulated profit must exceed base trade risk
-    // This ensures we only pyramid when we have "house money" beyond covering base risk
-    pyramid_gate_open = accumulated_profit > base_risk
+    // v7.0: Pyramid gate - 1R-based (capital-independent) or profit-based (capital-dependent)
+    // When use_1r_gate = true: Gate based on price movement (1R) - capital-independent
+    // When use_1r_gate = false: Gate based on accumulated profit - capital-dependent (original behavior)
+    bool pyramid_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_points) : (accumulated_profit > base_risk)
 
     // Calculate profit after base risk coverage (for lot-c calculation)
     profit_after_base_risk = accumulated_profit - base_risk
@@ -576,6 +597,7 @@ if strategy.position_size > 0
             strategy.close_all(comment="EXIT - Below ST")
             // Reset tracking
             initial_entry_price := na
+            initial_stop_price := na  // v7.0
             pyr1_entry_price := na
             pyr2_entry_price := na
             pyr3_entry_price := na
@@ -667,6 +689,7 @@ if strategy.position_size > 0
         // If all positions closed, reset everything
         if strategy.position_size == 0
             initial_entry_price := na
+            initial_stop_price := na  // v7.0
             pyr1_entry_price := na
             pyr2_entry_price := na
             pyr3_entry_price := na
@@ -763,6 +786,7 @@ if strategy.position_size > 0
 
         // If all positions closed, reset
         if strategy.position_size == 0
+            initial_stop_price := na  // v7.0
             last_pyramid_price := na
             pyramid_count := 0
             initial_position_size := 0
@@ -978,29 +1002,48 @@ if barstate.islast
         table.cell(infoTable, 2, row, str.tostring(pyramid_count) + "/" + str.tostring(max_pyramids) + " Pyrs", bgcolor=color.new(color.blue, 80))
         row := row + 1
 
-        // V2: PYRAMID GATE SECTION
-        gate_color = accumulated_profit > base_risk ? color.green : color.red
-        gate_status = accumulated_profit > base_risk ? "✓ OPEN" : "✗ BLOCKED"
+        // v7.0: PYRAMID GATE SECTION (1R-based or profit-based)
+        gate_color = pyramid_gate_open ? color.green : color.red
+        gate_status = pyramid_gate_open ? "✓ OPEN" : "✗ BLOCKED"
+        gate_label = use_1r_gate ? "v7.0: Price > 1R" : "Profit > Risk"
         table.cell(infoTable, 0, row, "Pyramid Gate", bgcolor=color.new(gate_color, 80))
         table.cell(infoTable, 1, row, gate_status, bgcolor=color.new(gate_color, 80))
-        table.cell(infoTable, 2, row, "Profit > Risk", bgcolor=color.new(gate_color, 80))
+        table.cell(infoTable, 2, row, gate_label, bgcolor=color.new(gate_color, 80))
         row := row + 1
 
-        table.cell(infoTable, 0, row, "Base Risk", bgcolor=color.new(color.orange, 80))
-        table.cell(infoTable, 1, row, "₹" + str.tostring(base_risk/100000, "#.##") + "L", bgcolor=color.new(color.orange, 80))
-        table.cell(infoTable, 2, row, "Long_1 Risk", bgcolor=color.new(color.orange, 80))
-        row := row + 1
+        // Show 1R calculation details (only if 1R gate is enabled)
+        if use_1r_gate
+            table.cell(infoTable, 0, row, "1R (Initial Risk)", bgcolor=color.new(color.orange, 80))
+            table.cell(infoTable, 1, row, str.tostring(initial_risk_points, "#.##") + " pts", bgcolor=color.new(color.orange, 80))
+            table.cell(infoTable, 2, row, "Entry - Stop", bgcolor=color.new(color.orange, 80))
+            row := row + 1
 
-        table.cell(infoTable, 0, row, "Accum Profit", bgcolor=color.new(color.blue, 80))
-        table.cell(infoTable, 1, row, "₹" + str.tostring(accumulated_profit/100000, "#.##") + "L", bgcolor=color.new(color.blue, 80))
-        table.cell(infoTable, 2, row, "R+U Profit", bgcolor=color.new(color.blue, 80))
-        row := row + 1
+            table.cell(infoTable, 0, row, "Price Move", bgcolor=color.new(color.blue, 80))
+            table.cell(infoTable, 1, row, str.tostring(price_move_from_entry, "#.##") + " pts", bgcolor=color.new(color.blue, 80))
+            table.cell(infoTable, 2, row, str.tostring(price_move_in_r, "#.##") + "R", bgcolor=color.new(color.blue, 80))
+            row := row + 1
 
-        profit_after_risk_display = accumulated_profit - base_risk
-        table.cell(infoTable, 0, row, "Profit-Risk", bgcolor=color.new(color.purple, 80))
-        table.cell(infoTable, 1, row, "₹" + str.tostring(profit_after_risk_display/100000, "#.##") + "L", bgcolor=color.new(color.purple, 80))
-        table.cell(infoTable, 2, row, "Available", bgcolor=color.new(color.purple, 80))
-        row := row + 1
+            table.cell(infoTable, 0, row, "Initial Stop", bgcolor=color.new(color.purple, 80))
+            table.cell(infoTable, 1, row, str.tostring(initial_stop_price, "#.##"), bgcolor=color.new(color.purple, 80))
+            table.cell(infoTable, 2, row, "At Entry", bgcolor=color.new(color.purple, 80))
+            row := row + 1
+        else
+            // Show profit-based gate details when 1R gate is disabled
+            table.cell(infoTable, 0, row, "Base Risk", bgcolor=color.new(color.orange, 80))
+            table.cell(infoTable, 1, row, "₹" + str.tostring(base_risk/100000, "#.##") + "L", bgcolor=color.new(color.orange, 80))
+            table.cell(infoTable, 2, row, "Long_1 Risk", bgcolor=color.new(color.orange, 80))
+            row := row + 1
+
+            table.cell(infoTable, 0, row, "Accum Profit", bgcolor=color.new(color.blue, 80))
+            table.cell(infoTable, 1, row, "₹" + str.tostring(accumulated_profit/100000, "#.##") + "L", bgcolor=color.new(color.blue, 80))
+            table.cell(infoTable, 2, row, "R+U Profit", bgcolor=color.new(color.blue, 80))
+            row := row + 1
+
+            profit_after_risk_display = accumulated_profit - base_risk
+            table.cell(infoTable, 0, row, "Profit-Risk", bgcolor=color.new(color.purple, 80))
+            table.cell(infoTable, 1, row, "₹" + str.tostring(profit_after_risk_display/100000, "#.##") + "L", bgcolor=color.new(color.purple, 80))
+            table.cell(infoTable, 2, row, "Available", bgcolor=color.new(color.purple, 80))
+            row := row + 1
 
         // V2: LOT BREAKDOWN SECTION (when gate is evaluated)
         if enable_pyramiding and pyramid_count < max_pyramids
@@ -1163,7 +1206,8 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
     // Re-evaluate trigger for alert generation
     alert_price_move = close - last_pyramid_price
     alert_atr_moves = alert_price_move / atr_pyramid
-    alert_gate_open = accumulated_profit > base_risk
+    // v7.0: Use same gate logic as strategy execution (respects use_1r_gate toggle)
+    alert_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_points) : (accumulated_profit > base_risk)
     alert_roc_ok = use_roc_for_pyramids ? roc > roc_threshold : true
     
     alert_profit_after_risk = accumulated_profit - base_risk
@@ -1187,6 +1231,8 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
     alert_trigger = alert_gate_open and alert_atr_moves >= atr_pyramid_threshold and alert_roc_ok and alert_pyr_lots >= 1
     
     if alert_trigger
+        // Note: pyramid_count hasn't been incremented yet, so use +2 to get correct position number
+        // pyramid_count=0 → Long_2, pyramid_count=1 → Long_3, etc.
         json_pyramid = '{"type":"PYRAMID", "instrument":"BANK_NIFTY", "position":"Long_' + str.tostring(pyramid_count + 2) + '", "price":' + str.tostring(close) + ', "stop":' + str.tostring(alert_pyr_stop) + ', "lots":' + str.tostring(alert_pyr_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
         alert(json_pyramid, alert.freq_once_per_bar_close)
 
@@ -1194,7 +1240,9 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
 
 // SuperTrend Exit
 if strategy.position_size > 0 and stop_loss_mode == 'SuperTrend' and close < supertrend
-    json_exit = '{"type":"EXIT", "instrument":"BANK_NIFTY", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(supertrend) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(strategy.position_size) + ', "reason":"SuperTrend", "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+    // Capture position size before closing
+    exit_lots = strategy.position_size
+    json_exit = '{"type":"EXIT", "instrument":"BANK_NIFTY", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(supertrend) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(exit_lots) + ', "reason":"SuperTrend", "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
     alert(json_exit, alert.freq_once_per_bar_close)
 
 // Van Tharp / Tom Basso Exits (Individual)

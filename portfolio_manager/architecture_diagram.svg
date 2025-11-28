@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1100" width="900" height="1100">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="tvGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+    <linearGradient id="coreGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4facfe"/>
+      <stop offset="100%" style="stop-color:#00f2fe"/>
+    </linearGradient>
+    <linearGradient id="liveGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#43e97b"/>
+      <stop offset="100%" style="stop-color:#38f9d7"/>
+    </linearGradient>
+    <linearGradient id="backtestGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#bdc3c7"/>
+      <stop offset="100%" style="stop-color:#95a5a6"/>
+    </linearGradient>
+
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+
+    <!-- Shadow filter -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="1100" fill="#f8fafc"/>
+
+  <!-- Title -->
+  <text x="450" y="40" font-family="Arial, sans-serif" font-size="24" font-weight="bold" text-anchor="middle" fill="#1a202c">
+    Tom Basso Portfolio Manager - System Architecture
+  </text>
+
+  <!-- ==================== TRADINGVIEW SIGNALS ==================== -->
+  <g transform="translate(100, 70)">
+    <rect width="700" height="100" rx="10" fill="url(#tvGradient)" filter="url(#shadow)"/>
+    <text x="350" y="30" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="white">
+      TRADINGVIEW SIGNALS
+    </text>
+    <text x="350" y="55" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">
+      JSON Webhooks / CSV Export
+    </text>
+
+    <!-- Two strategy boxes -->
+    <rect x="30" y="65" width="300" height="25" rx="5" fill="rgba(255,255,255,0.2)"/>
+    <text x="180" y="82" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      Bank Nifty v7.0 (75-min)
+    </text>
+
+    <rect x="370" y="65" width="300" height="25" rx="5" fill="rgba(255,255,255,0.2)"/>
+    <text x="520" y="82" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="white">
+      Gold Mini v7.0 (60-min)
+    </text>
+  </g>
+
+  <!-- Arrow from TradingView to Portfolio Manager -->
+  <line x1="450" y1="175" x2="450" y2="200" stroke="#555" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- ==================== PORTFOLIO MANAGER CORE ==================== -->
+  <g transform="translate(50, 210)">
+    <rect width="800" height="580" rx="15" fill="#e2e8f0" filter="url(#shadow)"/>
+    <text x="400" y="30" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#2d3748">
+      PORTFOLIO MANAGER (Unified Core)
+    </text>
+
+    <!-- Module 1: Position Sizer -->
+    <g transform="translate(50, 50)">
+      <rect width="700" height="85" rx="8" fill="url(#coreGradient)" filter="url(#shadow)"/>
+      <text x="350" y="25" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">
+        Tom Basso Position Sizer
+      </text>
+      <text x="20" y="48" font-family="monospace" font-size="10" fill="#2d3748">
+        Lot-R = (Equity x 0.5%) / Risk x ER
+      </text>
+      <text x="20" y="62" font-family="monospace" font-size="10" fill="#2d3748">
+        Lot-V = (Equity x 0.2%) / (ATR x PointVal)
+      </text>
+      <text x="20" y="76" font-family="monospace" font-size="10" fill="#2d3748">
+        Lot-M = AvailMargin / MarginPerLot
+      </text>
+      <text x="400" y="62" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#1a202c">
+        Final = FLOOR(MIN(Lot-R, Lot-V, Lot-M))
+      </text>
+    </g>
+
+    <!-- Arrow -->
+    <line x1="400" y1="140" x2="400" y2="155" stroke="#555" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Module 2: Portfolio State Manager -->
+    <g transform="translate(50, 160)">
+      <rect width="700" height="75" rx="8" fill="url(#coreGradient)" filter="url(#shadow)"/>
+      <text x="350" y="22" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">
+        Portfolio State Manager
+      </text>
+      <text x="20" y="45" font-family="Arial, sans-serif" font-size="10" fill="#2d3748">
+        Track positions (Gold + BN)
+      </text>
+      <text x="20" y="60" font-family="Arial, sans-serif" font-size="10" fill="#2d3748">
+        Equity: Closed / Open / Blended
+      </text>
+      <rect x="250" y="35" width="150" height="32" rx="4" fill="rgba(255,100,100,0.3)"/>
+      <text x="325" y="52" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#c53030">
+        Risk Cap: 15%
+      </text>
+      <text x="325" y="64" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#c53030">
+        Vol Cap: 5%
+      </text>
+      <rect x="420" y="35" width="150" height="32" rx="4" fill="rgba(255,200,100,0.3)"/>
+      <text x="495" y="52" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#b7791f">
+        Margin: 60% max
+      </text>
+      <text x="495" y="64" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#b7791f">
+        BN: 2.7L | Gold: 1.05L
+      </text>
+    </g>
+
+    <!-- Arrow -->
+    <line x1="400" y1="240" x2="400" y2="255" stroke="#555" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Module 3: Pyramid Gate Controller -->
+    <g transform="translate(50, 260)">
+      <rect width="700" height="75" rx="8" fill="url(#coreGradient)" filter="url(#shadow)"/>
+      <text x="350" y="22" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">
+        Pyramid Gate Controller
+      </text>
+      <rect x="20" y="32" width="200" height="35" rx="4" fill="rgba(255,255,255,0.5)"/>
+      <text x="120" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+        Instrument Gate
+      </text>
+      <text x="120" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+        1R move + 0.5 ATR spacing
+      </text>
+      <rect x="250" y="32" width="200" height="35" rx="4" fill="rgba(255,255,255,0.5)"/>
+      <text x="350" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+        Portfolio Gate
+      </text>
+      <text x="350" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+        12% risk / 4% vol block
+      </text>
+      <rect x="480" y="32" width="200" height="35" rx="4" fill="rgba(255,255,255,0.5)"/>
+      <text x="580" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+        Profit Gate
+      </text>
+      <text x="580" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+        P&amp;L &gt; 0 required
+      </text>
+    </g>
+
+    <!-- Arrow -->
+    <line x1="400" y1="340" x2="400" y2="355" stroke="#555" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Module 4: Stop Manager -->
+    <g transform="translate(50, 360)">
+      <rect width="700" height="75" rx="8" fill="url(#coreGradient)" filter="url(#shadow)"/>
+      <text x="350" y="22" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">
+        Tom Basso Stop Manager
+      </text>
+      <text x="20" y="45" font-family="monospace" font-size="10" fill="#2d3748">
+        Initial Stop = Entry - (1.0 x ATR)
+      </text>
+      <text x="20" y="60" font-family="monospace" font-size="10" fill="#2d3748">
+        Trailing Stop = HighestClose - (2.0 x ATR)
+      </text>
+      <rect x="380" y="32" width="300" height="35" rx="4" fill="rgba(100,200,100,0.3)"/>
+      <text x="530" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#276749">
+        Independent stops per position
+      </text>
+      <text x="530" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#276749">
+        Ratchet UP only (never down)
+      </text>
+    </g>
+
+    <!-- Arrow -->
+    <line x1="400" y1="440" x2="400" y2="455" stroke="#555" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+    <!-- Module 5: Rollover System -->
+    <g transform="translate(50, 460)">
+      <rect width="700" height="75" rx="8" fill="url(#coreGradient)" filter="url(#shadow)"/>
+      <text x="350" y="22" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">
+        Rollover System (Live Only)
+      </text>
+      <rect x="20" y="32" width="210" height="35" rx="4" fill="rgba(255,255,255,0.5)"/>
+      <text x="125" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+        Bank Nifty
+      </text>
+      <text x="125" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+        7 days before expiry
+      </text>
+      <rect x="245" y="32" width="210" height="35" rx="4" fill="rgba(255,255,255,0.5)"/>
+      <text x="350" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+        Gold Mini
+      </text>
+      <text x="350" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+        8 days before expiry
+      </text>
+      <rect x="470" y="32" width="210" height="35" rx="4" fill="rgba(255,255,255,0.5)"/>
+      <text x="575" y="48" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+        Execution
+      </text>
+      <text x="575" y="62" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+        Limit orders + retries
+      </text>
+    </g>
+  </g>
+
+  <!-- ==================== DUAL MODE SPLIT ==================== -->
+
+  <!-- Arrow split -->
+  <line x1="450" y1="795" x2="450" y2="830" stroke="#555" stroke-width="2"/>
+  <line x1="450" y1="830" x2="250" y2="830" stroke="#555" stroke-width="2"/>
+  <line x1="450" y1="830" x2="650" y2="830" stroke="#555" stroke-width="2"/>
+  <line x1="250" y1="830" x2="250" y2="860" stroke="#555" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="650" y1="830" x2="650" y2="860" stroke="#555" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+  <!-- Backtest Mode -->
+  <g transform="translate(100, 870)">
+    <rect width="300" height="130" rx="10" fill="url(#backtestGradient)" filter="url(#shadow)"/>
+    <text x="150" y="28" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#2d3748">
+      BACKTEST MODE
+    </text>
+    <text x="20" y="52" font-family="Arial, sans-serif" font-size="11" fill="#4a5568">
+      Load CSV signals
+    </text>
+    <text x="20" y="70" font-family="Arial, sans-serif" font-size="11" fill="#4a5568">
+      Process chronologically
+    </text>
+    <text x="20" y="88" font-family="Arial, sans-serif" font-size="11" fill="#4a5568">
+      Simulate trades in memory
+    </text>
+    <text x="20" y="106" font-family="Arial, sans-serif" font-size="11" fill="#4a5568">
+      Generate reports
+    </text>
+    <rect x="150" y="50" width="140" height="70" rx="5" fill="rgba(255,255,255,0.4)"/>
+    <text x="220" y="75" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#2d3748">
+      Same Logic
+    </text>
+    <text x="220" y="90" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+      as Live Trading
+    </text>
+    <text x="220" y="108" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#4a5568">
+      (zero translation risk)
+    </text>
+  </g>
+
+  <!-- Live Trading Mode -->
+  <g transform="translate(500, 870)">
+    <rect width="300" height="130" rx="10" fill="url(#liveGradient)" filter="url(#shadow)"/>
+    <text x="150" y="28" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">
+      LIVE TRADING MODE
+    </text>
+    <text x="20" y="52" font-family="Arial, sans-serif" font-size="11" fill="#276749">
+      Receive webhooks
+    </text>
+    <text x="20" y="70" font-family="Arial, sans-serif" font-size="11" fill="#276749">
+      Execute via OpenAlgo API
+    </text>
+    <text x="20" y="88" font-family="Arial, sans-serif" font-size="11" fill="#276749">
+      Real orders to broker
+    </text>
+    <text x="20" y="106" font-family="Arial, sans-serif" font-size="11" fill="#276749">
+      Track fills &amp; positions
+    </text>
+    <rect x="150" y="50" width="140" height="70" rx="5" fill="rgba(255,255,255,0.4)"/>
+    <text x="220" y="75" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#1a202c">
+      Same Logic
+    </text>
+    <text x="220" y="90" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#276749">
+      as Backtest
+    </text>
+    <text x="220" y="108" font-family="Arial, sans-serif" font-size="9" text-anchor="middle" fill="#276749">
+      (production ready)
+    </text>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(50, 1020)">
+    <rect width="800" height="60" rx="8" fill="#f0f4f8" stroke="#cbd5e0" stroke-width="1"/>
+    <text x="400" y="20" font-family="Arial, sans-serif" font-size="12" font-weight="bold" text-anchor="middle" fill="#2d3748">
+      LEGEND
+    </text>
+    <rect x="30" y="32" width="20" height="15" rx="3" fill="url(#tvGradient)"/>
+    <text x="60" y="44" font-family="Arial, sans-serif" font-size="10" fill="#4a5568">TradingView</text>
+    <rect x="150" y="32" width="20" height="15" rx="3" fill="url(#coreGradient)"/>
+    <text x="180" y="44" font-family="Arial, sans-serif" font-size="10" fill="#4a5568">Core Modules</text>
+    <rect x="290" y="32" width="20" height="15" rx="3" fill="url(#backtestGradient)"/>
+    <text x="320" y="44" font-family="Arial, sans-serif" font-size="10" fill="#4a5568">Backtest</text>
+    <rect x="400" y="32" width="20" height="15" rx="3" fill="url(#liveGradient)"/>
+    <text x="430" y="44" font-family="Arial, sans-serif" font-size="10" fill="#4a5568">Live Trading</text>
+    <text x="550" y="44" font-family="Arial, sans-serif" font-size="10" fill="#4a5568">
+      Tests: 101 | Coverage: 80%+
+    </text>
+    <text x="720" y="44" font-family="Arial, sans-serif" font-size="10" fill="#718096">
+      v7.0
+    </text>
+  </g>
+</svg>

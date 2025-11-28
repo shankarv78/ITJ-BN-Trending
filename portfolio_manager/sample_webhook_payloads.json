@@ -1,0 +1,94 @@
+{
+  "BASE_ENTRY_BANK_NIFTY": {
+    "type": "BASE_ENTRY",
+    "instrument": "BANK_NIFTY",
+    "position": "Long_1",
+    "price": 52000,
+    "stop": 51650,
+    "lots": 5,
+    "atr": 350,
+    "er": 0.82,
+    "supertrend": 51650,
+    "roc": 2.5,
+    "timestamp": "2025-11-28T10:30:00Z"
+  },
+  "BASE_ENTRY_GOLD_MINI": {
+    "type": "BASE_ENTRY",
+    "instrument": "GOLD_MINI",
+    "position": "Long_1",
+    "price": 72000,
+    "stop": 71500,
+    "lots": 3,
+    "atr": 500,
+    "er": 0.75,
+    "supertrend": 71500,
+    "roc": 1.8,
+    "timestamp": "2025-11-28T10:30:00Z"
+  },
+  "PYRAMID_BANK_NIFTY_LONG_2": {
+    "type": "PYRAMID",
+    "instrument": "BANK_NIFTY",
+    "position": "Long_2",
+    "price": 52200,
+    "stop": 51800,
+    "lots": 3,
+    "atr": 360,
+    "er": 0.85,
+    "supertrend": 51800,
+    "roc": 2.8,
+    "timestamp": "2025-11-28T10:35:00Z"
+  },
+  "PYRAMID_BANK_NIFTY_LONG_3": {
+    "type": "PYRAMID",
+    "instrument": "BANK_NIFTY",
+    "position": "Long_3",
+    "price": 52400,
+    "stop": 52000,
+    "lots": 2,
+    "atr": 365,
+    "er": 0.88,
+    "supertrend": 52000,
+    "roc": 3.2,
+    "timestamp": "2025-11-28T10:40:00Z"
+  },
+  "EXIT_STOP_LOSS": {
+    "type": "EXIT",
+    "instrument": "BANK_NIFTY",
+    "position": "Long_1",
+    "price": 51600,
+    "stop": 0,
+    "lots": 0,
+    "atr": 350,
+    "er": 0.82,
+    "supertrend": 51650,
+    "reason": "Stop Loss Hit",
+    "timestamp": "2025-11-28T11:00:00Z"
+  },
+  "EXIT_TRAILING_STOP": {
+    "type": "EXIT",
+    "instrument": "BANK_NIFTY",
+    "position": "Long_2",
+    "price": 52000,
+    "stop": 0,
+    "lots": 0,
+    "atr": 360,
+    "er": 0.85,
+    "supertrend": 51800,
+    "reason": "Trailing Stop Hit",
+    "timestamp": "2025-11-28T11:05:00Z"
+  },
+  "EXIT_ALL": {
+    "type": "EXIT",
+    "instrument": "BANK_NIFTY",
+    "position": "ALL",
+    "price": 52500,
+    "stop": 0,
+    "lots": 0,
+    "atr": 350,
+    "er": 0.82,
+    "supertrend": 51650,
+    "reason": "Manual Exit",
+    "timestamp": "2025-11-28T11:10:00Z"
+  }
+}
+
