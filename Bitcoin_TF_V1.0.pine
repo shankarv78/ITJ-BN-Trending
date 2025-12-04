@@ -1,0 +1,604 @@
+//@version=5
+// ========================================
+// BITCOIN TREND FOLLOWING STRATEGY v1.0
+// Strictly follows Bank Nifty TF V8.0 Logic
+// With Tom Basso Triple Constraint Sizing
+// ========================================
+//
+// Purpose: Long-only trend following for Bitcoin
+// Chart: BINANCE:BTCUSDT (spot) or BINANCE:BTCUSDT.P (perpetual)
+// Timeframe: Daily recommended
+//
+// Features:
+// - Same 7-condition entry logic as Bank Nifty
+// - Tom Basso Triple Constraint Position Sizing
+// - 1R Pyramid Gate
+// - Independent ATR Trailing Stops per position
+// - Extended pyramiding support
+//
+// ========================================
+
+strategy("Bitcoin Trend Following v1.0 (Tom Basso)",
+     overlay=true,
+     pyramiding=10,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     calc_on_every_tick=false,
+     process_orders_on_close=true,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1)
+
+// ========================================
+// INDICATOR PARAMETERS
+// ========================================
+
+// RSI Parameters
+rsi_period = input.int(6, "RSI Period", minval=1, maxval=50, group="Indicators")
+rsi_threshold = input.float(70, "RSI Overbought", minval=0, maxval=100, group="Indicators")
+
+// EMA Parameters
+ema_period = input.int(200, "EMA Period", minval=1, maxval=500, group="Indicators")
+
+// Donchian Channel
+dc_period = input.int(20, "DC Period", minval=1, maxval=100, group="Indicators")
+
+// ADX Parameters
+adx_period = input.int(14, "ADX Period", minval=1, maxval=100, group="Indicators")
+adx_threshold = input.float(25, "ADX Threshold", minval=0, maxval=100, group="Indicators", tooltip="Entry when ADX < threshold (consolidation breakout)")
+
+// Efficiency Ratio
+er_period = input.int(5, "ER Period", minval=1, maxval=50, group="Indicators")
+er_threshold = input.float(0.6, "ER Threshold", minval=0, maxval=1, step=0.01, group="Indicators", tooltip="Lower for Bitcoin due to noise")
+
+// SuperTrend Parameters
+st_period = input.int(10, "ST Period", minval=1, maxval=50, group="Indicators")
+st_multiplier = input.float(2.0, "ST Multiplier", minval=0.1, maxval=10, step=0.1, group="Indicators")
+
+// Doji filter
+doji_threshold = input.float(0.1, "Doji Body/Range Ratio", minval=0.01, maxval=1, step=0.01, group="Indicators")
+
+// ROC Parameters (optional filter)
+roc_period = input.int(15, "ROC Period", minval=1, maxval=50, group="Indicators")
+use_roc_for_pyramids = input.bool(false, "Use ROC Filter for Pyramids", group="Indicators")
+roc_threshold = input.float(2.0, "ROC Threshold %", minval=-100, maxval=100, step=0.5, group="Indicators")
+
+// ATR for pyramiding
+atr_period_pyramid = input.int(10, "ATR Period (Pyramiding)", minval=1, maxval=50, group="Indicators")
+
+// ========================================
+// TOM BASSO TRIPLE CONSTRAINT POSITION SIZING
+// ========================================
+
+// Risk Constraint (Lot-R)
+risk_percent = input.float(2.0, "Risk % of Capital", minval=0.1, maxval=50, step=0.1, group="Position Sizing", tooltip="Maximum risk per trade as % of equity")
+
+// Volatility Constraint (Lot-V)
+volatility_percent = input.float(1.0, "Volatility % of Capital", minval=0.1, maxval=50, step=0.1, group="Position Sizing", tooltip="Maximum volatility exposure as % of equity")
+
+// Margin Constraint (Lot-M) - For Bitcoin, this is capital allocation
+use_margin_check = input.bool(true, "Enable Capital Allocation Check", group="Position Sizing")
+max_capital_per_trade = input.float(20, "Max Capital % per Trade", minval=1, maxval=100, step=1, group="Position Sizing", tooltip="Maximum % of capital per single trade")
+leverage_multiplier = input.float(1.0, "Leverage Multiplier", minval=0.1, maxval=100, step=0.1, group="Position Sizing", tooltip="1.0 = no leverage")
+
+// Point value for Bitcoin (1 BTC = $1 per $1 move)
+btc_point_value = input.float(1.0, "BTC Point Value", minval=0.001, maxval=100, step=0.001, group="Position Sizing", tooltip="Value per $1 move per 1 BTC")
+
+// ========================================
+// PYRAMIDING SETTINGS
+// ========================================
+enable_pyramiding = input.bool(true, "Enable Pyramiding", group="Pyramiding")
+max_pyramids = input.int(5, "Max Pyramids", minval=0, maxval=20, group="Pyramiding", tooltip="Maximum pyramid entries (0 = unlimited by this setting)")
+atr_pyramid_threshold = input.float(1.0, "ATR Pyramid Threshold", minval=0.1, maxval=10, step=0.1, group="Pyramiding", tooltip="Price must move this many ATRs")
+pyramid_size_ratio = input.float(0.5, "Pyramid Size Ratio", minval=0.1, maxval=2.0, step=0.05, group="Pyramiding", tooltip="Each pyramid as ratio of previous")
+use_1r_gate = input.bool(true, "Use 1R Pyramid Gate", group="Pyramiding", tooltip="Require 1R move before first pyramid")
+
+// ========================================
+// TOM BASSO STOP LOSS SETTINGS
+// ========================================
+stop_loss_mode = input.string("Tom Basso", "Stop Loss Mode", options=["SuperTrend", "Tom Basso"], group="Stop Loss")
+basso_initial_atr_mult = input.float(1.5, "Basso Initial Stop (× ATR)", minval=0.1, maxval=20, step=0.1, group="Stop Loss")
+basso_trailing_atr_mult = input.float(2.5, "Basso Trailing Stop (× ATR)", minval=0.1, maxval=20, step=0.1, group="Stop Loss")
+basso_atr_period = input.int(14, "Basso ATR Period", minval=1, maxval=100, group="Stop Loss")
+
+// ========================================
+// DISPLAY SETTINGS
+// ========================================
+show_indicators = input.bool(true, "Show Indicators", group="Display")
+show_info_panel = input.bool(true, "Show Info Panel", group="Display")
+show_debug = input.bool(false, "Show Debug Panel", group="Display")
+
+// ========================================
+// INDICATOR CALCULATIONS
+// ========================================
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// EMA
+ema = ta.ema(close, ema_period)
+
+// Donchian Channel
+dc_upper = ta.highest(high, dc_period)
+dc_lower = ta.lowest(low, dc_period)
+dc_middle = (dc_upper + dc_lower) / 2
+
+// ADX Calculation
+[diplus, diminus, adx] = ta.dmi(adx_period, adx_period)
+
+// Efficiency Ratio
+change_abs = math.abs(close - close[er_period])
+volatility_sum = math.sum(math.abs(close - close[1]), er_period)
+er = volatility_sum != 0 ? change_abs / volatility_sum : 0
+
+// SuperTrend
+[supertrend, st_direction] = ta.supertrend(st_multiplier, st_period)
+
+// ATR values
+atr_pyramid = ta.atr(atr_period_pyramid)
+atr_basso = ta.atr(basso_atr_period)
+
+// ROC
+roc = ta.roc(close, roc_period)
+
+// Doji detection
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) < doji_threshold : false
+not_doji = not is_doji
+
+// ========================================
+// ENTRY CONDITIONS (Same as Bank Nifty)
+// ========================================
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper[1]
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+doji_condition = not_doji
+
+// Combined long entry (all 7 conditions)
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and doji_condition
+
+// Exit condition
+long_exit = close < supertrend
+
+// ========================================
+// POSITION STATE TRACKING
+// ========================================
+var float initial_entry_price = na
+var float initial_stop_price = na
+var float last_pyramid_price = na
+var int pyramid_count = 0
+var float initial_position_size = 0
+
+// Entry prices for each pyramid level
+var float pyr1_entry_price = na
+var float pyr2_entry_price = na
+var float pyr3_entry_price = na
+var float pyr4_entry_price = na
+var float pyr5_entry_price = na
+var float pyr6_entry_price = na
+var float pyr7_entry_price = na
+var float pyr8_entry_price = na
+var float pyr9_entry_price = na
+
+// Tom Basso independent stops
+var float basso_stop_long1 = na
+var float basso_stop_long2 = na
+var float basso_stop_long3 = na
+var float basso_stop_long4 = na
+var float basso_stop_long5 = na
+var float basso_stop_long6 = na
+var float basso_stop_long7 = na
+var float basso_stop_long8 = na
+var float basso_stop_long9 = na
+var float basso_stop_long10 = na
+
+// Highest close tracking for trailing stops
+var float highest_close_long1 = na
+var float highest_close_long2 = na
+var float highest_close_long3 = na
+var float highest_close_long4 = na
+var float highest_close_long5 = na
+var float highest_close_long6 = na
+var float highest_close_long7 = na
+var float highest_close_long8 = na
+var float highest_close_long9 = na
+var float highest_close_long10 = na
+
+// Lot sizes for exits
+var float pyr1_lots = 0.0
+var float pyr2_lots = 0.0
+var float pyr3_lots = 0.0
+var float pyr4_lots = 0.0
+var float pyr5_lots = 0.0
+var float pyr6_lots = 0.0
+var float pyr7_lots = 0.0
+var float pyr8_lots = 0.0
+var float pyr9_lots = 0.0
+
+// ========================================
+// TOM BASSO TRIPLE CONSTRAINT CALCULATION
+// ========================================
+
+// Current equity (use closed equity for conservative sizing)
+current_equity = strategy.equity
+
+// Calculate stop distance for base entry
+base_stop_distance = atr_basso * basso_initial_atr_mult
+
+calc_triple_constraint_size(equity, stop_distance, atr_val) =>
+    // CONSTRAINT 1: Risk-based (Lot-R)
+    // Max position where risk = risk_percent of equity
+    risk_budget = equity * (risk_percent / 100)
+    risk_per_btc = stop_distance * btc_point_value
+    lot_r = risk_per_btc > 0 ? risk_budget / risk_per_btc : 0
+    
+    // CONSTRAINT 2: Volatility-based (Lot-V)
+    // Max position where daily vol = volatility_percent of equity
+    vol_budget = equity * (volatility_percent / 100)
+    vol_per_btc = atr_val * btc_point_value
+    lot_v = vol_per_btc > 0 ? vol_budget / vol_per_btc : 0
+    
+    // CONSTRAINT 3: Capital allocation (Lot-M)
+    // Max position based on capital per trade
+    capital_budget = equity * (max_capital_per_trade / 100) * leverage_multiplier
+    lot_m = close > 0 ? capital_budget / close : 0
+    
+    // If margin check disabled, set lot_m to very high
+    lot_m_final = use_margin_check ? lot_m : 999999.0
+    
+    // Final lots = minimum of all three constraints
+    final_lots = math.min(lot_r, lot_v, lot_m_final)
+    
+    // Determine limiting factor
+    limiter = lot_r <= lot_v and lot_r <= lot_m_final ? "RISK" : lot_v <= lot_m_final ? "VOLATILITY" : "CAPITAL"
+    
+    [final_lots, lot_r, lot_v, lot_m_final, limiter]
+
+// ========================================
+// UPDATE TOM BASSO TRAILING STOPS
+// ========================================
+if strategy.position_size > 0 and stop_loss_mode == "Tom Basso"
+    // Update highest closes
+    if not na(initial_entry_price)
+        highest_close_long1 := math.max(nz(highest_close_long1), close)
+        new_stop1 = highest_close_long1 - (basso_trailing_atr_mult * atr_basso)
+        basso_stop_long1 := math.max(nz(basso_stop_long1), new_stop1)
+    
+    if not na(pyr1_entry_price)
+        highest_close_long2 := math.max(nz(highest_close_long2), close)
+        new_stop2 = highest_close_long2 - (basso_trailing_atr_mult * atr_basso)
+        basso_stop_long2 := math.max(nz(basso_stop_long2), new_stop2)
+    
+    if not na(pyr2_entry_price)
+        highest_close_long3 := math.max(nz(highest_close_long3), close)
+        new_stop3 = highest_close_long3 - (basso_trailing_atr_mult * atr_basso)
+        basso_stop_long3 := math.max(nz(basso_stop_long3), new_stop3)
+    
+    if not na(pyr3_entry_price)
+        highest_close_long4 := math.max(nz(highest_close_long4), close)
+        new_stop4 = highest_close_long4 - (basso_trailing_atr_mult * atr_basso)
+        basso_stop_long4 := math.max(nz(basso_stop_long4), new_stop4)
+    
+    if not na(pyr4_entry_price)
+        highest_close_long5 := math.max(nz(highest_close_long5), close)
+        new_stop5 = highest_close_long5 - (basso_trailing_atr_mult * atr_basso)
+        basso_stop_long5 := math.max(nz(basso_stop_long5), new_stop5)
+    
+    if not na(pyr5_entry_price)
+        highest_close_long6 := math.max(nz(highest_close_long6), close)
+        new_stop6 = highest_close_long6 - (basso_trailing_atr_mult * atr_basso)
+        basso_stop_long6 := math.max(nz(basso_stop_long6), new_stop6)
+
+// ========================================
+// BASE ENTRY LOGIC
+// ========================================
+if long_entry and strategy.position_size == 0
+    // Calculate triple constraint size
+    [final_lots, lot_r, lot_v, lot_m, limiter] = calc_triple_constraint_size(current_equity, base_stop_distance, atr_basso)
+    
+    if final_lots > 0.0001  // Minimum BTC size
+        strategy.entry("Long_1", strategy.long, qty=final_lots)
+        
+        initial_entry_price := close
+        initial_stop_price := close - base_stop_distance
+        last_pyramid_price := close
+        pyramid_count := 0
+        initial_position_size := final_lots
+        
+        // Initialize Tom Basso stop
+        if stop_loss_mode == "Tom Basso"
+            basso_stop_long1 := close - (basso_initial_atr_mult * atr_basso)
+            highest_close_long1 := close
+
+// ========================================
+// PYRAMID LOGIC WITH 1R GATE
+// ========================================
+if enable_pyramiding and strategy.position_size > 0 and (max_pyramids == 0 or pyramid_count < max_pyramids)
+    // Price movement calculations
+    price_move_from_last = close - nz(last_pyramid_price, initial_entry_price)
+    atr_moves = atr_pyramid > 0 ? price_move_from_last / atr_pyramid : 0
+    
+    // 1R Gate calculation
+    initial_risk_points = nz(initial_entry_price) - nz(initial_stop_price)
+    price_move_from_entry = close - nz(initial_entry_price)
+    
+    // Pyramid gate check (1R-based or simple ATR-based)
+    pyramid_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_points) : true
+    
+    // ROC check
+    roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
+    
+    // Pyramid trigger
+    pyramid_trigger = pyramid_gate_open and atr_moves >= atr_pyramid_threshold and roc_ok_for_pyramid and st_condition
+    
+    if pyramid_trigger
+        // Calculate pyramid size with triple constraint
+        pyr_stop_distance = atr_basso * basso_initial_atr_mult
+        [pyr_lots, pyr_lot_r, pyr_lot_v, pyr_lot_m, pyr_limiter] = calc_triple_constraint_size(current_equity, pyr_stop_distance, atr_basso)
+        
+        // Apply pyramid size ratio
+        pyr_lots_final = pyr_lots * math.pow(pyramid_size_ratio, pyramid_count + 1)
+        
+        if pyr_lots_final > 0.0001
+            pyramid_count := pyramid_count + 1
+            last_pyramid_price := close
+            
+            strategy.entry("Long_" + str.tostring(pyramid_count + 1), strategy.long, qty=pyr_lots_final)
+            
+            // Track pyramid entry and initialize stop
+            if pyramid_count == 1
+                pyr1_entry_price := close
+                pyr1_lots := pyr_lots_final
+                if stop_loss_mode == "Tom Basso"
+                    basso_stop_long2 := close - (basso_initial_atr_mult * atr_basso)
+                    highest_close_long2 := close
+            else if pyramid_count == 2
+                pyr2_entry_price := close
+                pyr2_lots := pyr_lots_final
+                if stop_loss_mode == "Tom Basso"
+                    basso_stop_long3 := close - (basso_initial_atr_mult * atr_basso)
+                    highest_close_long3 := close
+            else if pyramid_count == 3
+                pyr3_entry_price := close
+                pyr3_lots := pyr_lots_final
+                if stop_loss_mode == "Tom Basso"
+                    basso_stop_long4 := close - (basso_initial_atr_mult * atr_basso)
+                    highest_close_long4 := close
+            else if pyramid_count == 4
+                pyr4_entry_price := close
+                pyr4_lots := pyr_lots_final
+                if stop_loss_mode == "Tom Basso"
+                    basso_stop_long5 := close - (basso_initial_atr_mult * atr_basso)
+                    highest_close_long5 := close
+            else if pyramid_count == 5
+                pyr5_entry_price := close
+                pyr5_lots := pyr_lots_final
+                if stop_loss_mode == "Tom Basso"
+                    basso_stop_long6 := close - (basso_initial_atr_mult * atr_basso)
+                    highest_close_long6 := close
+            else if pyramid_count == 6
+                pyr6_entry_price := close
+                pyr6_lots := pyr_lots_final
+            else if pyramid_count == 7
+                pyr7_entry_price := close
+                pyr7_lots := pyr_lots_final
+            else if pyramid_count == 8
+                pyr8_entry_price := close
+                pyr8_lots := pyr_lots_final
+            else if pyramid_count == 9
+                pyr9_entry_price := close
+                pyr9_lots := pyr_lots_final
+
+// ========================================
+// EXIT LOGIC
+// ========================================
+
+// SuperTrend mode: Close all on SuperTrend cross
+if strategy.position_size > 0 and stop_loss_mode == "SuperTrend" and long_exit
+    strategy.close_all(comment="EXIT - Below ST")
+    // Reset all tracking
+    initial_entry_price := na
+    initial_stop_price := na
+    last_pyramid_price := na
+    pyramid_count := 0
+    pyr1_entry_price := na
+    pyr2_entry_price := na
+    pyr3_entry_price := na
+    pyr4_entry_price := na
+    pyr5_entry_price := na
+
+// Tom Basso mode: Independent stop exits
+if strategy.position_size > 0 and stop_loss_mode == "Tom Basso"
+    // Exit Long_1
+    if not na(basso_stop_long1) and close < basso_stop_long1
+        strategy.close("Long_1", comment="EXIT - Basso Stop")
+        initial_entry_price := na
+        basso_stop_long1 := na
+        highest_close_long1 := na
+    
+    // Exit Long_2
+    if not na(basso_stop_long2) and close < basso_stop_long2
+        strategy.close("Long_2", comment="EXIT - Basso Stop")
+        pyr1_entry_price := na
+        basso_stop_long2 := na
+        highest_close_long2 := na
+    
+    // Exit Long_3
+    if not na(basso_stop_long3) and close < basso_stop_long3
+        strategy.close("Long_3", comment="EXIT - Basso Stop")
+        pyr2_entry_price := na
+        basso_stop_long3 := na
+        highest_close_long3 := na
+    
+    // Exit Long_4
+    if not na(basso_stop_long4) and close < basso_stop_long4
+        strategy.close("Long_4", comment="EXIT - Basso Stop")
+        pyr3_entry_price := na
+        basso_stop_long4 := na
+        highest_close_long4 := na
+    
+    // Exit Long_5
+    if not na(basso_stop_long5) and close < basso_stop_long5
+        strategy.close("Long_5", comment="EXIT - Basso Stop")
+        pyr4_entry_price := na
+        basso_stop_long5 := na
+        highest_close_long5 := na
+    
+    // Exit Long_6
+    if not na(basso_stop_long6) and close < basso_stop_long6
+        strategy.close("Long_6", comment="EXIT - Basso Stop")
+        pyr5_entry_price := na
+        basso_stop_long6 := na
+        highest_close_long6 := na
+
+// ========================================
+// PLOTS
+// ========================================
+
+// EMA
+plot(show_indicators ? ema : na, "EMA", color=color.blue, linewidth=2)
+
+// SuperTrend
+plot(show_indicators ? supertrend : na, "SuperTrend", color=st_direction < 0 ? color.green : color.red, linewidth=2)
+
+// Donchian
+plot(show_indicators ? dc_upper : na, "DC Upper", color=color.new(color.green, 70))
+plot(show_indicators ? dc_lower : na, "DC Lower", color=color.new(color.red, 70))
+
+// Tom Basso Stops
+plot(stop_loss_mode == "Tom Basso" and not na(basso_stop_long1) ? basso_stop_long1 : na, "Basso SL 1", color=color.red, linewidth=2, style=plot.style_circles)
+plot(stop_loss_mode == "Tom Basso" and not na(basso_stop_long2) ? basso_stop_long2 : na, "Basso SL 2", color=color.orange, linewidth=2, style=plot.style_circles)
+plot(stop_loss_mode == "Tom Basso" and not na(basso_stop_long3) ? basso_stop_long3 : na, "Basso SL 3", color=color.yellow, linewidth=2, style=plot.style_circles)
+
+// Entry signals
+plotshape(long_entry and strategy.position_size == 0, "Entry Signal", shape.triangleup, location.belowbar, color.green, size=size.normal)
+
+// ========================================
+// INFO PANEL
+// ========================================
+if show_info_panel and barstate.islast
+    var table infoTable = table.new(position.top_right, 2, 15, bgcolor=color.new(color.black, 80), frame_color=color.gray, frame_width=1)
+    
+    // Header
+    table.cell(infoTable, 0, 0, "BTC TF v1.0", bgcolor=color.new(color.orange, 70), text_color=color.white)
+    table.cell(infoTable, 1, 0, "Tom Basso", bgcolor=color.new(color.orange, 70), text_color=color.white)
+    
+    // Entry conditions
+    table.cell(infoTable, 0, 1, "RSI >" + str.tostring(rsi_threshold), text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 1, rsi_condition ? "✓ " + str.tostring(rsi, "#.#") : "✗ " + str.tostring(rsi, "#.#"), text_color=rsi_condition ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 2, "C > EMA", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, ema_condition ? "✓" : "✗", text_color=ema_condition ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 3, "DC Break", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, dc_condition ? "✓" : "✗", text_color=dc_condition ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 4, "ADX <" + str.tostring(adx_threshold), text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 4, adx_condition ? "✓ " + str.tostring(adx, "#.#") : "✗ " + str.tostring(adx, "#.#"), text_color=adx_condition ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 5, "ER >" + str.tostring(er_threshold), text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 5, er_condition ? "✓ " + str.tostring(er, "#.##") : "✗ " + str.tostring(er, "#.##"), text_color=er_condition ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 6, "C > ST", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 6, st_condition ? "✓" : "✗", text_color=st_condition ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoTable, 0, 7, "Not Doji", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 7, doji_condition ? "✓" : "✗", text_color=doji_condition ? color.green : color.red, text_size=size.small)
+    
+    // Separator
+    table.cell(infoTable, 0, 8, "─────────", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 8, "─────────", text_color=color.gray, text_size=size.small)
+    
+    // Triple constraint display
+    [disp_lots, disp_lot_r, disp_lot_v, disp_lot_m, disp_limiter] = calc_triple_constraint_size(current_equity, base_stop_distance, atr_basso)
+    
+    table.cell(infoTable, 0, 9, "Lot-R", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 9, str.tostring(disp_lot_r, "#.####") + " BTC", text_color=color.white, text_size=size.small)
+    
+    table.cell(infoTable, 0, 10, "Lot-V", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 10, str.tostring(disp_lot_v, "#.####") + " BTC", text_color=color.white, text_size=size.small)
+    
+    table.cell(infoTable, 0, 11, "Lot-M", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 11, str.tostring(disp_lot_m, "#.####") + " BTC", text_color=color.white, text_size=size.small)
+    
+    table.cell(infoTable, 0, 12, "Final Size", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 12, str.tostring(disp_lots, "#.####") + " BTC", text_color=color.yellow, text_size=size.small)
+    
+    table.cell(infoTable, 0, 13, "Limiter", text_color=color.gray, text_size=size.small)
+    limiter_color = disp_limiter == "RISK" ? color.red : disp_limiter == "VOLATILITY" ? color.orange : color.blue
+    table.cell(infoTable, 1, 13, disp_limiter, text_color=limiter_color, text_size=size.small)
+    
+    // Position info
+    table.cell(infoTable, 0, 14, "Pyramids", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 14, str.tostring(pyramid_count) + "/" + str.tostring(max_pyramids), text_color=color.white, text_size=size.small)
+
+// ========================================
+// DEBUG PANEL
+// ========================================
+if show_debug
+    plot(rsi_condition ? 1 : 0, "RSI Cond", color=color.red, display=display.pane)
+    plot(ema_condition ? 1 : 0, "EMA Cond", color=color.blue, display=display.pane)
+    plot(dc_condition ? 1 : 0, "DC Cond", color=color.green, display=display.pane)
+    plot(adx_condition ? 1 : 0, "ADX Cond", color=color.orange, display=display.pane)
+    plot(er_condition ? 1 : 0, "ER Cond", color=color.purple, display=display.pane)
+    plot(st_condition ? 1 : 0, "ST Cond", color=color.teal, display=display.pane)
+    plot(long_entry ? 7 : 0, "ALL", color=color.lime, style=plot.style_columns, display=display.pane)
+
+// ========================================
+// ALERTS
+// ========================================
+getTimestamp() =>
+    str.format("{0,date,yyyy-MM-dd HH:mm:ss}", time)
+
+// Base Entry Alert
+if long_entry and strategy.position_size[1] == 0
+    [alert_lots, a_lot_r, a_lot_v, a_lot_m, a_limiter] = calc_triple_constraint_size(current_equity, base_stop_distance, atr_basso)
+    json_entry = '{"type":"BASE_ENTRY", "instrument":"BTCUSDT", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(close - base_stop_distance) + ', "size":' + str.tostring(alert_lots, "#.####") + ', "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er, "#.##") + ', "supertrend":' + str.tostring(supertrend) + ', "limiter":"' + a_limiter + '", "timestamp":"' + getTimestamp() + '"}'
+    alert(json_entry, alert.freq_once_per_bar_close)
+
+// Pyramid Alert
+if strategy.position_size > strategy.position_size[1] and strategy.position_size[1] > 0
+    json_pyr = '{"type":"PYRAMID", "instrument":"BTCUSDT", "position":"Long_' + str.tostring(pyramid_count + 1) + '", "price":' + str.tostring(close) + ', "pyramid_count":' + str.tostring(pyramid_count) + ', "timestamp":"' + getTimestamp() + '"}'
+    alert(json_pyr, alert.freq_once_per_bar_close)
+
+// Exit Alert
+if strategy.position_size < strategy.position_size[1]
+    json_exit = '{"type":"EXIT", "instrument":"BTCUSDT", "price":' + str.tostring(close) + ', "timestamp":"' + getTimestamp() + '"}'
+    alert(json_exit, alert.freq_once_per_bar_close)
+
+// ========================================
+// NOTES
+// ========================================
+//
+// This script strictly follows Bank Nifty TF V8.0 logic:
+//
+// 1. ENTRY: All 7 conditions must be true
+//    - RSI > threshold (momentum)
+//    - Close > EMA (trend)
+//    - Close > DC Upper (breakout)
+//    - ADX < threshold (consolidation)
+//    - ER > threshold (efficiency)
+//    - Close > SuperTrend (trend)
+//    - Not Doji (commitment)
+//
+// 2. POSITION SIZING: Tom Basso Triple Constraint
+//    - Lot-R: Risk-based (risk % / stop distance)
+//    - Lot-V: Volatility-based (vol % / ATR)
+//    - Lot-M: Capital allocation
+//    - Final = MIN(Lot-R, Lot-V, Lot-M)
+//
+// 3. PYRAMIDING:
+//    - 1R Gate: Price must move > initial risk before pyramiding
+//    - ATR spacing between pyramids
+//    - Each pyramid = previous × pyramid_size_ratio
+//
+// 4. STOPS: Tom Basso Independent Trailing
+//    - Initial: Entry - (ATR × initial_mult)
+//    - Trail: Highest Close - (ATR × trail_mult)
+//    - Each position has independent stop
+//
+// ========================================
