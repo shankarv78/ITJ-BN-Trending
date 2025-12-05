@@ -6,14 +6,18 @@ Handles:
 - Duplicate detection with rolling time window
 - JSON structure validation
 - Signal parsing with error handling
+- EOD_MONITOR signal parsing for pre-close execution
 """
+import logging
 import threading
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, Union
 from dataclasses import dataclass
 
-from core.models import Signal
+from core.models import Signal, EODMonitorSignal
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -231,4 +235,236 @@ def parse_webhook_signal(data: dict) -> Tuple[Optional[Signal], Optional[str]]:
     except Exception as e:
         # Unexpected errors
         return None, f"Unexpected error parsing signal: {str(e)}"
+
+
+# ============================================================
+# EOD_MONITOR Signal Parsing
+# ============================================================
+
+def is_eod_monitor_signal(data: dict) -> bool:
+    """
+    Check if the incoming data is an EOD_MONITOR signal.
+
+    Args:
+        data: JSON data dictionary from webhook
+
+    Returns:
+        True if this is an EOD_MONITOR signal
+    """
+    if not isinstance(data, dict):
+        return False
+
+    signal_type = data.get('type', '').upper()
+    return signal_type == 'EOD_MONITOR'
+
+
+def validate_eod_json_structure(data: dict) -> Tuple[bool, Optional[str]]:
+    """
+    Validate JSON structure for EOD_MONITOR signals.
+
+    EOD_MONITOR signals have a different structure than regular signals:
+    - type: "EOD_MONITOR"
+    - instrument: "BANK_NIFTY" or "GOLD_MINI"
+    - timestamp: ISO format datetime
+    - price: Current price
+    - conditions: Dict with all 7 entry conditions + long_entry/long_exit flags
+    - indicators: Dict with RSI, EMA, DC_upper, ADX, ER, SuperTrend, ATR values
+    - position_status: Dict with in_position, pyramid_count
+    - sizing: Dict with suggested_lots, stop_level
+
+    Args:
+        data: JSON data dictionary
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not isinstance(data, dict):
+        return False, "Data must be a dictionary"
+
+    if not data:
+        return False, "Data dictionary is empty"
+
+    # Check for required top-level fields
+    # NOTE: 'sizing' is NOT required - Python calculates position sizing using real portfolio equity
+    # TradingView sends raw data (conditions, indicators, price, position_status)
+    # Python Portfolio Manager uses Tom Basso methodology with SHARED capital across instruments
+    required_fields = ['type', 'instrument', 'timestamp', 'price',
+                       'conditions', 'indicators', 'position_status']
+    missing = [f for f in required_fields if f not in data]
+    if missing:
+        return False, f"EOD_MONITOR missing required fields: {', '.join(missing)}"
+
+    # Validate type
+    if data.get('type', '').upper() != 'EOD_MONITOR':
+        return False, f"Invalid signal type for EOD: {data.get('type')}"
+
+    # Validate conditions dict
+    conditions = data.get('conditions', {})
+    if not isinstance(conditions, dict):
+        return False, "conditions must be a dictionary"
+
+    # Check required condition fields
+    required_conditions = ['rsi_condition', 'ema_condition', 'dc_condition',
+                          'adx_condition', 'er_condition', 'st_condition',
+                          'not_doji', 'long_entry', 'long_exit']
+    missing_conditions = [c for c in required_conditions if c not in conditions]
+    if missing_conditions:
+        return False, f"conditions missing fields: {', '.join(missing_conditions)}"
+
+    # Validate indicators dict
+    indicators = data.get('indicators', {})
+    if not isinstance(indicators, dict):
+        return False, "indicators must be a dictionary"
+
+    # Check required indicator fields
+    required_indicators = ['rsi', 'ema', 'dc_upper', 'adx', 'er', 'supertrend', 'atr']
+    missing_indicators = [i for i in required_indicators if i not in indicators]
+    if missing_indicators:
+        return False, f"indicators missing fields: {', '.join(missing_indicators)}"
+
+    # Validate position_status dict
+    position_status = data.get('position_status', {})
+    if not isinstance(position_status, dict):
+        return False, "position_status must be a dictionary"
+
+    if 'in_position' not in position_status:
+        return False, "position_status missing 'in_position' field"
+
+    # NOTE: 'sizing' is OPTIONAL - if present, validate structure but not required
+    # Python calculates position sizing using real portfolio equity (shared across instruments)
+    sizing = data.get('sizing')
+    if sizing is not None:
+        if not isinstance(sizing, dict):
+            return False, "sizing must be a dictionary if provided"
+        # sizing fields are optional - Python will calculate its own values
+
+    return True, None
+
+
+def parse_eod_monitor_signal(data: dict) -> Tuple[Optional[EODMonitorSignal], Optional[str]]:
+    """
+    Parse webhook JSON data into EODMonitorSignal object.
+
+    EOD_MONITOR signals contain RAW DATA from TradingView:
+    - All 7 entry condition states (boolean)
+    - All indicator values (float)
+    - Current position status (for reference)
+
+    IMPORTANT: TradingView is ONLY a signal generator.
+    Python Portfolio Manager calculates position sizing using:
+    - REAL portfolio equity (shared across Bank Nifty + Gold Mini)
+    - Tom Basso methodology
+    - Current margin availability
+
+    Args:
+        data: JSON data dictionary from webhook
+
+    Returns:
+        Tuple of (signal, error_message)
+        - signal: EODMonitorSignal object if parsing successful, None otherwise
+        - error_message: None if successful, error description if failed
+
+    Example input (from v8.0 Pine Script):
+        {
+            "type": "EOD_MONITOR",
+            "instrument": "BANK_NIFTY",
+            "timestamp": "2025-12-02T15:25:00Z",
+            "price": 52450.50,
+            "conditions": {
+                "rsi_condition": true,
+                "ema_condition": true,
+                "dc_condition": true,
+                "adx_condition": true,
+                "er_condition": true,
+                "st_condition": true,
+                "not_doji": true,
+                "long_entry": true,
+                "long_exit": false
+            },
+            "indicators": {
+                "rsi": 72.5,
+                "ema": 51800.25,
+                "dc_upper": 52300.00,
+                "adx": 28.5,
+                "er": 0.85,
+                "supertrend": 52100.00,
+                "atr": 180.5
+            },
+            "position_status": {
+                "in_position": false,
+                "pyramid_count": 0
+            }
+        }
+
+    Note: 'sizing' field is NOT sent by Pine Script v8.0+.
+    Python calculates position sizing using real portfolio equity.
+    """
+    # First validate structure
+    is_valid, structure_error = validate_eod_json_structure(data)
+    if not is_valid:
+        logger.warning(f"[EOD] Invalid EOD_MONITOR structure: {structure_error}")
+        return None, structure_error
+
+    # Try to parse using EODMonitorSignal.from_dict()
+    try:
+        signal = EODMonitorSignal.from_dict(data)
+
+        # Log successful parse
+        action = signal.get_signal_type_to_execute()
+        logger.info(
+            f"[EOD] Parsed EOD_MONITOR signal: {signal.instrument}, "
+            f"price={signal.price:.2f}, "
+            f"potential_action={action.value if action else 'None'}, "
+            f"conditions_met={signal.conditions.all_entry_conditions_met()}"
+        )
+
+        return signal, None
+
+    except ValueError as e:
+        error_msg = f"EOD validation error: {str(e)}"
+        logger.warning(f"[EOD] {error_msg}")
+        return None, error_msg
+
+    except Exception as e:
+        error_msg = f"Unexpected error parsing EOD_MONITOR signal: {str(e)}"
+        logger.error(f"[EOD] {error_msg}", exc_info=True)
+        return None, error_msg
+
+
+def parse_any_signal(data: dict) -> Tuple[Optional[Union[Signal, EODMonitorSignal]], Optional[str], str]:
+    """
+    Parse any webhook signal (regular or EOD_MONITOR).
+
+    This is the main entry point for webhook signal parsing that handles
+    both regular trading signals and EOD_MONITOR signals.
+
+    Args:
+        data: JSON data dictionary from webhook
+
+    Returns:
+        Tuple of (signal, error_message, signal_type)
+        - signal: Signal or EODMonitorSignal object if successful, None otherwise
+        - error_message: None if successful, error description if failed
+        - signal_type: 'regular', 'eod_monitor', or 'unknown'
+
+    Example:
+        signal, error, sig_type = parse_any_signal(webhook_data)
+        if error:
+            log_error(error)
+        elif sig_type == 'eod_monitor':
+            handle_eod_signal(signal)
+        else:
+            handle_regular_signal(signal)
+    """
+    if not isinstance(data, dict):
+        return None, "Data must be a dictionary", "unknown"
+
+    # Check if this is an EOD_MONITOR signal
+    if is_eod_monitor_signal(data):
+        signal, error = parse_eod_monitor_signal(data)
+        return signal, error, 'eod_monitor'
+
+    # Regular signal
+    signal, error = parse_webhook_signal(data)
+    return signal, error, 'regular'
 

@@ -184,6 +184,38 @@ Current_Stop = MAX(Current_Stop, Trailing_Stop)  // Ratchet up only
 
 ---
 
+### 8. Crash Recovery System (`live/recovery.py`)
+
+**Purpose:** Restore portfolio state from PostgreSQL after crashes/restarts
+
+**Recovery Flow:**
+```
+Startup → Fetch DB State → Reconstruct Objects → Validate → Ready
+```
+
+**Key Methods:**
+- `recover_from_database()` - Main recovery entry point
+- `_validate_recovered_state()` - Consistency checks (risk/margin)
+
+**Error Codes:**
+- `DB_UNAVAILABLE` - Database connection failed
+- `DATA_CORRUPT` - Invalid position data
+- `VALIDATION_FAILED` - Risk/margin mismatch (epsilon: 0.01₹)
+
+**Validation Logic:**
+```python
+# Ensures saved state matches recalculated values
+risk_diff = abs(db_risk - calculated_risk)
+if risk_diff > 0.01:  # 1 paisa tolerance
+    return VALIDATION_FAILED
+```
+
+**HA Integration:** Updates coordinator status during recovery phases
+
+**Test Coverage:** Performance tests show 3-7ms recovery for 10-50 positions
+
+---
+
 ## Data Flow
 
 ### Backtest Mode

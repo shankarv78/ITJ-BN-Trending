@@ -1,0 +1,18 @@
+{
+  "openalgo_url": "http://127.0.0.1:5000",
+  "openalgo_api_key": "YOUR_API_KEY_FROM_OPENALGO_DASHBOARD",
+  "broker": "zerodha",
+  "execution_mode": "analyzer",
+  "risk_percent": 1.5,
+  "margin_per_lot_banknifty": 270000,
+  "margin_per_lot_goldmini": 105000,
+  "max_pyramids": 5,
+  "bank_nifty_lot_size": 30,
+  "gold_mini_lot_size": 100,
+  "market_start_hour": 9,
+  "market_start_minute": 15,
+  "market_end_hour": 15,
+  "market_end_minute": 30,
+  "enable_signal_validation": true,
+  "enable_eod_execution": true
+}

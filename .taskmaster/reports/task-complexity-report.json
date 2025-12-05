@@ -1,0 +1,93 @@
+{
+	"meta": {
+		"generatedAt": "2025-11-28T16:24:36.162Z",
+		"tasksAnalyzed": 10,
+		"totalTasks": 10,
+		"analysisCount": 10,
+		"thresholdScore": 5,
+		"projectName": "Taskmaster",
+		"usedResearch": false
+	},
+	"complexityAnalysis": [
+		{
+			"taskId": 21,
+			"taskTitle": "Implement Redis Configuration and Infrastructure",
+			"complexityScore": 5,
+			"recommendedSubtasks": 2,
+			"expansionPrompt": "1. Create `redis_config.json` and a configuration loader utility that merges environment variables with file-based config.\n2. Implement `core/redis_coordinator.py` with a robust `_get_connection` method, including connection pooling, retry decorators, and error handling for 'connection refused' scenarios.",
+			"reasoning": "Requires setting up new infrastructure and handling connection reliability (retries, timeouts). While the code volume isn't huge, getting the configuration and connection resiliency right is critical for all dependent tasks."
+		},
+		{
+			"taskId": 22,
+			"taskTitle": "Implement RedisCoordinator Leader Election",
+			"complexityScore": 8,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "1. Implement the `elect_leader` atomic logic using `SETNX` and Lua scripts for safety.\n2. Create a background `heartbeat` thread that continuously renews the lease while the process is alive.\n3. Integrate with PostgreSQL `instance_metadata` table to log leader transitions and implement the `is_leader` check property.",
+			"reasoning": "High complexity due to concurrency challenges (race conditions, split-brain potential). Implementing a reliable heartbeat mechanism and ensuring lock safety during process crashes requires careful design and testing."
+		},
+		{
+			"taskId": 23,
+			"taskTitle": "Implement Distributed Signal Locking",
+			"complexityScore": 6,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "",
+			"reasoning": "Moderately complex. It builds on the Redis infrastructure. The core logic is standard (SET NX EX), but the fallback mechanism (what happens if Redis is down) adds complexity to ensure the system fails safely (either open or closed)."
+		},
+		{
+			"taskId": 24,
+			"taskTitle": "Implement Signal Fingerprinting Logic",
+			"complexityScore": 3,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "",
+			"reasoning": "Low complexity. It is a pure logic function (hashing specific fields). The main detail is ensuring consistent normalization of input data (timestamps, strings) before hashing."
+		},
+		{
+			"taskId": 25,
+			"taskTitle": "Implement 3-Layer Signal Deduplication",
+			"complexityScore": 7,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "1. Implement the in-memory LRU cache layer.\n2. Integrate the `RedisCoordinator` locking layer created in Task 23.\n3. Implement the database layer logic to insert/check `signal_log` with proper transaction handling to catch Unique Constraint violations.",
+			"reasoning": "Involves coordinating three distinct storage systems (Memory, Redis, Postgres). Error handling and flow control (e.g., checking layer 1, then 2, then 3) must be robust to prevent latency spikes or false positives."
+		},
+		{
+			"taskId": 26,
+			"taskTitle": "Integrate Coordination into Webhook Endpoint",
+			"complexityScore": 6,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "",
+			"reasoning": "Requires modifying the critical path of the application. Care must be taken to wrap existing logic in try/finally blocks for lock release without breaking the existing error handling or response structure."
+		},
+		{
+			"taskId": 27,
+			"taskTitle": "Implement CrashRecoveryManager State Loading",
+			"complexityScore": 9,
+			"recommendedSubtasks": 4,
+			"expansionPrompt": "1. Define the `CrashRecoveryManager` class and DB queries to fetch `portfolio_state` and `open_positions`.\n2. Implement logic to reconstruct `PortfolioStateManager` internal variables (cash, equity, risk) from the DB snapshot.\n3. Implement logic to re-populate `LiveTradingEngine` tracking maps with active positions.\n4. Add validation logic to alert if the loaded state (sum of positions) diverges from the stored portfolio totals.",
+			"reasoning": "This is a critical system integrity task. Rehydrating complex in-memory state objects (`PortfolioStateManager`, `LiveTradingEngine`) from a relational database representation is error-prone and requires deep knowledge of the object lifecycle."
+		},
+		{
+			"taskId": 28,
+			"taskTitle": "Implement Statistics Persistence",
+			"complexityScore": 5,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "",
+			"reasoning": "Standard CRUD operation. The complexity lies in hooking into the correct lifecycle events (trade close, rollover) to trigger the save, ensuring performance isn't impacted."
+		},
+		{
+			"taskId": 29,
+			"taskTitle": "Implement Graceful Shutdown Mechanism",
+			"complexityScore": 4,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "",
+			"reasoning": "Straightforward implementation of signal handlers. Testing is the main effort here to ensure resources are actually released."
+		},
+		{
+			"taskId": 30,
+			"taskTitle": "Implement Health and Readiness Endpoints",
+			"complexityScore": 3,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "",
+			"reasoning": "Low complexity. Standard boilerplate for health checks. Dependency on `CrashRecoveryManager` state adds a slight logic requirement for the `/ready` endpoint."
+		}
+	]
+}

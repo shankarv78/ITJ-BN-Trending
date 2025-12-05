@@ -1,0 +1,16 @@
+  {
+    "host": "localhost",
+    "port": 6379,
+    "db": 0,
+    "socket_timeout": 5,
+    "socket_connect_timeout": 5,
+    "retry_on_timeout": true,
+    "health_check_interval": 30,
+    "decode_responses": true,
+    "leader_election": {
+      "enabled": true,
+      "lock_timeout": 10,
+      "heartbeat_interval": 5,
+      "heartbeat_timeout": 15
+    }
+  }

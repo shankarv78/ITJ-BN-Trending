@@ -477,27 +477,283 @@ class DatabaseStateManager:
             ce_symbol=row.get('ce_symbol'),
             pe_order_id=row.get('pe_order_id'),
             ce_order_id=row.get('ce_order_id'),
-            pe_entry_price=float(row['pe_entry_price']) if row.get('pe_entry_price') else None,
-            ce_entry_price=float(row['ce_entry_price']) if row.get('ce_entry_price') else None,
+            pe_entry_price=float(row['pe_entry_price']) if row.get('pe_entry_price') is not None else None,
+            ce_entry_price=float(row['ce_entry_price']) if row.get('ce_entry_price') is not None else None,
             contract_month=row.get('contract_month'),
             futures_symbol=row.get('futures_symbol'),
             futures_order_id=row.get('futures_order_id'),
             rollover_status=row.get('rollover_status', 'none'),
             original_expiry=row.get('original_expiry'),
             original_strike=row.get('original_strike'),
-            original_entry_price=float(row['original_entry_price']) if row.get('original_entry_price') else None,
+            original_entry_price=float(row['original_entry_price']) if row.get('original_entry_price') is not None else None,
             rollover_timestamp=row.get('rollover_timestamp'),
-            rollover_pnl=float(row['rollover_pnl']) if row.get('rollover_pnl') else 0.0,
+            rollover_pnl=float(row['rollover_pnl']) if row.get('rollover_pnl') is not None else 0.0,
             rollover_count=row.get('rollover_count', 0),
             limiter=row.get('limiter'),
-            risk_contribution=float(row['risk_contribution']) if row.get('risk_contribution') else 0.0,
-            vol_contribution=float(row['vol_contribution']) if row.get('vol_contribution') else 0.0,
+            risk_contribution=float(row['risk_contribution']) if row.get('risk_contribution') is not None else 0.0,
+            vol_contribution=float(row['vol_contribution']) if row.get('vol_contribution') is not None else 0.0,
             is_base_position=row.get('is_base_position', False)
         )
 
+    # ===== INSTANCE METADATA OPERATIONS =====
+    
+    def upsert_instance_metadata(
+        self,
+        instance_id: str,
+        is_leader: bool,
+        status: str = 'active',
+        hostname: str = None,
+        port: int = None,
+        version: str = None
+    ) -> bool:
+        """
+        Insert or update instance metadata in database
+        
+        Updates:
+        - is_leader: Current leader status
+        - last_heartbeat: Current timestamp
+        - leader_acquired_at: Timestamp when leadership was acquired (if becoming leader)
+        - status: Instance status (active, standby, crashed)
+        - updated_at: Current timestamp
+        
+        Args:
+            instance_id: Unique instance identifier
+            is_leader: Whether this instance is the leader
+            status: Instance status (default: 'active')
+            hostname: Optional hostname
+            port: Optional port
+            version: Optional version string
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.transaction() as conn:
+                cursor = conn.cursor()
+                
+                # Check if instance exists
+                cursor.execute(
+                    "SELECT is_leader, leader_acquired_at FROM instance_metadata WHERE instance_id = %s",
+                    (instance_id,)
+                )
+                existing = cursor.fetchone()
+                
+                now = datetime.now()
+                leader_acquired_at = now if is_leader and (not existing or not existing[0]) else None
+                
+                # If instance exists and was already leader, preserve leader_acquired_at
+                if existing and existing[0] and is_leader and existing[1]:
+                    leader_acquired_at = existing[1]
+                
+                # Upsert query
+                cursor.execute("""
+                    INSERT INTO instance_metadata
+                    (instance_id, started_at, last_heartbeat, is_leader, leader_acquired_at, status, hostname, port, version, updated_at)
+                    VALUES
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (instance_id) DO UPDATE SET
+                        last_heartbeat = EXCLUDED.last_heartbeat,
+                        is_leader = EXCLUDED.is_leader,
+                        leader_acquired_at = COALESCE(EXCLUDED.leader_acquired_at, instance_metadata.leader_acquired_at),
+                        status = EXCLUDED.status,
+                        hostname = COALESCE(EXCLUDED.hostname, instance_metadata.hostname),
+                        port = COALESCE(EXCLUDED.port, instance_metadata.port),
+                        version = COALESCE(EXCLUDED.version, instance_metadata.version),
+                        updated_at = EXCLUDED.updated_at
+                """, (
+                    instance_id,
+                    now,  # started_at (only set on insert)
+                    now,  # last_heartbeat
+                    is_leader,
+                    leader_acquired_at,
+                    status,
+                    hostname,
+                    port,
+                    version,
+                    now  # updated_at
+                ))
+                
+                logger.debug(f"Instance metadata updated: {instance_id}, is_leader={is_leader}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to update instance metadata: {e}")
+            return False
+    
+    def get_stale_instances(self, heartbeat_timeout: int = 30) -> List[dict]:
+        """
+        Detect instances with stale heartbeats (crashed or network-partitioned)
+        
+        Returns list of instances where last_heartbeat is older than timeout.
+        Critical for split-brain detection.
+        
+        Args:
+            heartbeat_timeout: Number of seconds since last heartbeat to consider stale (default: 30)
+            
+        Returns:
+            List of dictionaries with instance metadata for stale instances:
+            [
+                {
+                    'instance_id': 'uuid-pid',
+                    'is_leader': True/False,
+                    'last_heartbeat': datetime,
+                    'hostname': 'hostname',
+                    'seconds_stale': 45.2
+                },
+                ...
+            ]
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                # Calculate stale threshold: instances with heartbeat older than timeout
+                # Use EXTRACT to compare seconds directly (safer than string interpolation)
+                cursor.execute("""
+                    SELECT 
+                        instance_id,
+                        is_leader,
+                        last_heartbeat,
+                        hostname,
+                        status,
+                        EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) AS seconds_stale
+                    FROM instance_metadata
+                    WHERE EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) > %s
+                    ORDER BY last_heartbeat ASC
+                """, (heartbeat_timeout,))
+                results = cursor.fetchall()
+                return [dict(row) for row in results]
+        except Exception as e:
+            logger.error(f"Failed to get stale instances: {e}")
+            return []
+    
+    def get_current_leader_from_db(self, force_fresh: bool = False) -> Optional[dict]:
+        """
+        Get current leader from database (for comparison with Redis)
+        
+        Returns most recent instance marked as leader with fresh heartbeat.
+        Use for split-brain detection.
+        
+        Args:
+            force_fresh: If True, ensures we see all committed transactions
+                         by executing a sync point query before reading.
+                         This guarantees the connection sees the latest commits
+                         from other sessions. Use this for critical reads like
+                         split-brain detection.
+        
+        Returns:
+            Dictionary with leader metadata if found, None otherwise:
+            {
+                'instance_id': 'uuid-pid',
+                'hostname': 'hostname',
+                'leader_acquired_at': datetime,
+                'last_heartbeat': datetime
+            }
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                
+                # CRITICAL: Force connection to sync with latest commits
+                # This ensures we see all committed transactions from other sessions
+                # before reading leader data. Prevents stale reads in split-brain detection.
+                if force_fresh:
+                    # Execute a no-op query that forces the connection to sync
+                    # with the latest committed transactions
+                    cursor.execute("SELECT pg_sleep(0)")
+                    cursor.fetchone()
+                
+                cursor.execute("""
+                    SELECT 
+                        instance_id,
+                        hostname,
+                        leader_acquired_at,
+                        last_heartbeat
+                    FROM instance_metadata
+                    WHERE is_leader = TRUE
+                      AND last_heartbeat >= NOW() - INTERVAL '30 seconds'
+                    ORDER BY last_heartbeat DESC
+                    LIMIT 1
+                """)
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to get current leader from database: {e}")
+            return None
+    
+    def record_leadership_transition(
+        self,
+        instance_id: str,
+        became_leader: bool,
+        reason: str = None,
+        hostname: str = None
+    ) -> bool:
+        """
+        Record leadership state transitions for audit trail
+        
+        Simplified version for Phase 1 - no release reason tracking.
+        Creates a new history record when instance becomes leader,
+        and updates the most recent record when instance releases leadership.
+        
+        Args:
+            instance_id: Unique instance identifier
+            became_leader: True if becoming leader, False if releasing leadership
+            reason: Optional reason for transition (not stored in Phase 1, kept for API compatibility)
+            hostname: Optional hostname for the instance
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.transaction() as conn:
+                cursor = conn.cursor()
+                now = datetime.now()
+                
+                if became_leader:
+                    # Becoming leader - create new history record
+                    cursor.execute("""
+                        INSERT INTO leadership_history
+                        (instance_id, became_leader_at, hostname)
+                        VALUES (%s, %s, %s)
+                    """, (instance_id, now, hostname))
+                    logger.debug(f"Leadership history recorded: {instance_id} became leader at {now}")
+                else:
+                    # Releasing leadership - update most recent record for this instance
+                    # Find the most recent record without released_leader_at
+                    # PostgreSQL doesn't support ORDER BY/LIMIT in UPDATE, so use subquery
+                    cursor.execute("""
+                        UPDATE leadership_history
+                        SET released_leader_at = %s,
+                            leadership_duration_seconds = EXTRACT(EPOCH FROM (%s - became_leader_at))::INTEGER
+                        WHERE id = (
+                            SELECT id FROM leadership_history
+                            WHERE instance_id = %s
+                              AND released_leader_at IS NULL
+                            ORDER BY became_leader_at DESC
+                            LIMIT 1
+                        )
+                    """, (now, now, instance_id))
+                    
+                    if cursor.rowcount > 0:
+                        logger.debug(f"Leadership history updated: {instance_id} released leadership at {now}")
+                    else:
+                        # No matching record found - create one anyway for completeness
+                        logger.warning(f"No open leadership record found for {instance_id}, creating new record")
+                        cursor.execute("""
+                            INSERT INTO leadership_history
+                            (instance_id, became_leader_at, released_leader_at, leadership_duration_seconds, hostname)
+                            VALUES (%s, %s, %s, 0, %s)
+                        """, (instance_id, now, now, hostname))
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to record leadership transition: {e}")
+            return False
+    
     def close_all_connections(self):
         """Close all database connections in pool"""
         if self.pool:
             self.pool.closeall()
             logger.info("All database connections closed")
+
 

@@ -23,6 +23,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - v6 = v5 capacity + v4 parameters + NO ROC constraint
 - Always reference BANKNIFTY_V6_CHANGELOG.md when working with v6
 
+## 🔴 CRITICAL: System Architecture (Portfolio Manager)
+
+**This is the most important concept to understand when working on this codebase.**
+
+```
+┌─────────────────────────────────┐     ┌─────────────────────────────────────────┐
+│  TradingView (Pine Script)      │     │  Portfolio Manager (Python)              │
+│  ════════════════════════════   │     │  ════════════════════════════════════    │
+│  SIGNAL GENERATOR ONLY          │────▶│  TOM BASSO POSITION SIZING ENGINE        │
+│                                 │     │                                          │
+│  Sends:                         │     │  Calculates:                             │
+│  • 7 condition states (bool)    │     │  • Position size (lots) using REAL equity│
+│  • Indicator values (RSI, ST)   │     │  • Risk per trade (shared capital)       │
+│  • Current price                │     │  • Margin availability (both instruments)│
+│  • Position status              │     │  • Stop distance from SuperTrend         │
+│                                 │     │                                          │
+│  Does NOT calculate:            │     │  Knows:                                  │
+│  • Position sizing              │     │  • ACTUAL portfolio equity               │
+│  • Lots to trade                │     │  • Bank Nifty + Gold Mini positions      │
+│  • Available margin             │     │  • Combined margin usage                 │
+└─────────────────────────────────┘     └─────────────────────────────────────────┘
+```
+
+**Why this matters:**
+1. **Shared Capital**: Bank Nifty and Gold Mini compete for the SAME capital pool
+2. **Pine Script Limitation**: `strategy.equity` is per-chart, not real portfolio equity
+3. **Cross-Instrument Awareness**: Pine Script doesn't know about other instrument's positions
+4. **Tom Basso Methodology**: Position sizing based on risk %, equity, and ATR must use REAL values
+
+**For EOD_MONITOR signals:**
+- Pine Script sends: conditions, indicators, price, position_status
+- Python calculates: `lots = (portfolio_equity × risk% / stop_distance / lot_size) × ER`
+- The `sizing` field in EOD_MONITOR is for REFERENCE only; Python recalculates
+
+**Never assume Pine Script's position sizing is authoritative for live trading.**
+
+---
+
 ## Repository Overview
 
 This repository contains Pine Script trading strategies for trend-following on Bank Nifty (Indian index) and Gold Mini (MCX). The strategies implement sophisticated momentum-based systems with pyramiding, multiple stop-loss modes, and comprehensive risk management.

@@ -19,3 +19,9 @@ pytz==2023.3
 # Database
 psycopg2-binary>=2.9.9
 
+# Redis (for distributed coordination)
+redis>=5.0.0
+
+# Scheduling (for EOD pre-close execution)
+APScheduler>=3.10.0
+

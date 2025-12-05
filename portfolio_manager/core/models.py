@@ -17,6 +17,7 @@ class SignalType(Enum):
     BASE_ENTRY = "BASE_ENTRY"
     PYRAMID = "PYRAMID"
     EXIT = "EXIT"
+    EOD_MONITOR = "EOD_MONITOR"  # Pre-close monitoring signal with indicator values
 
 class PositionLayer(Enum):
     """Position layers for pyramiding"""
@@ -310,10 +311,250 @@ class PyramidGateCheck:
     portfolio_gate: bool
     profit_gate: bool
     reason: str
-    
+
     # Details
     price_move_r: float = 0.0
     atr_spacing: float = 0.0
     portfolio_risk_pct: float = 0.0
     portfolio_vol_pct: float = 0.0
+
+
+@dataclass
+class EODConditions:
+    """
+    All 7 entry conditions + composite signals from TradingView EOD_MONITOR
+
+    These are evaluated by TradingView and sent to Python for pre-close execution.
+    """
+    # Individual conditions (all 7 must be True for entry)
+    rsi_condition: bool = False      # RSI(6) > 70
+    ema_condition: bool = False      # Close > EMA(200)
+    dc_condition: bool = False       # Close > Donchian Upper(20)
+    adx_condition: bool = False      # ADX(30) < threshold (30 for BN, 20 for Gold)
+    er_condition: bool = False       # Efficiency Ratio > 0.8
+    st_condition: bool = False       # Close > SuperTrend(10, 1.5)
+    not_doji: bool = False           # Body > 10% of range
+
+    # Composite signals
+    long_entry: bool = False         # All 7 conditions met (entry signal)
+    long_exit: bool = False          # Exit signal (close < SuperTrend)
+
+    def all_entry_conditions_met(self) -> bool:
+        """Check if all 7 entry conditions are met"""
+        return (self.rsi_condition and self.ema_condition and
+                self.dc_condition and self.adx_condition and
+                self.er_condition and self.st_condition and self.not_doji)
+
+    def should_enter(self) -> bool:
+        """Check if we should enter a position"""
+        return self.long_entry or self.all_entry_conditions_met()
+
+    def should_exit(self) -> bool:
+        """Check if we should exit positions"""
+        return self.long_exit
+
+
+@dataclass
+class EODIndicators:
+    """
+    All indicator values from TradingView EOD_MONITOR signal
+
+    These values are used to verify conditions and calculate position sizing.
+    """
+    rsi: float = 0.0           # RSI(6) value
+    ema: float = 0.0           # EMA(200) value
+    dc_upper: float = 0.0      # Donchian Channel Upper(20)
+    adx: float = 0.0           # ADX(30) value
+    er: float = 0.0            # Efficiency Ratio value
+    supertrend: float = 0.0    # SuperTrend(10, 1.5) value
+    atr: float = 0.0           # ATR value for position sizing
+    roc: Optional[float] = None  # Rate of Change (optional, for pyramid gating)
+
+
+@dataclass
+class EODPositionStatus:
+    """Current position status from TradingView for EOD decision making"""
+    in_position: bool = False       # Whether we have an open position
+    pyramid_count: int = 0          # Number of pyramid layers (0-5)
+    entry_price: Optional[float] = None  # Average entry price if in position
+    unrealized_pnl: Optional[float] = None  # Current unrealized P&L
+
+
+@dataclass
+class EODSizing:
+    """Position sizing information from TradingView EOD_MONITOR"""
+    suggested_lots: int = 0         # Suggested lot size from TV
+    stop_level: float = 0.0         # Stop loss level
+    risk_per_lot: Optional[float] = None  # Risk per lot in Rs
+
+
+@dataclass
+class EODMonitorSignal:
+    """
+    EOD (End-of-Day) Monitor Signal from TradingView
+
+    ARCHITECTURE:
+    - TradingView = SIGNAL GENERATOR ONLY (sends raw conditions/indicators)
+    - Python Portfolio Manager = TOM BASSO POSITION SIZING ENGINE
+    - Capital is SHARED across Bank Nifty + Gold Mini
+    - Position sizing MUST use actual portfolio equity, NOT Pine Script estimates
+
+    Sent during the last 5 minutes before market close (15:25-15:30 for NSE,
+    23:25+ for MCX). Fires on EVERY TICK so Python gets real-time updates.
+
+    Timeline (v8.0):
+    - T-5 min: TradingView starts sending EOD_MONITOR signals (every tick)
+    - T-30 sec: Python checks conditions, calculates position size, places order
+    - T-15 sec: Python tracks order to completion
+    - T-0: Market closes
+
+    Note: 'sizing' field is OPTIONAL (deprecated in v8.0).
+    Python calculates position sizing using real portfolio equity.
+    """
+    timestamp: datetime
+    instrument: str                  # BANK_NIFTY or GOLD_MINI
+    price: float                     # Current price at signal time
+    conditions: EODConditions        # All 7 conditions + entry/exit signals
+    indicators: EODIndicators        # All indicator values
+    position_status: EODPositionStatus  # Current position info (for reference)
+    sizing: Optional[EODSizing] = None  # DEPRECATED: Python calculates sizing
+
+    # Computed fields
+    market_close_time: Optional[datetime] = None  # When market closes
+    seconds_to_close: Optional[int] = None        # Seconds until market close
+
+    def __post_init__(self):
+        """Validate EOD monitor signal data"""
+        if self.price <= 0:
+            raise ValueError(f"Invalid price: {self.price}")
+        if self.instrument not in ['BANK_NIFTY', 'GOLD_MINI']:
+            raise ValueError(f"Invalid instrument: {self.instrument}")
+        # Validate indicators have reasonable values
+        if self.indicators.atr < 0:
+            raise ValueError(f"Invalid ATR: {self.indicators.atr}")
+
+    def should_execute_entry(self) -> bool:
+        """
+        Check if CONDITIONS allow an entry at EOD.
+
+        Note: This only checks conditions, not position sizing.
+        Python calculates actual position size separately using
+        real portfolio equity (shared across instruments).
+        """
+        return (not self.position_status.in_position and
+                self.conditions.should_enter())
+
+    def should_execute_pyramid(self) -> bool:
+        """
+        Check if CONDITIONS allow a pyramid at EOD.
+
+        Note: This only checks conditions, not position sizing.
+        Python calculates actual position size separately using
+        real portfolio equity (shared across instruments).
+        """
+        return (self.position_status.in_position and
+                self.position_status.pyramid_count < 5 and
+                self.conditions.should_enter())
+
+    def should_execute_exit(self) -> bool:
+        """Check if we should execute an exit at EOD"""
+        return (self.position_status.in_position and
+                self.conditions.should_exit())
+
+    def get_signal_type_to_execute(self) -> Optional[SignalType]:
+        """Determine what signal type should be executed at EOD"""
+        if self.should_execute_exit():
+            return SignalType.EXIT
+        elif self.should_execute_entry():
+            return SignalType.BASE_ENTRY
+        elif self.should_execute_pyramid():
+            return SignalType.PYRAMID
+        return None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EODMonitorSignal':
+        """
+        Create EODMonitorSignal from webhook JSON data
+
+        Args:
+            data: Dictionary with EOD_MONITOR webhook JSON
+
+        Returns:
+            EODMonitorSignal instance
+
+        Raises:
+            ValueError: If validation fails
+        """
+        # Validate signal type
+        if data.get('type', '').upper() != 'EOD_MONITOR':
+            raise ValueError(f"Expected EOD_MONITOR signal, got: {data.get('type')}")
+
+        # Validate required fields
+        required_fields = ['instrument', 'price', 'conditions', 'indicators', 'timestamp']
+        missing = [f for f in required_fields if f not in data]
+        if missing:
+            raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+        # Parse timestamp
+        timestamp_str = data['timestamp']
+        try:
+            timestamp = date_parser.parse(timestamp_str)
+        except Exception:
+            raise ValueError(f"Invalid timestamp format: '{timestamp_str}'")
+
+        # Parse conditions
+        cond_data = data.get('conditions', {})
+        conditions = EODConditions(
+            rsi_condition=cond_data.get('rsi_condition', False),
+            ema_condition=cond_data.get('ema_condition', False),
+            dc_condition=cond_data.get('dc_condition', False),
+            adx_condition=cond_data.get('adx_condition', False),
+            er_condition=cond_data.get('er_condition', False),
+            st_condition=cond_data.get('st_condition', False),
+            not_doji=cond_data.get('not_doji', False),
+            long_entry=cond_data.get('long_entry', False),
+            long_exit=cond_data.get('long_exit', False)
+        )
+
+        # Parse indicators
+        ind_data = data.get('indicators', {})
+        indicators = EODIndicators(
+            rsi=float(ind_data.get('rsi', 0)),
+            ema=float(ind_data.get('ema', 0)),
+            dc_upper=float(ind_data.get('dc_upper', 0)),
+            adx=float(ind_data.get('adx', 0)),
+            er=float(ind_data.get('er', 0)),
+            supertrend=float(ind_data.get('supertrend', 0)),
+            atr=float(ind_data.get('atr', 0)),
+            roc=float(ind_data['roc']) if 'roc' in ind_data and ind_data['roc'] else None
+        )
+
+        # Parse position status
+        pos_data = data.get('position_status', {})
+        position_status = EODPositionStatus(
+            in_position=pos_data.get('in_position', False),
+            pyramid_count=int(pos_data.get('pyramid_count', 0)),
+            entry_price=float(pos_data['entry_price']) if pos_data.get('entry_price') else None,
+            unrealized_pnl=float(pos_data['unrealized_pnl']) if pos_data.get('unrealized_pnl') else None
+        )
+
+        # Parse sizing (OPTIONAL - deprecated in v8.0, Python calculates position sizing)
+        sizing = None
+        sizing_data = data.get('sizing')
+        if sizing_data:
+            sizing = EODSizing(
+                suggested_lots=int(sizing_data.get('suggested_lots', 0)),
+                stop_level=float(sizing_data.get('stop_level', 0)),
+                risk_per_lot=float(sizing_data['risk_per_lot']) if sizing_data.get('risk_per_lot') else None
+            )
+
+        return cls(
+            timestamp=timestamp,
+            instrument=data['instrument'].upper(),
+            price=float(data['price']),
+            conditions=conditions,
+            indicators=indicators,
+            position_status=position_status,
+            sizing=sizing  # May be None - Python calculates its own sizing
+        )
 

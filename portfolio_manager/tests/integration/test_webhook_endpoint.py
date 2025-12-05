@@ -13,6 +13,7 @@ Tests complete webhook processing workflow:
 import pytest
 import json
 import uuid
+import time
 from datetime import datetime
 from flask import Flask, request, jsonify
 from tests.fixtures.webhook_payloads import (
@@ -466,4 +467,321 @@ class TestWebhookEndpoint:
         data = json.loads(response.data)
         assert 'request_id' in data
         assert data['status'] == 'error'
+    
+    def test_signal_rejection_when_not_leader(self, mock_openalgo_client):
+        """Test signal rejection when instance is not leader"""
+        from core.redis_coordinator import RedisCoordinator
+        from core.db_state_manager import DatabaseStateManager
+        from live.engine import LiveTradingEngine
+        from flask import Flask
+        from core.webhook_parser import DuplicateDetector
+        
+        app = Flask(__name__)
+        app.config['TESTING'] = True
+        
+        # Initialize engine
+        engine = LiveTradingEngine(
+            initial_capital=5000000.0,
+            openalgo_client=mock_openalgo_client
+        )
+        
+        # Initialize duplicate detector
+        duplicate_detector = DuplicateDetector(window_seconds=60)
+        
+        # Create coordinator but don't make it leader
+        redis_config = {
+            'host': 'localhost',
+            'port': 6379,
+            'db': 0,
+            'password': None,
+            'ssl': False,
+            'socket_timeout': 2.0,
+            'enable_redis': True,
+            'max_connections': 10
+        }
+        
+        # Try to create coordinator (may fail if Redis not available, that's OK)
+        coordinator = None
+        try:
+            coordinator = RedisCoordinator(redis_config)
+            # Don't start heartbeat or become leader - simulate follower instance
+            # coordinator.is_leader will be False
+        except Exception:
+            # Redis not available - skip this test
+            pytest.skip("Redis not available for leader verification test")
+        
+        # Store in app context
+        app.engine = engine
+        app.duplicate_detector = duplicate_detector
+        app.coordinator = coordinator
+        
+        # Define webhook route with leader check
+        @app.route('/webhook', methods=['POST'])
+        def webhook():
+            from core.webhook_parser import validate_json_structure, parse_webhook_signal
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            request_id = str(uuid.uuid4())[:8]
+            
+            try:
+                if request.json is None:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'invalid_json',
+                        'message': 'Invalid or missing JSON',
+                        'request_id': request_id
+                    }), 400
+                
+                # Validate JSON structure
+                is_valid, error_message = validate_json_structure(request.json)
+                if not is_valid:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'invalid_json',
+                        'message': error_message or 'Invalid JSON structure',
+                        'request_id': request_id
+                    }), 400
+                
+                # Leader check (CRITICAL for trading)
+                if coordinator and not coordinator.is_leader:
+                    logger.warning(
+                        f"[{request_id}] Rejecting signal - not leader (instance: {coordinator.instance_id})"
+                    )
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'not_leader',
+                        'reason': 'not_leader',
+                        'message': f'Signal rejected: instance {coordinator.instance_id} is not the leader',
+                        'request_id': request_id
+                    }), 403
+                
+                # Parse signal
+                signal, parse_error = parse_webhook_signal(request.json)
+                if signal is None:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'parse_error',
+                        'message': parse_error or 'Failed to parse signal',
+                        'request_id': request_id
+                    }), 400
+                
+                # Check for duplicates
+                if duplicate_detector.is_duplicate(signal):
+                    return jsonify({
+                        'status': 'ignored',
+                        'reason': 'duplicate',
+                        'message': 'Signal already processed',
+                        'request_id': request_id
+                    }), 200
+                
+                # RE-CHECK leadership (race condition protection)
+                if coordinator and not coordinator.is_leader:
+                    logger.error(
+                        f"[{request_id}] Lost leadership during signal processing - aborting"
+                    )
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'lost_leadership',
+                        'reason': 'lost_leadership',
+                        'message': 'Signal processing aborted: leadership lost during processing',
+                        'request_id': request_id
+                    }), 403
+                
+                # Process signal
+                result = engine.process_signal(signal, coordinator=coordinator)
+                
+                return jsonify({
+                    'status': 'success',
+                    'result': result,
+                    'request_id': request_id
+                }), 200
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] Error processing webhook: {e}", exc_info=True)
+                return jsonify({
+                    'status': 'error',
+                    'error_type': 'internal_error',
+                    'message': str(e),
+                    'request_id': request_id
+                }), 500
+        
+        client = app.test_client()
+        
+        # Send signal when not leader - should be rejected
+        response = client.post(
+            '/webhook',
+            json=VALID_BASE_ENTRY_BN,
+            content_type='application/json'
+        )
+        
+        # Should be rejected with 403 Forbidden
+        assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.data}"
+        data = json.loads(response.data)
+        assert data['status'] == 'error'
+        assert data['error_type'] == 'not_leader'
+        assert data['reason'] == 'not_leader'
+        assert 'not the leader' in data['message']
+        assert 'request_id' in data
+    
+    def test_signal_rejection_when_leadership_lost_mid_processing(self, mock_openalgo_client):
+        """Test signal rejection when leadership is lost during processing (race condition)"""
+        from core.redis_coordinator import RedisCoordinator
+        from live.engine import LiveTradingEngine
+        from flask import Flask
+        from core.webhook_parser import DuplicateDetector
+        
+        app = Flask(__name__)
+        app.config['TESTING'] = True
+        
+        # Initialize engine
+        engine = LiveTradingEngine(
+            initial_capital=5000000.0,
+            openalgo_client=mock_openalgo_client
+        )
+        
+        # Initialize duplicate detector
+        duplicate_detector = DuplicateDetector(window_seconds=60)
+        
+        # Create coordinator and make it leader
+        redis_config = {
+            'host': 'localhost',
+            'port': 6379,
+            'db': 0,
+            'password': None,
+            'ssl': False,
+            'socket_timeout': 2.0,
+            'enable_redis': True,
+            'max_connections': 10
+        }
+        
+        coordinator = None
+        try:
+            coordinator = RedisCoordinator(redis_config)
+            coordinator.start_heartbeat()
+            # Become leader
+            coordinator.try_become_leader()
+            time.sleep(0.5)  # Wait for election
+            assert coordinator.is_leader is True, "Coordinator should be leader"
+        except Exception:
+            pytest.skip("Redis not available for leader verification test")
+        
+        # Store in app context
+        app.engine = engine
+        app.duplicate_detector = duplicate_detector
+        app.coordinator = coordinator
+        
+        # Define webhook route with leader check
+        @app.route('/webhook', methods=['POST'])
+        def webhook():
+            from core.webhook_parser import validate_json_structure, parse_webhook_signal
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            request_id = str(uuid.uuid4())[:8]
+            
+            try:
+                if request.json is None:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'invalid_json',
+                        'message': 'Invalid or missing JSON',
+                        'request_id': request_id
+                    }), 400
+                
+                # Validate JSON structure
+                is_valid, error_message = validate_json_structure(request.json)
+                if not is_valid:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'invalid_json',
+                        'message': error_message or 'Invalid JSON structure',
+                        'request_id': request_id
+                    }), 400
+                
+                # Initial leader check (passes - we're leader)
+                if coordinator and not coordinator.is_leader:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'not_leader',
+                        'reason': 'not_leader',
+                        'message': f'Signal rejected: instance {coordinator.instance_id} is not the leader',
+                        'request_id': request_id
+                    }), 403
+                
+                # Parse signal
+                signal, parse_error = parse_webhook_signal(request.json)
+                if signal is None:
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'parse_error',
+                        'message': parse_error or 'Failed to parse signal',
+                        'request_id': request_id
+                    }), 400
+                
+                # Check for duplicates
+                if duplicate_detector.is_duplicate(signal):
+                    return jsonify({
+                        'status': 'ignored',
+                        'reason': 'duplicate',
+                        'message': 'Signal already processed',
+                        'request_id': request_id
+                    }), 200
+                
+                # Simulate leadership loss during processing (race condition)
+                coordinator.release_leadership()
+                coordinator.is_leader = False
+                
+                # RE-CHECK leadership (should now fail)
+                if coordinator and not coordinator.is_leader:
+                    logger.error(
+                        f"[{request_id}] Lost leadership during signal processing - aborting"
+                    )
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'lost_leadership',
+                        'reason': 'lost_leadership',
+                        'message': 'Signal processing aborted: leadership lost during processing',
+                        'request_id': request_id
+                    }), 403
+                
+                # Process signal (should not reach here)
+                result = engine.process_signal(signal, coordinator=coordinator)
+                
+                return jsonify({
+                    'status': 'success',
+                    'result': result,
+                    'request_id': request_id
+                }), 200
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] Error processing webhook: {e}", exc_info=True)
+                return jsonify({
+                    'status': 'error',
+                    'error_type': 'internal_error',
+                    'message': str(e),
+                    'request_id': request_id
+                }), 500
+        
+        client = app.test_client()
+        
+        # Send signal - should be rejected after leadership loss
+        response = client.post(
+            '/webhook',
+            json=VALID_BASE_ENTRY_BN,
+            content_type='application/json'
+        )
+        
+        # Should be rejected with 403 Forbidden (lost leadership)
+        assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.data}"
+        data = json.loads(response.data)
+        assert data['status'] == 'error'
+        assert data['error_type'] == 'lost_leadership'
+        assert data['reason'] == 'lost_leadership'
+        assert 'leadership lost' in data['message'].lower()
+        assert 'request_id' in data
+        
+        # Cleanup
+        coordinator.stop_heartbeat()
+        coordinator.close()
 

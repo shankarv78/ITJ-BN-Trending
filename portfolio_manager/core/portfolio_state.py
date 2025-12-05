@@ -154,15 +154,15 @@ class PortfolioStateManager:
     def _calculate_margin_metrics(self, state: PortfolioState):
         """Calculate margin utilization metrics"""
         total_margin_used = 0.0
-        
+
         for pos in state.get_open_positions().values():
             instrument = pos.instrument
-            
+
             if instrument == "GOLD_MINI":
-                margin_per_lot = 105000.0
+                margin_per_lot = 105000.0  # ₹1.05L per lot (conservative)
             else:  # BANK_NIFTY
-                margin_per_lot = 270000.0
-            
+                margin_per_lot = 270000.0  # ₹2.7L per lot
+
             total_margin_used += pos.lots * margin_per_lot
         
         state.margin_used = total_margin_used

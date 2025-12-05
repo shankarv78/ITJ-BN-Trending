@@ -539,14 +539,14 @@ if show_info_panel and barstate.islast
 // ========================================
 // DEBUG PANEL
 // ========================================
-if show_debug
-    plot(rsi_condition ? 1 : 0, "RSI Cond", color=color.red, display=display.pane)
-    plot(ema_condition ? 1 : 0, "EMA Cond", color=color.blue, display=display.pane)
-    plot(dc_condition ? 1 : 0, "DC Cond", color=color.green, display=display.pane)
-    plot(adx_condition ? 1 : 0, "ADX Cond", color=color.orange, display=display.pane)
-    plot(er_condition ? 1 : 0, "ER Cond", color=color.purple, display=display.pane)
-    plot(st_condition ? 1 : 0, "ST Cond", color=color.teal, display=display.pane)
-    plot(long_entry ? 7 : 0, "ALL", color=color.lime, style=plot.style_columns, display=display.pane)
+// Note: plot() must be at global scope, so we use show_debug in the value conditional
+plot(show_debug ? (rsi_condition ? 1 : 0) : na, "RSI Cond", color=color.red, display=display.pane)
+plot(show_debug ? (ema_condition ? 1 : 0) : na, "EMA Cond", color=color.blue, display=display.pane)
+plot(show_debug ? (dc_condition ? 1 : 0) : na, "DC Cond", color=color.green, display=display.pane)
+plot(show_debug ? (adx_condition ? 1 : 0) : na, "ADX Cond", color=color.orange, display=display.pane)
+plot(show_debug ? (er_condition ? 1 : 0) : na, "ER Cond", color=color.purple, display=display.pane)
+plot(show_debug ? (st_condition ? 1 : 0) : na, "ST Cond", color=color.teal, display=display.pane)
+plot(show_debug ? (long_entry ? 7 : 0) : na, "ALL", color=color.lime, style=plot.style_columns, display=display.pane)
 
 // ========================================
 // ALERTS

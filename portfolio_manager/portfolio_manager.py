@@ -202,8 +202,12 @@ def run_live(args):
     """Run live trading"""
     from live.engine import LiveTradingEngine
     from flask import Flask, request, jsonify
-    from core.webhook_parser import DuplicateDetector, validate_json_structure, parse_webhook_signal
-    from core.models import Signal
+    from core.webhook_parser import (
+        DuplicateDetector, validate_json_structure, parse_webhook_signal,
+        is_eod_monitor_signal, parse_eod_monitor_signal, parse_any_signal
+    )
+    from core.models import Signal, EODMonitorSignal
+    from core.eod_scheduler import EODScheduler
     import json
 
     logger.info("=" * 60)
@@ -239,28 +243,64 @@ def run_live(args):
     else:
         logger.info("Database persistence disabled (no --db-config provided)")
 
-    # Initialize OpenAlgo client (mock for now, replace with real client)
-    class MockOpenAlgoClient:
-        def get_funds(self):
-            return {'availablecash': args.capital}
+    # Initialize broker client using factory
+    try:
+        from brokers.factory import create_broker_client
+        
+        # Load OpenAlgo config if available
+        openalgo_config_path = Path(__file__).parent / 'openalgo_config.json'
+        broker_config = {}
+        
+        if openalgo_config_path.exists():
+            logger.info(f"Loading OpenAlgo config from {openalgo_config_path}")
+            with open(openalgo_config_path, 'r') as f:
+                broker_config = json.load(f)
+        else:
+            logger.warning(f"OpenAlgo config not found at {openalgo_config_path}")
+            logger.warning("Using command-line arguments for broker configuration")
+            # Fallback to command-line args
+            broker_config = {
+                'openalgo_url': 'http://127.0.0.1:5000',
+                'openalgo_api_key': args.api_key,
+                'broker': args.broker,
+                'execution_mode': 'analyzer'  # Default to analyzer for safety
+            }
+        
+        # Determine broker type: use 'openalgo' for real broker, 'mock' for testing
+        broker_type = 'openalgo' if args.broker in ['zerodha', 'dhan'] else 'mock'
+        
+        # Override API key from command line if provided
+        if args.api_key:
+            broker_config['openalgo_api_key'] = args.api_key
+        
+        logger.info(f"Creating broker client: type={broker_type}, broker={args.broker}")
+        openalgo = create_broker_client(broker_type, broker_config)
+        logger.info("✓ Broker client initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize broker client: {e}", exc_info=True)
+        logger.error("Falling back to mock client for testing")
+        # Fallback to mock client
+        class MockOpenAlgoClient:
+            def get_funds(self):
+                return {'availablecash': args.capital}
 
-        def get_quote(self, symbol):
-            # Mock quote for testing
-            return {'ltp': 52000, 'bid': 51990, 'ask': 52010}
+            def get_quote(self, symbol):
+                return {'ltp': 52000, 'bid': 51990, 'ask': 52010}
 
-        def place_order(self, symbol, action, quantity, order_type="MARKET", price=0.0):
-            return {'status': 'success', 'orderid': f'MOCK_{symbol}_{action}'}
+            def place_order(self, symbol, action, quantity, order_type="MARKET", price=0.0):
+                return {'status': 'success', 'orderid': f'MOCK_{symbol}_{action}'}
 
-        def get_order_status(self, order_id):
-            return {'status': 'COMPLETE', 'price': 52000}
+            def get_order_status(self, order_id):
+                return {'status': 'COMPLETE', 'price': 52000}
 
-        def modify_order(self, order_id, new_price):
-            return {'status': 'success'}
+            def modify_order(self, order_id, new_price):
+                return {'status': 'success'}
 
-        def cancel_order(self, order_id):
-            return {'status': 'success'}
-
-    openalgo = MockOpenAlgoClient()
+            def cancel_order(self, order_id):
+                return {'status': 'success'}
+        
+        openalgo = MockOpenAlgoClient()
 
     # Initialize live engine with database manager
     engine = LiveTradingEngine(
@@ -272,6 +312,82 @@ def run_live(args):
     # Initialize duplicate detector for webhook signals
     duplicate_detector = DuplicateDetector(window_seconds=60)
     logger.info("Duplicate detector initialized (60s window)")
+    
+    # Initialize Redis coordinator for leader election (if Redis config available)
+    coordinator = None
+    if hasattr(args, 'redis_config') and args.redis_config:
+        try:
+            from core.redis_coordinator import RedisCoordinator
+            import json
+            
+            with open(args.redis_config, 'r') as f:
+                redis_config = json.load(f)
+            
+            coordinator = RedisCoordinator(redis_config, db_manager=db_manager)
+            coordinator.start_heartbeat()
+            logger.info("Redis coordinator initialized - leader election enabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis coordinator: {e}")
+            logger.warning("Continuing without leader election (single instance mode)")
+            coordinator = None
+    else:
+        logger.info("Redis coordinator disabled (no --redis-config provided)")
+
+    # Crash Recovery: Load state from database if available
+    if db_manager:
+        try:
+            from live.recovery import CrashRecoveryManager
+            
+            recovery_manager = CrashRecoveryManager(db_manager)
+            success, error_code = recovery_manager.load_state(
+                portfolio_manager=engine.portfolio,
+                trading_engine=engine,
+                coordinator=coordinator
+            )
+            
+            if not success:
+                if error_code == CrashRecoveryManager.VALIDATION_FAILED:
+                    logger.critical(
+                        "🚨 CRITICAL: State corruption detected during recovery - "
+                        "HALTING STARTUP to prevent financial loss"
+                    )
+                    logger.critical(
+                        "Action required: Review database state manually before restarting"
+                    )
+                    return 1  # Exit with error code
+                elif error_code == CrashRecoveryManager.DB_UNAVAILABLE:
+                    logger.error(
+                        "Database unavailable during recovery - "
+                        "Application will start with empty state"
+                    )
+                    logger.warning(
+                        "⚠️  WARNING: If positions exist in database, they will not be tracked. "
+                        "This may lead to duplicate positions or missed exits."
+                    )
+                    # Continue startup but log warning - allows manual intervention
+                elif error_code == CrashRecoveryManager.DATA_CORRUPT:
+                    logger.critical(
+                        "🚨 CRITICAL: Data corruption detected during recovery - "
+                        "HALTING STARTUP to prevent financial loss"
+                    )
+                    logger.critical(
+                        "Action required: Review database state manually before restarting"
+                    )
+                    return 1  # Exit with error code
+                else:
+                    logger.error(f"Recovery failed with unknown error code: {error_code}")
+                    logger.warning("Continuing startup with empty state")
+            else:
+                logger.info("✅ Crash recovery completed successfully - state restored")
+        except Exception as e:
+            logger.exception(f"Unexpected error during crash recovery: {e}")
+            logger.critical(
+                "🚨 CRITICAL: Crash recovery failed with unexpected error - "
+                "HALTING STARTUP to prevent financial loss"
+            )
+            return 1  # Exit with error code
+    else:
+        logger.info("Crash recovery skipped (database persistence disabled)")
 
     # Initialize rollover scheduler
     rollover_scheduler = None
@@ -281,6 +397,23 @@ def run_live(args):
             check_interval_hours=1.0  # Check every hour
         )
         rollover_scheduler.start()
+
+    # Initialize EOD (End-of-Day) pre-close scheduler
+    eod_scheduler = None
+    if engine.config.eod_enabled and not getattr(args, 'disable_eod', False):
+        try:
+            eod_scheduler = EODScheduler(engine.config)
+            eod_scheduler.set_callbacks(
+                condition_check=engine.eod_condition_check,
+                execution=engine.eod_execute,
+                tracking=engine.eod_track
+            )
+            eod_scheduler.start()
+            logger.info("EOD pre-close scheduler started")
+        except ImportError as e:
+            logger.warning(f"EOD scheduler not available (APScheduler not installed): {e}")
+        except Exception as e:
+            logger.error(f"Failed to start EOD scheduler: {e}")
 
     # Setup Flask webhook receiver
     app = Flask(__name__)
@@ -382,8 +515,45 @@ def run_live(args):
             }), 400
         
         logger.info(f"[{request_id}] Webhook received: {data.get('type')} {data.get('position')} @ {data.get('price')}")
-        
+
         try:
+            # Check if this is an EOD_MONITOR signal (different processing path)
+            if is_eod_monitor_signal(data):
+                logger.info(f"[{request_id}] EOD_MONITOR signal detected")
+
+                # Parse EOD signal
+                eod_signal, eod_error = parse_eod_monitor_signal(data)
+                if eod_signal is None:
+                    webhook_logger.warning(f"[{request_id}] EOD signal parsing failed: {eod_error}")
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'validation_error',
+                        'message': eod_error,
+                        'request_id': request_id
+                    }), 400
+
+                # Leadership check for EOD signals
+                if coordinator and not coordinator.is_leader:
+                    webhook_logger.warning(
+                        f"[{request_id}] Rejecting EOD signal - not leader"
+                    )
+                    return jsonify({
+                        'status': 'rejected',
+                        'reason': 'not_leader',
+                        'request_id': request_id
+                    }), 200
+
+                # Process EOD signal through engine
+                result = engine.process_eod_monitor_signal(eod_signal)
+
+                return jsonify({
+                    'status': 'processed',
+                    'signal_type': 'eod_monitor',
+                    'request_id': request_id,
+                    'result': result
+                }), 200
+
+            # Regular signal processing continues below
             # Step 2: Validate structure
             is_valid, structure_error = validate_json_structure(data)
             if not is_valid:
@@ -394,7 +564,7 @@ def run_live(args):
                     'message': structure_error,
                     'request_id': request_id
                 }), 400
-            
+
             # Step 3: Parse to Signal
             signal, parse_error = parse_webhook_signal(data)
             if signal is None:
@@ -407,6 +577,18 @@ def run_live(args):
                 }), 400
             
             logger.info(f"[{request_id}] Signal parsed: {signal.signal_type.value} {signal.position} @ ₹{signal.price}")
+            
+            # Step 3.5: Initial leadership check (CRITICAL for trading - prevents duplicate execution)
+            if coordinator and not coordinator.is_leader:
+                webhook_logger.warning(
+                    f"[{request_id}] Rejecting signal - not leader (instance: {coordinator.instance_id})"
+                )
+                return jsonify({
+                    'status': 'rejected',
+                    'reason': 'not_leader',
+                    'message': f'Signal rejected: instance {coordinator.instance_id} is not the leader',
+                    'request_id': request_id
+                }), 200
             
             # Step 4: Check duplicates
             if duplicate_detector.is_duplicate(signal):
@@ -426,8 +608,21 @@ def run_live(args):
                     }
                 }), 200
             
-            # Step 5: Process signal
-            result = engine.process_signal(signal)
+            # Step 4.5: RE-CHECK leadership (race condition protection)
+            # Critical: Leadership might have been lost during duplicate check
+            if coordinator and not coordinator.is_leader:
+                webhook_logger.warning(
+                    f"[{request_id}] Lost leadership during signal processing - aborting"
+                )
+                return jsonify({
+                    'status': 'rejected',
+                    'reason': 'lost_leadership',
+                    'message': 'Signal processing aborted: leadership lost during processing',
+                    'request_id': request_id
+                }), 200
+            
+            # Step 5: Process signal (pass coordinator for additional verification)
+            result = engine.process_signal(signal, coordinator=coordinator)
             
             # Step 6: Return response
             if result.get('status') == 'executed':
@@ -608,13 +803,29 @@ def run_live(args):
                 'cost': batch_result.total_rollover_cost
             }), 200
 
+    @app.route('/eod/status', methods=['GET'])
+    def eod_status():
+        """Get EOD pre-close execution status"""
+        engine_status = engine.get_eod_status()
+
+        scheduler_status = {}
+        if eod_scheduler:
+            scheduler_status = eod_scheduler.get_status()
+
+        return jsonify({
+            'enabled': engine.config.eod_enabled,
+            'scheduler': scheduler_status,
+            'engine': engine_status
+        }), 200
+
     @app.route('/health', methods=['GET'])
     def health():
         """Health check endpoint"""
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
-            'rollover_scheduler': 'running' if rollover_scheduler else 'disabled'
+            'rollover_scheduler': 'running' if rollover_scheduler else 'disabled',
+            'eod_scheduler': 'running' if (eod_scheduler and eod_scheduler.is_running()) else 'disabled'
         }), 200
 
     logger.info("=" * 60)
@@ -626,15 +837,20 @@ def run_live(args):
     logger.info("  GET  /rollover/status  - Rollover status")
     logger.info("  GET  /rollover/scan    - Scan for rollover candidates")
     logger.info("  POST /rollover/execute - Execute rollover (dry_run=true for simulation)")
+    logger.info("  GET  /eod/status       - EOD pre-close execution status")
     logger.info("  GET  /health           - Health check")
     logger.info("=" * 60)
-    logger.info("Starting webhook server on port 5002...")
+    logger.info(f"Starting webhook server on port {args.port}...")
 
     try:
-        app.run(host='0.0.0.0', port=5002)
+        app.run(host='0.0.0.0', port=args.port)
     finally:
+        # Graceful shutdown of schedulers
         if rollover_scheduler:
             rollover_scheduler.stop()
+        if eod_scheduler:
+            eod_scheduler.shutdown()
+            logger.info("EOD scheduler stopped")
 
     return 0
 
@@ -669,7 +885,11 @@ def main():
     live_parser.add_argument('--db-env', type=str, default='local',
                             choices=['local', 'production'],
                             help='Database environment (local or production)')
-    
+    live_parser.add_argument('--redis-config', type=str,
+                            help='Path to Redis config JSON file for HA/leader election')
+    live_parser.add_argument('--port', type=int, default=5002,
+                            help='Webhook server port (default: 5002)')
+
     args = parser.parse_args()
     
     if args.mode == 'backtest':
