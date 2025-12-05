@@ -49,7 +49,7 @@ When editing code:
 ### Repository Details
 
 ```
-Repository: https://github.com/[YOUR-USERNAME]/ITJ-BN-Trending
+Repository: https://github.com/shankarv78/ITJ-BN-Trending
 Branch: main
 ```
 
