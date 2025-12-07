@@ -1248,8 +1248,8 @@ plot(show_debug ? (long_entry ? 7 : 0) : na, "ALL CONDITIONS", color=color.new(c
 // ========================================
 // These alerts are formatted for the Stoxxo Bridge (stoxxo_bridge.py)
 
-// Helper to get ISO timestamp
-timestamp_str = str.tostring(year) + "-" + str.tostring(month, "#00") + "-" + str.tostring(dayofmonth, "#00") + "T" + str.tostring(hour, "#00") + ":" + str.tostring(minute, "#00") + ":00Z"
+// Helper to get ISO timestamp - use timenow for actual alert time (not candle time)
+timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
 
 // 1. BASE ENTRY ALERT
 if long_entry and strategy.position_size == 0
@@ -1267,7 +1267,9 @@ if long_entry and strategy.position_size == 0
     alert_final_lots = math.max(0, math.min(alert_risk_based_lots_floored, alert_margin_based_lots))
     
     if alert_final_lots >= 1
-        json_entry = '{"type":"BASE_ENTRY", "instrument":"BANK_NIFTY", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(supertrend) + ', "lots":' + str.tostring(alert_final_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+        // Use mode-specific stop: Tom Basso uses ATR-based stop, others use SuperTrend
+        float alert_stop = stop_loss_mode == "Tom Basso" ? (close - (basso_initial_atr_mult * atr_basso)) : supertrend
+        json_entry = '{"type":"BASE_ENTRY", "instrument":"BANK_NIFTY", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(alert_stop) + ', "lots":' + str.tostring(alert_final_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
         alert(json_entry, alert.freq_once_per_bar_close)
 
 // 2. PYRAMID ENTRY ALERTS
@@ -1378,8 +1380,8 @@ if enable_eod_monitoring and is_eod_alert_window
     // Python uses its own position tracking with database state
     json_position = '"position_status":{"in_position":' + str.tostring(strategy.position_size > 0) + ',"pyramid_count":' + str.tostring(pyramid_count) + '}'
 
-    // Generate timestamp
-    timestamp_str = str.tostring(year) + "-" + str.tostring(month, "#00") + "-" + str.tostring(dayofmonth, "#00") + "T" + str.tostring(hour, "#00") + ":" + str.tostring(minute, "#00") + ":00Z"
+    // Generate timestamp - use timenow for actual alert time (not candle time)
+    timestamp_str := str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
 
     // Complete EOD_MONITOR JSON
     eod_json = '{"type":"EOD_MONITOR","instrument":"BANK_NIFTY","timestamp":"' + timestamp_str + '","price":' + str.tostring(close) + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'

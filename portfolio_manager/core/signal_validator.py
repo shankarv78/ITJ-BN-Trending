@@ -181,23 +181,27 @@ class SignalValidator:
 
         current_time = self.time_source()
 
-        # Normalize timezone awareness - both must be aware or both naive
-        # Signal timestamps from TradingView are UTC (timezone-aware with "Z" suffix)
-        # datetime.now() is naive (local time, no timezone)
-        if signal_timestamp.tzinfo is not None and current_time.tzinfo is None:
-            # Signal is timezone-aware (UTC), current_time is naive (local)
-            # Convert current_time to UTC for fair comparison
+        # Normalize timezone awareness for comparison
+        # IMPORTANT: TradingView always sends UTC time (via timenow)
+        # If signal has no timezone (naive), ASSUME it's UTC
+        # If signal has timezone (Z suffix), use it directly
+        
+        if signal_timestamp.tzinfo is None:
+            # Naive timestamp - assume it's UTC (TradingView timenow is always UTC)
+            signal_timestamp = signal_timestamp.replace(tzinfo=timezone.utc)
+        
+        if current_time.tzinfo is None:
+            # Current time is naive (local) - convert to UTC
             import time
-            # Get local timezone offset
-            local_offset = timezone(timedelta(seconds=-time.timezone))
-            current_time = current_time.replace(tzinfo=local_offset)
-            # Convert to UTC
-            current_time = current_time.astimezone(timezone.utc)
-            # Now both are UTC-aware, compare directly
-        elif signal_timestamp.tzinfo is None and current_time.tzinfo is not None:
-            # Signal is naive, current_time is aware
-            current_time = current_time.replace(tzinfo=None)
-
+            # Get UTC offset for local timezone
+            if time.daylight and time.localtime().tm_isdst:
+                utc_offset_seconds = -time.altzone
+            else:
+                utc_offset_seconds = -time.timezone
+            local_tz = timezone(timedelta(seconds=utc_offset_seconds))
+            current_time = current_time.replace(tzinfo=local_tz).astimezone(timezone.utc)
+        
+        # Now both are UTC-aware, compare directly
         age_seconds = (current_time - signal_timestamp).total_seconds()
         
         if age_seconds < 0:

@@ -273,9 +273,17 @@ def run_live(args):
         if args.api_key:
             broker_config['openalgo_api_key'] = args.api_key
         
-        logger.info(f"Creating broker client: type={broker_type}, broker={args.broker}")
+        execution_mode = broker_config.get('execution_mode', 'live')
+        logger.info(f"Creating broker client: type={broker_type}, broker={args.broker}, execution_mode={execution_mode}")
         openalgo = create_broker_client(broker_type, broker_config)
         logger.info("✓ Broker client initialized successfully")
+        
+        # Prominent warning for analyzer mode
+        if execution_mode == 'analyzer':
+            logger.warning("=" * 70)
+            logger.warning("⚠️  ANALYZER MODE: Orders will be SIMULATED, not executed!")
+            logger.warning("⚠️  Change execution_mode to 'live' in openalgo_config.json for real trading")
+            logger.warning("=" * 70)
         
     except Exception as e:
         logger.error(f"Failed to initialize broker client: {e}", exc_info=True)
@@ -751,6 +759,27 @@ def run_live(args):
                 'rollover_count': pos.rollover_count
             }
         return jsonify({'positions': positions_data}), 200
+
+    @app.route('/analyzer/orders', methods=['GET'])
+    def analyzer_orders():
+        """Get simulated orders (analyzer mode only)"""
+        from brokers.factory import AnalyzerBrokerWrapper
+        
+        if isinstance(openalgo, AnalyzerBrokerWrapper):
+            orders = openalgo.get_simulated_orders()
+            summary = openalgo.get_simulated_orders_summary()
+            return jsonify({
+                'mode': 'analyzer',
+                'total_orders': len(orders),
+                'orders': orders,
+                'summary': summary
+            }), 200
+        else:
+            return jsonify({
+                'mode': 'live',
+                'message': 'Not in analyzer mode - no simulated orders',
+                'orders': []
+            }), 200
 
     # Rollover endpoints
     @app.route('/rollover/status', methods=['GET'])

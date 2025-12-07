@@ -94,11 +94,12 @@ stop_openalgo() {
         rm -f "$SCRIPT_DIR/.openalgo.pid"
     fi
     
-    # Also check by port
-    OPENALGO_PIDS=$(lsof -ti:$OPENALGO_PORT 2>/dev/null || true)
+    # Find OpenAlgo processes by name (Python/uv on port 5000), NOT AirPlay/ControlCenter
+    # Use lsof but filter to only Python processes
+    OPENALGO_PIDS=$(lsof -i:$OPENALGO_PORT 2>/dev/null | grep -E "python|Python|uv" | awk '{print $2}' | sort -u || true)
     
     if [ -z "$OPENALGO_PIDS" ]; then
-        log_warn "OpenAlgo is not running (port $OPENALGO_PORT)"
+        log_warn "OpenAlgo is not running (no Python process on port $OPENALGO_PORT)"
         return 0
     fi
     
@@ -112,8 +113,8 @@ stop_openalgo() {
     # Wait for graceful shutdown
     sleep 3
     
-    # Check if still running
-    OPENALGO_PIDS=$(lsof -ti:$OPENALGO_PORT 2>/dev/null || true)
+    # Check if still running (only Python processes)
+    OPENALGO_PIDS=$(lsof -i:$OPENALGO_PORT 2>/dev/null | grep -E "python|Python|uv" | awk '{print $2}' | sort -u || true)
     if [ ! -z "$OPENALGO_PIDS" ]; then
         log_warn "  Processes still running, sending SIGKILL..."
         for PID in $OPENALGO_PIDS; do
@@ -122,8 +123,8 @@ stop_openalgo() {
         sleep 1
     fi
     
-    # Verify stopped
-    OPENALGO_PIDS=$(lsof -ti:$OPENALGO_PORT 2>/dev/null || true)
+    # Verify stopped (only check for Python processes, ignore AirPlay/ControlCenter)
+    OPENALGO_PIDS=$(lsof -i:$OPENALGO_PORT 2>/dev/null | grep -E "python|Python|uv" | awk '{print $2}' | sort -u || true)
     if [ -z "$OPENALGO_PIDS" ]; then
         log_success "OpenAlgo stopped"
     else

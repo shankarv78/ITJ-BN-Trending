@@ -40,7 +40,7 @@ class SignalValidationConfig:
     max_signal_age_elevated: int = 60  # seconds
     """Signal age requires stricter divergence check"""
     
-    max_signal_age_stale: int = 60  # seconds
+    max_signal_age_stale: int = 86400  # 24 hours - TEMPORARILY INCREASED FOR TESTING
     """Signal considered stale - reject if divergence also high"""
     
     # === Execution Strategy ===

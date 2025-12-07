@@ -526,7 +526,8 @@ class LiveTradingEngine:
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
                 **{k: v for k, v in execution_result.get('order_details', {}).items() 
-                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price']}  # Exclude generic fields
+                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price', 
+                                'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled']}  # Exclude execution metadata
             )
             
             self.portfolio.add_position(position)
@@ -830,7 +831,8 @@ class LiveTradingEngine:
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
                 **{k: v for k, v in execution_result.get('order_details', {}).items() 
-                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price']}  # Exclude generic fields
+                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price', 
+                                'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled']}  # Exclude execution metadata
             )
             
             self.portfolio.add_position(position)

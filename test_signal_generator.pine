@@ -1,18 +1,23 @@
 //@version=5
+
 // ========================================
-// TEST SIGNAL GENERATOR v1.0
+// TEST SIGNAL GENERATOR v1.1 - BAR COUNT MODE
 // For testing Position Calculator webhooks
 // ========================================
 //
-// Purpose: Generate frequent trading signals on short timeframes
-// to test the lovable.dev position calculator integration
+// Purpose: Generate PREDICTABLE trading signals based on bar count
+// - Entry on bar 3
+// - Pyramid on bar 6
+// - Exit on bar 9
+// - Cycle repeats
 //
-// Recommended: Apply on 1-min or 5-min chart for quick signal generation
+// NO indicator conditions - pure bar counting for reliable testing
 //
+// Recommended: Apply on 1-min or 5-min chart
 // Output Format: Same JSON as BankNifty_TF_V8.0 for compatibility
 // ========================================
 
-strategy("Test Signal Generator v1.0",
+strategy("Test Signal Generator v1.1 (Bar Count)",
      overlay=true,
      pyramiding=5,
      initial_capital=5000000,
@@ -25,15 +30,14 @@ strategy("Test Signal Generator v1.0",
 // INPUTS - Signal Configuration
 // ========================================
 instrument_choice = input.string("BANK_NIFTY", "Instrument", options=["BANK_NIFTY", "GOLD_MINI"], group="Signal Settings")
-signal_frequency = input.int(3, "Signal Frequency (bars between signals)", minval=1, maxval=20, group="Signal Settings")
-max_pyramids = input.int(3, "Max Pyramid Levels", minval=1, maxval=5, group="Signal Settings")
 suggested_lots = input.int(2, "Suggested Lots (for JSON)", minval=1, maxval=10, group="Signal Settings")
-pyramid_size_ratio = input.float(0.5, "Pyramid Size Ratio", minval=0.1, maxval=1.0, step=0.1, group="Signal Settings", tooltip="Each pyramid = previous × ratio (geometric decay)")
 
-// Entry/Exit Settings
-rsi_period = input.int(6, "RSI Period", minval=2, maxval=20, group="Indicators")
-rsi_entry_level = input.int(50, "RSI Entry Level", minval=30, maxval=70, group="Indicators")
-ema_period = input.int(20, "EMA Period (for exit)", minval=5, maxval=50, group="Indicators")
+// Bar count settings
+entry_bar = input.int(3, "Entry on Bar #", minval=1, maxval=50, group="Bar Count Sequence")
+pyramid_bar = input.int(6, "Pyramid on Bar #", minval=1, maxval=50, group="Bar Count Sequence")
+exit_bar = input.int(9, "Exit on Bar #", minval=1, maxval=50, group="Bar Count Sequence")
+
+// ATR settings for JSON output
 atr_period = input.int(10, "ATR Period", minval=5, maxval=20, group="Indicators")
 atr_stop_mult = input.float(1.5, "ATR Stop Multiplier", minval=0.5, maxval=3.0, step=0.1, group="Indicators")
 
@@ -46,24 +50,18 @@ force_exit = input.bool(false, "🔴 Force Exit Signal", group="Manual Triggers"
 show_debug = input.bool(true, "Show Debug Table", group="Display")
 
 // ========================================
-// INDICATOR CALCULATIONS
+// INDICATOR CALCULATIONS (for JSON output only)
 // ========================================
-
-// RSI
-rsi = ta.rsi(close, rsi_period)
-
-// EMA for exit
-ema = ta.ema(close, ema_period)
 
 // ATR for stop calculation and JSON
 atr_value = ta.atr(atr_period)
 
-// Efficiency Ratio (ER)
+// Efficiency Ratio (ER) - for JSON compatibility
 change_sum = math.abs(close - close[10])
 volatility_sum = math.sum(math.abs(close - close[1]), 10)
 er = volatility_sum != 0 ? change_sum / volatility_sum : 0
 
-// Simple SuperTrend calculation
+// Simple SuperTrend calculation - for JSON compatibility
 st_mult = 1.5
 st_atr = ta.atr(10)
 st_upper = hl2 + st_mult * st_atr
@@ -75,42 +73,38 @@ var int st_direction = 1
 supertrend := st_direction == 1 ? math.max(st_lower, nz(supertrend[1])) : math.min(st_upper, nz(supertrend[1]))
 st_direction := close > supertrend ? 1 : close < supertrend ? -1 : st_direction
 
-// ROC
+// ROC - for JSON compatibility
 roc = ta.roc(close, 10)
 
+// EMA for visual reference
+ema = ta.ema(close, 20)
+
 // ========================================
-// POSITION STATE TRACKING
+// BAR COUNT TRACKING
 // ========================================
-var int position_count = 0  // 0 = flat, 1 = Long_1, 2 = Long_2, etc.
-var int bars_since_last_signal = 0
+var int bar_counter = 0       // Counts bars in current cycle (1 to exit_bar, then resets)
+var int position_count = 0    // 0 = flat, 1 = Long_1, 2 = Long_2, etc.
 var float last_entry_price = na
 
-// Track actual lots for each position level (for accurate exit calculation)
-var float lots_level_1 = 0.0
-var float lots_level_2 = 0.0
-var float lots_level_3 = 0.0
-var float lots_level_4 = 0.0
-var float lots_level_5 = 0.0
-
-// Track bars
-bars_since_last_signal := bars_since_last_signal + 1
+// Increment bar counter every bar
+bar_counter := bar_counter + 1
 
 // ========================================
-// SIGNAL CONDITIONS
+// SIGNAL CONDITIONS - PURE BAR COUNT
 // ========================================
 
-// Entry: RSI crosses above entry level AND we're flat
-entry_condition = ta.crossover(rsi, rsi_entry_level) and position_count == 0 and bars_since_last_signal >= signal_frequency
+// Entry: On entry_bar and we're flat
+entry_condition = (bar_counter == entry_bar) and position_count == 0
 
-// Pyramid: RSI still strong AND we have room AND enough bars passed
-pyramid_condition = rsi > rsi_entry_level and position_count > 0 and position_count < max_pyramids and bars_since_last_signal >= signal_frequency and close > last_entry_price
+// Pyramid: On pyramid_bar and we have a position
+pyramid_condition = (bar_counter == pyramid_bar) and position_count == 1
 
-// Exit: Price crosses below EMA OR RSI drops significantly
-exit_condition = (ta.crossunder(close, ema) or ta.crossunder(rsi, 30)) and position_count > 0
+// Exit: On exit_bar and we have a position
+exit_condition = (bar_counter == exit_bar) and position_count > 0
 
 // Manual overrides
 manual_entry = force_entry and force_entry[1] == false and position_count == 0
-manual_pyramid = force_pyramid and force_pyramid[1] == false and position_count > 0 and position_count < max_pyramids
+manual_pyramid = force_pyramid and force_pyramid[1] == false and position_count > 0
 manual_exit = force_exit and force_exit[1] == false and position_count > 0
 
 // Combined triggers
@@ -122,9 +116,10 @@ trigger_exit = exit_condition or manual_exit
 // HELPER FUNCTIONS
 // ========================================
 
-// Format timestamp
+// Format timestamp - use timenow for current alert time (not candle time)
+// IMPORTANT: timenow returns UTC time, so we add 'Z' suffix to indicate UTC timezone
 getTimestamp() =>
-    str.format("{0,date,yyyy-MM-dd HH:mm:ss}", time)
+    str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
 
 // Get instrument string
 getInstrument() =>
@@ -146,15 +141,7 @@ stop_price = getStopPrice()
 // BASE ENTRY
 if trigger_entry
     position_count := 1
-    bars_since_last_signal := 0
     last_entry_price := close
-    
-    // Track base position lots
-    lots_level_1 := suggested_lots
-    lots_level_2 := 0.0
-    lots_level_3 := 0.0
-    lots_level_4 := 0.0
-    lots_level_5 := 0.0
     
     strategy.entry("Long_1", strategy.long)
     
@@ -165,63 +152,38 @@ if trigger_entry
 // PYRAMID
 if trigger_pyramid
     position_count := position_count + 1
-    bars_since_last_signal := 0
     last_entry_price := close
     
     position_label = "Long_" + str.tostring(position_count)
-    
-    // Calculate pyramid lots using geometric decay: base_lots × ratio^(pyramid_level-1)
-    // position_count is already incremented, so for Long_2 (first pyramid), exponent = 1
-    pyramid_lots = math.round(suggested_lots * math.pow(pyramid_size_ratio, position_count - 1))
-    pyramid_lots := math.max(pyramid_lots, 1)  // Minimum 1 lot
-    
-    // Track lots at this level
-    if position_count == 2
-        lots_level_2 := pyramid_lots
-    else if position_count == 3
-        lots_level_3 := pyramid_lots
-    else if position_count == 4
-        lots_level_4 := pyramid_lots
-    else if position_count == 5
-        lots_level_5 := pyramid_lots
-    
     strategy.entry(position_label, strategy.long)
     
-    // Generate JSON alert with correct pyramid lots
-    json_pyramid = '{"type":"PYRAMID", "instrument":"' + instrument_str + '", "position":"' + position_label + '", "price":' + str.tostring(close) + ', "stop":' + str.tostring(math.round(stop_price)) + ', "lots":' + str.tostring(pyramid_lots) + ', "atr":' + str.tostring(math.round(atr_value)) + ', "er":' + str.tostring(math.round(er, 2)) + ', "supertrend":' + str.tostring(math.round(supertrend)) + ', "roc":' + str.tostring(math.round(roc, 2)) + ', "timestamp":"' + timestamp_str + '"}'
+    // Generate JSON alert - pyramid lots are half of base
+    json_pyramid = '{"type":"PYRAMID", "instrument":"' + instrument_str + '", "position":"' + position_label + '", "price":' + str.tostring(close) + ', "stop":' + str.tostring(math.round(stop_price)) + ', "lots":' + str.tostring(math.round(suggested_lots / 2)) + ', "atr":' + str.tostring(math.round(atr_value)) + ', "er":' + str.tostring(math.round(er, 2)) + ', "supertrend":' + str.tostring(math.round(supertrend)) + ', "roc":' + str.tostring(math.round(roc, 2)) + ', "timestamp":"' + timestamp_str + '"}'
     alert(json_pyramid, alert.freq_once_per_bar_close)
 
 // EXIT
 if trigger_exit
-    exit_position = "Long_" + str.tostring(position_count)
-    
-    // Calculate total exit lots by summing all position levels (correct for geometric decay)
-    // This is the sum of the geometric series: base + base×r + base×r² + ...
-    exit_lots = lots_level_1 + lots_level_2 + lots_level_3 + lots_level_4 + lots_level_5
+    exit_lots = suggested_lots + math.round(suggested_lots / 2)  // Entry lots + pyramid lots
     
     strategy.close_all(comment="EXIT")
     
-    // Generate JSON alert with correct total exit lots
-    json_exit = '{"type":"EXIT", "instrument":"' + instrument_str + '", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(math.round(supertrend)) + ', "entry_price":' + str.tostring(math.round(last_entry_price)) + ', "lots":' + str.tostring(math.round(exit_lots)) + ', "reason":"EMA_CROSS", "atr":' + str.tostring(math.round(atr_value)) + ', "er":' + str.tostring(math.round(er, 2)) + ', "supertrend":' + str.tostring(math.round(supertrend)) + ', "roc":' + str.tostring(math.round(roc, 2)) + ', "timestamp":"' + timestamp_str + '"}'
+    // Generate JSON alert
+    json_exit = '{"type":"EXIT", "instrument":"' + instrument_str + '", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(math.round(supertrend)) + ', "entry_price":' + str.tostring(math.round(last_entry_price)) + ', "lots":' + str.tostring(exit_lots) + ', "reason":"BAR_COUNT", "atr":' + str.tostring(math.round(atr_value)) + ', "er":' + str.tostring(math.round(er, 2)) + ', "supertrend":' + str.tostring(math.round(supertrend)) + ', "roc":' + str.tostring(math.round(roc, 2)) + ', "timestamp":"' + timestamp_str + '"}'
     alert(json_exit, alert.freq_once_per_bar_close)
     
-    // Reset state
+    // Reset state for next cycle
     position_count := 0
     last_entry_price := na
-    lots_level_1 := 0.0
-    lots_level_2 := 0.0
-    lots_level_3 := 0.0
-    lots_level_4 := 0.0
-    lots_level_5 := 0.0
+    bar_counter := 0  // Reset to start new cycle
 
 // ========================================
 // VISUAL PLOTS
 // ========================================
 
-// EMA
-plot(ema, "EMA", color=color.blue, linewidth=2)
+// EMA for reference
+plot(ema, "EMA", color=color.blue, linewidth=1)
 
-// SuperTrend
+// SuperTrend for reference
 plot(supertrend, "SuperTrend", color=st_direction == 1 ? color.green : color.red, linewidth=2)
 
 // Entry/Exit markers
@@ -229,66 +191,75 @@ plotshape(trigger_entry, "Entry", shape.triangleup, location.belowbar, color.gre
 plotshape(trigger_pyramid, "Pyramid", shape.triangleup, location.belowbar, color.yellow, size=size.small)
 plotshape(trigger_exit, "Exit", shape.triangledown, location.abovebar, color.red, size=size.normal)
 
+// Bar number labels (show bar count in cycle)
+if show_debug
+    label.new(bar_index, high, str.tostring(bar_counter), style=label.style_label_down, color=color.new(color.gray, 80), textcolor=color.white, size=size.tiny)
+
 // ========================================
 // DEBUG TABLE
 // ========================================
 
 if show_debug and barstate.islast
-    var table debug_table = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80), frame_color=color.gray, frame_width=1)
+    var table debug_table = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), frame_color=color.gray, frame_width=1)
     
     table.cell(debug_table, 0, 0, "TEST SIGNAL GENERATOR", bgcolor=color.new(color.teal, 70), text_color=color.white, text_size=size.normal)
-    table.cell(debug_table, 1, 0, "v1.0", bgcolor=color.new(color.teal, 70), text_color=color.white, text_size=size.normal)
+    table.cell(debug_table, 1, 0, "v1.1 BAR COUNT", bgcolor=color.new(color.teal, 70), text_color=color.white, text_size=size.normal)
     
     table.cell(debug_table, 0, 1, "Instrument", text_color=color.gray, text_size=size.small)
     table.cell(debug_table, 1, 1, instrument_str, text_color=color.white, text_size=size.small)
     
-    table.cell(debug_table, 0, 2, "Position Count", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 0, 2, "Current Bar #", text_color=color.gray, text_size=size.small)
+    bar_color = bar_counter == entry_bar ? color.green : bar_counter == pyramid_bar ? color.yellow : bar_counter == exit_bar ? color.red : color.white
+    table.cell(debug_table, 1, 2, str.tostring(bar_counter), text_color=bar_color, text_size=size.normal)
+    
+    table.cell(debug_table, 0, 3, "Sequence", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 1, 3, "Entry@" + str.tostring(entry_bar) + " Pyr@" + str.tostring(pyramid_bar) + " Exit@" + str.tostring(exit_bar), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(debug_table, 0, 4, "Position Count", text_color=color.gray, text_size=size.small)
     pos_color = position_count == 0 ? color.gray : color.green
-    table.cell(debug_table, 1, 2, str.tostring(position_count) + " / " + str.tostring(max_pyramids), text_color=pos_color, text_size=size.small)
+    table.cell(debug_table, 1, 4, str.tostring(position_count), text_color=pos_color, text_size=size.small)
     
-    table.cell(debug_table, 0, 3, "Bars Since Signal", text_color=color.gray, text_size=size.small)
-    table.cell(debug_table, 1, 3, str.tostring(bars_since_last_signal), text_color=color.white, text_size=size.small)
+    table.cell(debug_table, 0, 5, "Next Signal", text_color=color.gray, text_size=size.small)
+    next_signal = position_count == 0 ? "ENTRY @ bar " + str.tostring(entry_bar) : position_count == 1 ? "PYRAMID @ bar " + str.tostring(pyramid_bar) : "EXIT @ bar " + str.tostring(exit_bar)
+    next_color = position_count == 0 ? color.green : position_count == 1 ? color.yellow : color.red
+    table.cell(debug_table, 1, 5, next_signal, text_color=next_color, text_size=size.small)
     
-    table.cell(debug_table, 0, 4, "RSI", text_color=color.gray, text_size=size.small)
-    rsi_color = rsi > rsi_entry_level ? color.green : color.red
-    table.cell(debug_table, 1, 4, str.tostring(math.round(rsi, 1)), text_color=rsi_color, text_size=size.small)
+    table.cell(debug_table, 0, 6, "Bars Until Next", text_color=color.gray, text_size=size.small)
+    bars_remaining = position_count == 0 ? entry_bar - bar_counter : position_count == 1 ? pyramid_bar - bar_counter : exit_bar - bar_counter
+    table.cell(debug_table, 1, 6, str.tostring(bars_remaining), text_color=color.white, text_size=size.normal)
     
-    table.cell(debug_table, 0, 5, "ATR", text_color=color.gray, text_size=size.small)
-    table.cell(debug_table, 1, 5, str.tostring(math.round(atr_value)), text_color=color.white, text_size=size.small)
+    table.cell(debug_table, 0, 7, "ATR", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 1, 7, str.tostring(math.round(atr_value)), text_color=color.white, text_size=size.small)
     
-    table.cell(debug_table, 0, 6, "ER", text_color=color.gray, text_size=size.small)
-    table.cell(debug_table, 1, 6, str.tostring(math.round(er, 2)), text_color=color.white, text_size=size.small)
+    table.cell(debug_table, 0, 8, "ER", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 1, 8, str.tostring(math.round(er, 2)), text_color=color.white, text_size=size.small)
     
-    table.cell(debug_table, 0, 7, "SuperTrend", text_color=color.gray, text_size=size.small)
-    st_color = st_direction == 1 ? color.green : color.red
-    table.cell(debug_table, 1, 7, str.tostring(math.round(supertrend)), text_color=st_color, text_size=size.small)
+    table.cell(debug_table, 0, 9, "Stop Price", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 1, 9, str.tostring(math.round(stop_price)), text_color=color.orange, text_size=size.small)
     
-    table.cell(debug_table, 0, 8, "Stop Price", text_color=color.gray, text_size=size.small)
-    table.cell(debug_table, 1, 8, str.tostring(math.round(stop_price)), text_color=color.orange, text_size=size.small)
+    table.cell(debug_table, 0, 10, "Lots (Entry)", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 1, 10, str.tostring(suggested_lots), text_color=color.white, text_size=size.small)
     
     // Status row
-    status_text = position_count == 0 ? "FLAT - Waiting for Entry" : "IN POSITION - " + str.tostring(position_count) + " level(s)"
+    status_text = position_count == 0 ? "FLAT - Waiting for Bar " + str.tostring(entry_bar) : "IN POSITION - Level " + str.tostring(position_count)
     status_color = position_count == 0 ? color.gray : color.green
-    table.cell(debug_table, 0, 9, "Status", text_color=color.gray, text_size=size.small)
-    table.cell(debug_table, 1, 9, status_text, text_color=status_color, text_size=size.small)
+    table.cell(debug_table, 0, 11, "Status", text_color=color.gray, text_size=size.small)
+    table.cell(debug_table, 1, 11, status_text, text_color=status_color, text_size=size.small)
 
 // ========================================
 // SAMPLE JSON OUTPUTS (for reference)
 // ========================================
 // 
-// With suggested_lots=2 and pyramid_size_ratio=0.5:
+// BASE_ENTRY (Bar 3):
+// {"type":"BASE_ENTRY", "instrument":"BANK_NIFTY", "position":"Long_1", "price":52000, "stop":51650, "lots":2, "atr":350, "er":0.82, "supertrend":51650, "roc":0.5, "timestamp":"2025-12-05 15:03:00"}
 //
-// BASE_ENTRY (Long_1): 2 lots
-// {"type":"BASE_ENTRY", "instrument":"BANK_NIFTY", "position":"Long_1", "price":52000, "stop":51650, "lots":2, "atr":350, "er":0.82, "supertrend":51650, "roc":0.5, "timestamp":"2025-12-04 15:29:45"}
+// PYRAMID (Bar 6):
+// {"type":"PYRAMID", "instrument":"BANK_NIFTY", "position":"Long_2", "price":52200, "stop":51850, "lots":1, "atr":350, "er":0.85, "supertrend":51850, "roc":0.6, "timestamp":"2025-12-05 15:06:00"}
 //
-// PYRAMID (Long_2): 2 × 0.5^1 = 1 lot
-// {"type":"PYRAMID", "instrument":"BANK_NIFTY", "position":"Long_2", "price":52200, "stop":51850, "lots":1, "atr":350, "er":0.85, "supertrend":51850, "roc":0.6, "timestamp":"2025-12-04 15:34:45"}
-//
-// PYRAMID (Long_3): 2 × 0.5^2 = 1 lot (rounded up from 0.5)
-// {"type":"PYRAMID", "instrument":"BANK_NIFTY", "position":"Long_3", "price":52400, "stop":52050, "lots":1, "atr":350, "er":0.88, "supertrend":52050, "roc":0.7, "timestamp":"2025-12-04 15:39:45"}
-//
-// EXIT: Sum of all positions (2 + 1 + 1 = 4 lots, NOT 3 × 2 = 6)
-// {"type":"EXIT", "instrument":"BANK_NIFTY", "position":"ALL", "price":51800, "stop":51650, "entry_price":52000, "lots":4, "reason":"EMA_CROSS", "atr":350, "er":0.75, "supertrend":51650, "roc":-0.3, "timestamp":"2025-12-04 15:44:45"}
+// EXIT (Bar 9):
+// {"type":"EXIT", "instrument":"BANK_NIFTY", "position":"ALL", "price":51800, "stop":51650, "entry_price":52200, "lots":3, "reason":"BAR_COUNT", "atr":350, "er":0.75, "supertrend":51650, "roc":-0.3, "timestamp":"2025-12-05 15:09:00"}
 //
 // ========================================
-
+// SEQUENCE:
+// Bar 1 → Bar 2 → Bar 3 (ENTRY) → Bar 4 → Bar 5 → Bar 6 (PYRAMID) → Bar 7 → Bar 8 → Bar 9 (EXIT) → Reset → Bar 1...
+// ========================================

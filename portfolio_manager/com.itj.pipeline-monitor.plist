@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.itj.pipeline-monitor</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/shankarvasudevan/claude-code/ITJ-BN-Trending/portfolio_manager/monitor_pipeline.py</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/shankarvasudevan/claude-code/ITJ-BN-Trending/portfolio_manager</string>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/shankarvasudevan/claude-code/ITJ-BN-Trending/portfolio_manager/monitor_launchd.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/shankarvasudevan/claude-code/ITJ-BN-Trending/portfolio_manager/monitor_launchd_error.log</string>
+    
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+

@@ -70,8 +70,14 @@ check_dependencies() {
 # -----------------------------------------------------------------------------
 
 is_openalgo_running() {
-    curl -s "$OPENALGO_URL/api/v1/ping" -X POST -H "Content-Type: application/json" -d '{"apikey":"test"}' > /dev/null 2>&1
-    return $?
+    # Check if OpenAlgo API responds with valid JSON containing "status"
+    # This distinguishes OpenAlgo from macOS AirPlay (which returns 403 or empty)
+    RESPONSE=$(curl -s "$OPENALGO_URL/api/v1/ping" -X POST -H "Content-Type: application/json" -d '{"apikey":"test"}' 2>/dev/null)
+    if echo "$RESPONSE" | grep -q '"status"'; then
+        return 0  # OpenAlgo is running
+    else
+        return 1  # Not OpenAlgo (could be AirPlay or nothing)
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -93,17 +99,11 @@ start_openalgo() {
     # Create required directories
     mkdir -p db log strategies keys 2>/dev/null || true
 
-    # Start OpenAlgo in background using gunicorn
-    nohup "$OPENALGO_DIR/.venv/bin/gunicorn" \
-        --worker-class eventlet \
-        --workers 1 \
-        --bind 0.0.0.0:$OPENALGO_PORT \
-        --timeout 120 \
-        --graceful-timeout 30 \
-        --log-level info \
-        --access-logfile "$OPENALGO_DIR/log/access.log" \
-        --error-logfile "$OPENALGO_DIR/log/error.log" \
-        app:app > "$OPENALGO_DIR/log/openalgo.log" 2>&1 &
+    # Start OpenAlgo in background using uv run
+    # Set FLASK_PORT to run on the desired port
+    # FLASK_DEBUG=1 allows Werkzeug to run (otherwise it refuses in "production" mode)
+    FLASK_DEBUG=1 FLASK_PORT=$OPENALGO_PORT HOST_SERVER="http://127.0.0.1:$OPENALGO_PORT" \
+        nohup uv run app.py > "$OPENALGO_DIR/log/openalgo.log" 2>&1 &
 
     OPENALGO_PID=$!
     echo $OPENALGO_PID > "$SCRIPT_DIR/.openalgo.pid"
