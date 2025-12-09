@@ -14,7 +14,7 @@ import pytest
 import json
 import uuid
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
 from tests.fixtures.webhook_payloads import (
     VALID_BASE_ENTRY_BN,
@@ -28,21 +28,38 @@ from tests.fixtures.webhook_payloads import (
 )
 
 
+def fresh_payload(payload: dict) -> dict:
+    """Return a copy of payload with fresh timestamp (5 seconds ago in UTC)
+
+    The signal validator rejects stale signals, so we need to update
+    the hardcoded fixture timestamps to be recent.
+    """
+    fresh_ts = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    return {**payload, 'timestamp': fresh_ts}
+
+
 @pytest.fixture
 def mock_openalgo_client():
-    """Mock OpenAlgo client for testing"""
+    """Mock OpenAlgo client for testing
+
+    Matches the signature expected by OrderExecutor:
+    - get_quote(symbol, exchange=None)
+    - place_order(symbol, action, quantity, order_type, price, exchange)
+    """
     class MockOpenAlgoClient:
         def get_funds(self):
             return {'availablecash': 5000000.0}
 
-        def get_quote(self, symbol):
+        def get_quote(self, symbol, exchange=None):
+            """Get quote with exchange parameter (MCX or NFO)"""
             return {'ltp': 52000, 'bid': 51990, 'ask': 52010}
 
-        def place_order(self, symbol, action, quantity, order_type="MARKET", price=0.0):
+        def place_order(self, symbol, action, quantity, order_type="MARKET", price=0.0, exchange=None):
+            """Place order with exchange parameter"""
             return {'status': 'success', 'orderid': f'MOCK_{symbol}_{action}'}
 
         def get_order_status(self, order_id):
-            return {'status': 'COMPLETE', 'price': 52000}
+            return {'status': 'COMPLETE', 'price': 52000, 'fill_price': 52000}
 
         def modify_order(self, order_id, new_price):
             return {'status': 'success'}
@@ -63,35 +80,35 @@ def app_with_engine(mock_openalgo_client):
     from flask import Flask
     from core.webhook_parser import DuplicateDetector
     from core.models import Signal
-    
+
     app = Flask(__name__)
     app.config['TESTING'] = True
-    
+
     # Initialize engine
     engine = LiveTradingEngine(
         initial_capital=5000000.0,
         openalgo_client=mock_openalgo_client
     )
-    
+
     # Initialize duplicate detector
     duplicate_detector = DuplicateDetector(window_seconds=60)
-    
+
     # Store in app context for routes
     app.engine = engine
     app.duplicate_detector = duplicate_detector
-    
+
     # Define webhook route
     @app.route('/webhook', methods=['POST'])
     def webhook():
         from core.webhook_parser import validate_json_structure, parse_webhook_signal
         import logging
-        
+
         logger = logging.getLogger(__name__)
         webhook_logger = logging.getLogger('webhook_validation')
-        
+
         # Generate request ID for correlation
         request_id = str(uuid.uuid4())[:8]
-        
+
         # Handle case where request.json is None (invalid JSON or no data)
         try:
             if request.json is None:
@@ -118,9 +135,9 @@ def app_with_engine(mock_openalgo_client):
                 'message': 'Invalid JSON format',
                 'request_id': request_id
             }), 400
-        
+
         data = request.json
-        
+
         try:
             # Validate structure
             is_valid, structure_error = validate_json_structure(data)
@@ -131,7 +148,7 @@ def app_with_engine(mock_openalgo_client):
                     'message': structure_error,
                     'request_id': request_id
                 }), 400
-            
+
             # Parse to Signal
             signal, parse_error = parse_webhook_signal(data)
             if signal is None:
@@ -141,7 +158,7 @@ def app_with_engine(mock_openalgo_client):
                     'message': parse_error,
                     'request_id': request_id
                 }), 400
-            
+
             # Check duplicates
             if duplicate_detector.is_duplicate(signal):
                 return jsonify({
@@ -155,10 +172,10 @@ def app_with_engine(mock_openalgo_client):
                         'timestamp': signal.timestamp.isoformat()
                     }
                 }), 200
-            
+
             # Process signal
             result = engine.process_signal(signal)
-            
+
             if result.get('status') == 'executed':
                 return jsonify({
                     'status': 'processed',
@@ -166,6 +183,14 @@ def app_with_engine(mock_openalgo_client):
                     'result': result
                 }), 200
             elif result.get('status') == 'blocked':
+                return jsonify({
+                    'status': 'processed',
+                    'request_id': request_id,
+                    'result': result
+                }), 200
+            elif result.get('status') == 'rejected':
+                # Business logic rejection (e.g., no base position for pyramid)
+                # This is a valid response, not a server error
                 return jsonify({
                     'status': 'processed',
                     'request_id': request_id,
@@ -179,7 +204,7 @@ def app_with_engine(mock_openalgo_client):
                     'request_id': request_id,
                     'details': result
                 }), 500
-                
+
         except Exception as e:
             return jsonify({
                 'status': 'error',
@@ -188,7 +213,7 @@ def app_with_engine(mock_openalgo_client):
                 'request_id': request_id,
                 'details': {'exception': str(e)}
             }), 500
-    
+
     @app.route('/webhook/stats', methods=['GET'])
     def webhook_stats():
         from flask import jsonify
@@ -204,7 +229,7 @@ def app_with_engine(mock_openalgo_client):
                 'exits_executed': engine.stats.get('exits_executed', 0)
             }
         }), 200
-    
+
     return app
 
 
@@ -221,10 +246,10 @@ class TestWebhookEndpoint:
         """Test valid BASE_ENTRY signal returns 200"""
         response = client.post(
             '/webhook',
-            json=VALID_BASE_ENTRY_BN,
+            json=fresh_payload(VALID_BASE_ENTRY_BN),  # Use fresh timestamp
             content_type='application/json'
         )
-        
+
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data['status'] in ['processed', 'ignored']  # Could be blocked by gates
@@ -233,10 +258,10 @@ class TestWebhookEndpoint:
         """Test valid PYRAMID signal returns 200"""
         response = client.post(
             '/webhook',
-            json=VALID_PYRAMID_GOLD,
+            json=fresh_payload(VALID_PYRAMID_GOLD),  # Use fresh timestamp
             content_type='application/json'
         )
-        
+
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data['status'] in ['processed', 'ignored']
@@ -250,12 +275,12 @@ class TestWebhookEndpoint:
             json=VALID_EXIT_WITH_REASON,
             content_type='application/json'
         )
-        
+
         # Should be 200 (valid signal, processed) or 500 (processing error - position not found)
         # But NOT 400 (validation error)
         assert response.status_code in [200, 500]
         data = json.loads(response.data)
-        
+
         if response.status_code == 200:
             assert data['status'] in ['processed', 'ignored']
         else:
@@ -270,7 +295,7 @@ class TestWebhookEndpoint:
             json=INVALID_MISSING_POSITION,
             content_type='application/json'
         )
-        
+
         assert response.status_code == 400
         data = json.loads(response.data)
         assert data['status'] == 'error'
@@ -284,7 +309,7 @@ class TestWebhookEndpoint:
             json=INVALID_POSITION_LONG_7,
             content_type='application/json'
         )
-        
+
         assert response.status_code == 400
         data = json.loads(response.data)
         assert data['status'] == 'error'
@@ -299,7 +324,7 @@ class TestWebhookEndpoint:
             json=INVALID_EXIT_NO_REASON,
             content_type='application/json'
         )
-        
+
         assert response.status_code == 400
         data = json.loads(response.data)
         assert data['status'] == 'error'
@@ -313,7 +338,7 @@ class TestWebhookEndpoint:
             data='not json',
             content_type='application/json'
         )
-        
+
         # Flask returns 400 for invalid JSON, but as HTML
         # Our handler should catch this, but if Flask catches it first, we get 400 HTML
         assert response.status_code == 400
@@ -330,13 +355,13 @@ class TestWebhookEndpoint:
         """Test invalid signal type returns 400"""
         payload = VALID_BASE_ENTRY_BN.copy()
         payload['type'] = 'INVALID_TYPE'
-        
+
         response = client.post(
             '/webhook',
             json=payload,
             content_type='application/json'
         )
-        
+
         assert response.status_code == 400
         data = json.loads(response.data)
         assert data['status'] == 'error'
@@ -349,7 +374,7 @@ class TestWebhookEndpoint:
             json=INVALID_INSTRUMENT,
             content_type='application/json'
         )
-        
+
         assert response.status_code == 400
         data = json.loads(response.data)
         assert data['status'] == 'error'
@@ -357,21 +382,24 @@ class TestWebhookEndpoint:
 
     def test_duplicate_detection_returns_200_ignored(self, client):
         """Test duplicate signal returns 200 with 'ignored' status"""
+        # Use fresh timestamp to avoid stale signal rejection
+        payload = fresh_payload(VALID_BASE_ENTRY_BN)
+
         # Send first signal
         response1 = client.post(
             '/webhook',
-            json=VALID_BASE_ENTRY_BN,
+            json=payload,
             content_type='application/json'
         )
         assert response1.status_code == 200
-        
-        # Send duplicate signal immediately
+
+        # Send duplicate signal immediately (same payload = same fingerprint)
         response2 = client.post(
             '/webhook',
-            json=VALID_BASE_ENTRY_BN,
+            json=payload,
             content_type='application/json'
         )
-        
+
         assert response2.status_code == 200
         data = json.loads(response2.data)
         assert data['status'] == 'ignored'
@@ -386,10 +414,10 @@ class TestWebhookEndpoint:
             json=VALID_BASE_ENTRY_BN,
             content_type='application/json'
         )
-        
+
         # Get stats
         response = client.get('/webhook/stats')
-        
+
         assert response.status_code == 200
         data = json.loads(response.data)
         assert 'webhook' in data
@@ -399,24 +427,27 @@ class TestWebhookEndpoint:
 
     def test_different_signals_not_duplicates(self, client):
         """Test different signals (different position) are not duplicates"""
+        # Use fresh timestamp to avoid stale signal rejection
+        payload1 = fresh_payload(VALID_BASE_ENTRY_BN)
+
         # Send BASE_ENTRY Long_1
         response1 = client.post(
             '/webhook',
-            json=VALID_BASE_ENTRY_BN,
+            json=payload1,
             content_type='application/json'
         )
         assert response1.status_code == 200
-        
-        # Send BASE_ENTRY Long_2 (different position)
-        payload = VALID_BASE_ENTRY_BN.copy()
-        payload['position'] = 'Long_2'
-        
+
+        # Send BASE_ENTRY Long_2 (different position) - also needs fresh timestamp
+        payload2 = fresh_payload(VALID_BASE_ENTRY_BN)
+        payload2['position'] = 'Long_2'
+
         response2 = client.post(
             '/webhook',
-            json=payload,
+            json=payload2,
             content_type='application/json'
         )
-        
+
         assert response2.status_code == 200
         data = json.loads(response2.data)
         # Should be processed, not ignored (different position)
@@ -425,7 +456,7 @@ class TestWebhookEndpoint:
     def test_rate_limiting_returns_429(self, app_with_engine):
         """Test rate limiting returns 429 Too Many Requests"""
         client = app_with_engine.test_client()
-        
+
         # Send 101 requests (exceeding limit of 100 per minute)
         # Note: This test may be slow, so we'll test with a lower limit in the app
         # For actual testing, we'd mock the rate limit store or use a shorter window
@@ -437,7 +468,7 @@ class TestWebhookEndpoint:
                 content_type='application/json'
             )
             responses.append(response)
-        
+
         # All should succeed (we're not hitting the limit with 5 requests)
         # To properly test rate limiting, we'd need to configure a lower limit or mock time
         assert all(r.status_code in [200, 500] for r in responses)
@@ -449,7 +480,7 @@ class TestWebhookEndpoint:
             json=VALID_BASE_ENTRY_BN,
             content_type='application/json'
         )
-        
+
         assert response.status_code in [200, 500]
         data = json.loads(response.data)
         assert 'request_id' in data
@@ -462,12 +493,12 @@ class TestWebhookEndpoint:
             json=INVALID_POSITION_LONG_7,
             content_type='application/json'
         )
-        
+
         assert response.status_code == 400
         data = json.loads(response.data)
         assert 'request_id' in data
         assert data['status'] == 'error'
-    
+
     def test_signal_rejection_when_not_leader(self, mock_openalgo_client):
         """Test signal rejection when instance is not leader"""
         from core.redis_coordinator import RedisCoordinator
@@ -475,19 +506,19 @@ class TestWebhookEndpoint:
         from live.engine import LiveTradingEngine
         from flask import Flask
         from core.webhook_parser import DuplicateDetector
-        
+
         app = Flask(__name__)
         app.config['TESTING'] = True
-        
+
         # Initialize engine
         engine = LiveTradingEngine(
             initial_capital=5000000.0,
             openalgo_client=mock_openalgo_client
         )
-        
+
         # Initialize duplicate detector
         duplicate_detector = DuplicateDetector(window_seconds=60)
-        
+
         # Create coordinator but don't make it leader
         redis_config = {
             'host': 'localhost',
@@ -499,7 +530,7 @@ class TestWebhookEndpoint:
             'enable_redis': True,
             'max_connections': 10
         }
-        
+
         # Try to create coordinator (may fail if Redis not available, that's OK)
         coordinator = None
         try:
@@ -509,21 +540,21 @@ class TestWebhookEndpoint:
         except Exception:
             # Redis not available - skip this test
             pytest.skip("Redis not available for leader verification test")
-        
+
         # Store in app context
         app.engine = engine
         app.duplicate_detector = duplicate_detector
         app.coordinator = coordinator
-        
+
         # Define webhook route with leader check
         @app.route('/webhook', methods=['POST'])
         def webhook():
             from core.webhook_parser import validate_json_structure, parse_webhook_signal
             import logging
-            
+
             logger = logging.getLogger(__name__)
             request_id = str(uuid.uuid4())[:8]
-            
+
             try:
                 if request.json is None:
                     return jsonify({
@@ -532,7 +563,7 @@ class TestWebhookEndpoint:
                         'message': 'Invalid or missing JSON',
                         'request_id': request_id
                     }), 400
-                
+
                 # Validate JSON structure
                 is_valid, error_message = validate_json_structure(request.json)
                 if not is_valid:
@@ -542,7 +573,7 @@ class TestWebhookEndpoint:
                         'message': error_message or 'Invalid JSON structure',
                         'request_id': request_id
                     }), 400
-                
+
                 # Leader check (CRITICAL for trading)
                 if coordinator and not coordinator.is_leader:
                     logger.warning(
@@ -555,7 +586,7 @@ class TestWebhookEndpoint:
                         'message': f'Signal rejected: instance {coordinator.instance_id} is not the leader',
                         'request_id': request_id
                     }), 403
-                
+
                 # Parse signal
                 signal, parse_error = parse_webhook_signal(request.json)
                 if signal is None:
@@ -565,7 +596,7 @@ class TestWebhookEndpoint:
                         'message': parse_error or 'Failed to parse signal',
                         'request_id': request_id
                     }), 400
-                
+
                 # Check for duplicates
                 if duplicate_detector.is_duplicate(signal):
                     return jsonify({
@@ -574,7 +605,7 @@ class TestWebhookEndpoint:
                         'message': 'Signal already processed',
                         'request_id': request_id
                     }), 200
-                
+
                 # RE-CHECK leadership (race condition protection)
                 if coordinator and not coordinator.is_leader:
                     logger.error(
@@ -587,16 +618,16 @@ class TestWebhookEndpoint:
                         'message': 'Signal processing aborted: leadership lost during processing',
                         'request_id': request_id
                     }), 403
-                
+
                 # Process signal
                 result = engine.process_signal(signal, coordinator=coordinator)
-                
+
                 return jsonify({
                     'status': 'success',
                     'result': result,
                     'request_id': request_id
                 }), 200
-                
+
             except Exception as e:
                 logger.error(f"[{request_id}] Error processing webhook: {e}", exc_info=True)
                 return jsonify({
@@ -605,16 +636,16 @@ class TestWebhookEndpoint:
                     'message': str(e),
                     'request_id': request_id
                 }), 500
-        
+
         client = app.test_client()
-        
+
         # Send signal when not leader - should be rejected
         response = client.post(
             '/webhook',
             json=VALID_BASE_ENTRY_BN,
             content_type='application/json'
         )
-        
+
         # Should be rejected with 403 Forbidden
         assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.data}"
         data = json.loads(response.data)
@@ -623,26 +654,26 @@ class TestWebhookEndpoint:
         assert data['reason'] == 'not_leader'
         assert 'not the leader' in data['message']
         assert 'request_id' in data
-    
+
     def test_signal_rejection_when_leadership_lost_mid_processing(self, mock_openalgo_client):
         """Test signal rejection when leadership is lost during processing (race condition)"""
         from core.redis_coordinator import RedisCoordinator
         from live.engine import LiveTradingEngine
         from flask import Flask
         from core.webhook_parser import DuplicateDetector
-        
+
         app = Flask(__name__)
         app.config['TESTING'] = True
-        
+
         # Initialize engine
         engine = LiveTradingEngine(
             initial_capital=5000000.0,
             openalgo_client=mock_openalgo_client
         )
-        
+
         # Initialize duplicate detector
         duplicate_detector = DuplicateDetector(window_seconds=60)
-        
+
         # Create coordinator and make it leader
         redis_config = {
             'host': 'localhost',
@@ -654,7 +685,7 @@ class TestWebhookEndpoint:
             'enable_redis': True,
             'max_connections': 10
         }
-        
+
         coordinator = None
         try:
             coordinator = RedisCoordinator(redis_config)
@@ -665,21 +696,21 @@ class TestWebhookEndpoint:
             assert coordinator.is_leader is True, "Coordinator should be leader"
         except Exception:
             pytest.skip("Redis not available for leader verification test")
-        
+
         # Store in app context
         app.engine = engine
         app.duplicate_detector = duplicate_detector
         app.coordinator = coordinator
-        
+
         # Define webhook route with leader check
         @app.route('/webhook', methods=['POST'])
         def webhook():
             from core.webhook_parser import validate_json_structure, parse_webhook_signal
             import logging
-            
+
             logger = logging.getLogger(__name__)
             request_id = str(uuid.uuid4())[:8]
-            
+
             try:
                 if request.json is None:
                     return jsonify({
@@ -688,7 +719,7 @@ class TestWebhookEndpoint:
                         'message': 'Invalid or missing JSON',
                         'request_id': request_id
                     }), 400
-                
+
                 # Validate JSON structure
                 is_valid, error_message = validate_json_structure(request.json)
                 if not is_valid:
@@ -698,7 +729,7 @@ class TestWebhookEndpoint:
                         'message': error_message or 'Invalid JSON structure',
                         'request_id': request_id
                     }), 400
-                
+
                 # Initial leader check (passes - we're leader)
                 if coordinator and not coordinator.is_leader:
                     return jsonify({
@@ -708,7 +739,7 @@ class TestWebhookEndpoint:
                         'message': f'Signal rejected: instance {coordinator.instance_id} is not the leader',
                         'request_id': request_id
                     }), 403
-                
+
                 # Parse signal
                 signal, parse_error = parse_webhook_signal(request.json)
                 if signal is None:
@@ -718,7 +749,7 @@ class TestWebhookEndpoint:
                         'message': parse_error or 'Failed to parse signal',
                         'request_id': request_id
                     }), 400
-                
+
                 # Check for duplicates
                 if duplicate_detector.is_duplicate(signal):
                     return jsonify({
@@ -727,11 +758,11 @@ class TestWebhookEndpoint:
                         'message': 'Signal already processed',
                         'request_id': request_id
                     }), 200
-                
+
                 # Simulate leadership loss during processing (race condition)
                 coordinator.release_leadership()
                 coordinator.is_leader = False
-                
+
                 # RE-CHECK leadership (should now fail)
                 if coordinator and not coordinator.is_leader:
                     logger.error(
@@ -744,16 +775,16 @@ class TestWebhookEndpoint:
                         'message': 'Signal processing aborted: leadership lost during processing',
                         'request_id': request_id
                     }), 403
-                
+
                 # Process signal (should not reach here)
                 result = engine.process_signal(signal, coordinator=coordinator)
-                
+
                 return jsonify({
                     'status': 'success',
                     'result': result,
                     'request_id': request_id
                 }), 200
-                
+
             except Exception as e:
                 logger.error(f"[{request_id}] Error processing webhook: {e}", exc_info=True)
                 return jsonify({
@@ -762,16 +793,16 @@ class TestWebhookEndpoint:
                     'message': str(e),
                     'request_id': request_id
                 }), 500
-        
+
         client = app.test_client()
-        
+
         # Send signal - should be rejected after leadership loss
         response = client.post(
             '/webhook',
             json=VALID_BASE_ENTRY_BN,
             content_type='application/json'
         )
-        
+
         # Should be rejected with 403 Forbidden (lost leadership)
         assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.data}"
         data = json.loads(response.data)
@@ -780,8 +811,7 @@ class TestWebhookEndpoint:
         assert data['reason'] == 'lost_leadership'
         assert 'leadership lost' in data['message'].lower()
         assert 'request_id' in data
-        
+
         # Cleanup
         coordinator.stop_heartbeat()
         coordinator.close()
-

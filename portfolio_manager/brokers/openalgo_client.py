@@ -28,7 +28,7 @@ class OpenAlgoClient:
             'Content-Type': 'application/json'
         })
         logger.info(f"OpenAlgo client initialized: {self.base_url}")
-    
+
     def place_order(self, symbol: str, action: str, quantity: int,
                     order_type: str = "MARKET", product: str = "NRML",
                     price: float = 0.0, exchange: str = "NFO",
@@ -83,7 +83,7 @@ class OpenAlgoClient:
         except Exception as e:
             logger.error(f"Unexpected error placing order: {e}")
             return {"status": "error", "message": str(e)}
-    
+
     def get_order_status(self, order_id: str) -> Optional[Dict]:
         """
         Get order status by order ID
@@ -101,10 +101,18 @@ class OpenAlgoClient:
             response.raise_for_status()
             result = response.json()
 
-            orders = result.get('data', [])
+            # Handle both formats: {"data": [...]} and {"data": {"orders": [...]}}
+            data = result.get('data', [])
+            if isinstance(data, dict):
+                orders = data.get('orders', [])
+            else:
+                orders = data if isinstance(data, list) else []
+
             for order in orders:
-                if str(order.get('orderid')) == str(order_id):
-                    logger.debug(f"Order {order_id} status: {order.get('status')}")
+                if isinstance(order, dict) and str(order.get('orderid')) == str(order_id):
+                    # Normalize status field (OpenAlgo uses 'order_status')
+                    status = order.get('order_status') or order.get('status')
+                    logger.debug(f"Order {order_id} status: {status}")
                     return order
 
             logger.warning(f"Order {order_id} not found in orderbook")
@@ -132,7 +140,7 @@ class OpenAlgoClient:
         except Exception as e:
             logger.error(f"Failed to get positions: {e}")
             return []
-    
+
     def get_funds(self) -> Dict:
         """
         Get available margin/funds
@@ -154,44 +162,91 @@ class OpenAlgoClient:
             logger.error(f"Failed to get funds: {e}")
             return {}
 
-    def get_quote(self, symbol: str, exchange: str = "NFO") -> Dict:
+    def get_quote(self, symbol: str, exchange: str = None) -> Dict:
         """
         Get live quote for symbol
 
         Args:
-            symbol: Trading symbol (e.g., BANKNIFTY25DEC2552000CE)
-            exchange: Exchange code (NFO, NSE, MCX, etc.)
+            symbol: Trading symbol or internal name (e.g., BANK_NIFTY, GOLD_MINI, or actual symbol)
+            exchange: Exchange code (NFO, NSE, MCX, etc.) - auto-detected if not provided
 
         Returns:
             Quote dict with ltp, bid, ask, etc.
         """
+        # Translate internal instrument names to OpenAlgo symbols
+        # IMPORTANT: Use FUTURES price for divergence check (Pine Script runs on futures chart)
+        actual_symbol = symbol
+        actual_exchange = exchange or "NFO"
+
+        if symbol == "BANK_NIFTY":
+            # Bank Nifty futures: BANKNIFTY{DD}{MMM}{YY}FUT (e.g., BANKNIFTY30DEC25FUT)
+            # Use current month expiry date
+            try:
+                from core.expiry_calendar import ExpiryCalendar
+                from datetime import date
+                expiry_cal = ExpiryCalendar()
+                expiry = expiry_cal.get_bank_nifty_expiry(date.today())
+                # Format: BANKNIFTY{DD}{MMM}{YY}FUT
+                actual_symbol = f"BANKNIFTY{expiry.strftime('%d%b%y').upper()}FUT"
+                actual_exchange = "NFO"
+            except Exception as e:
+                logger.warning(f"Could not calculate BN futures expiry, using fallback: {e}")
+                actual_symbol = "BANKNIFTY30DEC25FUT"  # Fallback for Dec 2025
+                actual_exchange = "NFO"
+        elif symbol == "NIFTY":
+            # Similar logic for Nifty futures
+            actual_symbol = "NIFTY"  # TODO: implement dynamic expiry
+            actual_exchange = "NFO"
+        elif symbol == "GOLD_MINI":
+            # Gold Mini futures: GOLDM{DD}{MMM}{YY}FUT (e.g., GOLDM05JAN26FUT)
+            try:
+                from core.expiry_calendar import ExpiryCalendar
+                from datetime import date
+                expiry_cal = ExpiryCalendar()
+                expiry = expiry_cal.get_expiry_after_rollover("GOLD_MINI", date.today())
+                # Format: GOLDM{DD}{MMM}{YY}FUT
+                actual_symbol = f"GOLDM{expiry.strftime('%d%b%y').upper()}FUT"
+                actual_exchange = "MCX"
+            except Exception as e:
+                logger.warning(f"Could not calculate Gold Mini expiry, using fallback: {e}")
+                actual_symbol = "GOLDM05JAN26FUT"  # Fallback for Jan 2026
+                actual_exchange = "MCX"
+
         url = f"{self.base_url}/api/v1/quotes"
         try:
             payload = {
                 "apikey": self.api_key,
-                "symbol": symbol,
-                "exchange": exchange
+                "symbol": actual_symbol,
+                "exchange": actual_exchange
             }
             response = self.session.post(url, json=payload, timeout=10)
             response.raise_for_status()
             result = response.json()
             quote = result.get('data', {})
-            logger.debug(f"Quote for {symbol}: LTP={quote.get('ltp')}")
+            logger.debug(f"Quote for {actual_symbol}: LTP={quote.get('ltp')}")
             return quote
         except Exception as e:
-            logger.error(f"Failed to get quote for {symbol}: {e}")
+            logger.error(f"Failed to get quote for {symbol} ({actual_symbol}@{actual_exchange}): {e}")
             return {}
-    
+
     def modify_order(self, order_id: str, new_price: float,
-                     new_quantity: int = None, new_trigger_price: float = None) -> Dict:
+                     symbol: str = None, action: str = None, exchange: str = None,
+                     quantity: int = None, product: str = None,
+                     new_trigger_price: float = None) -> Dict:
         """
-        Modify an existing order
+        Modify an existing order.
+
+        OpenAlgo requires ALL order details to modify, not just the new price.
 
         Args:
             order_id: Order ID to modify
             new_price: New limit price
-            new_quantity: New quantity (optional)
-            new_trigger_price: New trigger price (optional)
+            symbol: Trading symbol (required by OpenAlgo)
+            action: BUY or SELL (required by OpenAlgo)
+            exchange: Exchange code NFO/MCX (required by OpenAlgo)
+            quantity: Order quantity (required by OpenAlgo)
+            product: Product type NRML/MIS (required by OpenAlgo)
+            new_trigger_price: New trigger price for SL orders (optional)
 
         Returns:
             Response dict with status
@@ -200,15 +255,31 @@ class OpenAlgoClient:
         try:
             payload = {
                 "apikey": self.api_key,
+                "strategy": "Portfolio Manager",
                 "orderid": str(order_id),
-                "newprice": str(new_price)
+                "symbol": symbol or "",
+                "action": action or "BUY",
+                "exchange": exchange or "NFO",
+                "product": product or "NRML",
+                "pricetype": "LIMIT",
+                "quantity": str(quantity) if quantity else "0",
+                "price": str(new_price),
+                "trigger_price": str(new_trigger_price) if new_trigger_price else "0",
+                "disclosed_quantity": "0"
             }
-            if new_quantity is not None:
-                payload["newquantity"] = str(new_quantity)
-            if new_trigger_price is not None:
-                payload["newtrigger_price"] = str(new_trigger_price)
+
+            # Log at INFO level for debugging modify issues
+            logger.info(f"Modify order request: orderid={order_id}, symbol={symbol}, action={action}, price={new_price}, qty={quantity}")
 
             response = self.session.post(url, json=payload, timeout=10)
+
+            # Log response even if it fails
+            if response.status_code != 200:
+                logger.error(
+                    f"Modify order {order_id} failed: HTTP {response.status_code}, "
+                    f"Response: {response.text}"
+                )
+
             response.raise_for_status()
             result = response.json()
             logger.info(f"Order {order_id} modified to price {new_price}: {result.get('status')}")
@@ -273,5 +344,3 @@ class OpenAlgoClient:
         except Exception as e:
             logger.error(f"Failed to close position: {e}")
             return {"status": "error", "message": str(e)}
-
-

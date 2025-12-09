@@ -82,7 +82,7 @@ else
         FLASK_PORT=$OPENALGO_PORT HOST_SERVER="http://127.0.0.1:$OPENALGO_PORT" \
             nohup uv run app.py > "$OPENALGO_DIR/log/openalgo.log" 2>&1 &
         cd "$SCRIPT_DIR"
-        
+
         # Wait for startup
         for i in {1..30}; do
             if curl -s http://127.0.0.1:$OPENALGO_PORT/api/v1/ping | grep -q "status" 2>/dev/null; then
@@ -108,22 +108,22 @@ if curl -s http://127.0.0.1:$PM_PORT/health | grep -q "healthy" 2>/dev/null; the
     echo -e "${GREEN}✓ Portfolio Manager already running${NC}"
 else
     echo -e "${YELLOW}Starting Portfolio Manager...${NC}"
-    
+
     # Activate venv if exists
     if [ -f "venv/bin/activate" ]; then
         source venv/bin/activate
     fi
-    
+
     # Get API key from config
     API_KEY=$(python3 -c "import json; print(json.load(open('openalgo_config.json'))['openalgo_api_key'])")
-    
+
     # Start PM
     nohup python3 portfolio_manager.py live \
         --broker "$BROKER" \
         --api-key "$API_KEY" \
         --capital $EQUITY \
         > pm.log 2>&1 &
-    
+
     # Wait for startup
     for i in {1..15}; do
         if curl -s http://127.0.0.1:$PM_PORT/health | grep -q "healthy" 2>/dev/null; then
@@ -173,6 +173,3 @@ else
     echo -e "  ${BLUE}ℹ️  Analyzer mode - Orders simulated${NC}"
 fi
 echo ""
-
-
-

@@ -59,7 +59,7 @@ class Signal:
     supertrend: float
     roc: Optional[float] = None
     reason: Optional[str] = None  # Required for EXIT signals
-    
+
     def __post_init__(self):
         """Validate signal data"""
         if self.price <= 0:
@@ -71,18 +71,18 @@ class Signal:
         # EXIT signals must have a reason
         if self.signal_type == SignalType.EXIT and not self.reason:
             raise ValueError("EXIT signals require a 'reason' field")
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> 'Signal':
         """
         Create Signal from webhook JSON data
-        
+
         Args:
             data: Dictionary with webhook JSON data
-            
+
         Returns:
             Signal instance
-            
+
         Raises:
             ValueError: If validation fails
         """
@@ -181,6 +181,10 @@ class Position:
     expiry: Optional[str] = None
     pe_symbol: Optional[str] = None
     ce_symbol: Optional[str] = None
+
+    # Test mode tracking
+    is_test: bool = False  # True if created in test mode
+    original_lots: Optional[int] = None  # Actual calculated lots (before test mode override)
     pe_order_id: Optional[str] = None
     ce_order_id: Optional[str] = None
 
@@ -205,7 +209,15 @@ class Position:
     vol_contribution: float = 0.0  # % of portfolio equity
     limiter: Optional[str] = None  # What constraint limited size
     is_base_position: bool = False  # TRUE for base entry, FALSE for pyramids
-    
+
+    # Strategy assignment
+    strategy_id: int = 1  # Foreign key to trading_strategies (1 = ITJ Trend Follow)
+
+    # Exit data (for closed positions)
+    exit_timestamp: Optional[datetime] = None
+    exit_price: Optional[float] = None
+    exit_reason: Optional[str] = None  # STOP_LOSS, SIGNAL, EOD, MANUAL
+
     def calculate_risk(self, point_value: float) -> float:
         """
         Calculate current risk exposure in Rs
@@ -236,7 +248,7 @@ class Position:
         """
         price_diff = current_price - self.entry_price
         return price_diff * self.lots * point_value
-    
+
     def update_stop(self, new_stop: float) -> bool:
         """Update trailing stop (only moves up for long positions)"""
         if new_stop > self.current_stop:
@@ -252,39 +264,39 @@ class PortfolioState:
     closed_equity: float  # Cash + realized P&L
     open_equity: float  # Closed + unrealized P&L
     blended_equity: float  # Closed + 50% unrealized
-    
+
     positions: Dict[str, Position] = field(default_factory=dict)
-    
+
     # Risk metrics
     total_risk_amount: float = 0.0
     total_risk_percent: float = 0.0
     gold_risk_percent: float = 0.0
     banknifty_risk_percent: float = 0.0
-    
+
     # Volatility metrics
     total_vol_amount: float = 0.0
     total_vol_percent: float = 0.0
     gold_vol_percent: float = 0.0
     banknifty_vol_percent: float = 0.0
-    
+
     # Margin metrics
     margin_used: float = 0.0
     margin_available: float = 0.0
     margin_utilization_percent: float = 0.0
-    
+
     def get_open_positions(self) -> Dict[str, Position]:
         """Get all open positions"""
         return {k: v for k, v in self.positions.items() if v.status == "open"}
-    
+
     def get_positions_for_instrument(self, instrument: str) -> Dict[str, Position]:
         """Get positions for specific instrument"""
-        return {k: v for k, v in self.get_open_positions().items() 
+        return {k: v for k, v in self.get_open_positions().items()
                 if v.instrument == instrument}
-    
+
     def position_count(self) -> int:
         """Count open positions"""
         return len(self.get_open_positions())
-    
+
     def instrument_position_count(self, instrument: str) -> int:
         """Count positions for specific instrument"""
         return len(self.get_positions_for_instrument(instrument))
@@ -297,7 +309,7 @@ class TomBassoConstraints:
     lot_m: float  # Margin-based lots
     final_lots: int  # MIN(lot_r, lot_v, lot_m) floored
     limiter: str  # Which constraint limited: 'risk', 'volatility', or 'margin'
-    
+
     def __str__(self):
         return (f"Lot-R: {self.lot_r:.2f}, Lot-V: {self.lot_v:.2f}, "
                 f"Lot-M: {self.lot_m:.2f} → Final: {self.final_lots} "
@@ -557,4 +569,3 @@ class EODMonitorSignal:
             position_status=position_status,
             sizing=sizing  # May be None - Python calculates its own sizing
         )
-

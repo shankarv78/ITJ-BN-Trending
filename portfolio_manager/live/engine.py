@@ -16,45 +16,65 @@ from core.pyramid_gate import PyramidGateController
 from core.stop_manager import TomBassoStopManager
 from core.config import PortfolioConfig, get_instrument_config
 from core.signal_validator import SignalValidator, SignalValidationConfig, ValidationSeverity
-from core.order_executor import OrderExecutor, SimpleLimitExecutor, ProgressiveExecutor, ExecutionStatus
+from core.order_executor import OrderExecutor, SimpleLimitExecutor, ProgressiveExecutor, ExecutionStatus, SyntheticFuturesExecutor
 from core.signal_validation_metrics import SignalValidationMetrics
 from live.rollover_scanner import RolloverScanner, RolloverScanResult
 from live.rollover_executor import RolloverExecutor, BatchRolloverResult
+
+# Optional voice announcer
+try:
+    from core.voice_announcer import get_announcer
+    VOICE_AVAILABLE = True
+except ImportError:
+    VOICE_AVAILABLE = False
+    def get_announcer():
+        return None
 
 logger = logging.getLogger(__name__)
 
 class LiveTradingEngine:
     """
     Live trading engine using OpenAlgo
-    
+
     IDENTICAL logic to backtest engine, but executes real trades
     """
-    
+
     def __init__(
-        self, 
+        self,
         initial_capital: float,
         openalgo_client,  # OpenAlgo client instance
         config: PortfolioConfig = None,
-        db_manager = None  # Optional DatabaseStateManager for persistence
+        db_manager = None,  # Optional DatabaseStateManager for persistence
+        test_mode: bool = False,  # Test mode: place 1 lot, log actual calculated lots
+        strategy_manager = None  # Optional StrategyManager for multi-strategy P&L tracking
     ):
         """
         Initialize live trading engine
-        
+
         Args:
             initial_capital: Starting capital (or current equity)
             openalgo_client: OpenAlgo API client
             config: Portfolio configuration
             db_manager: Optional DatabaseStateManager for persistence
+            test_mode: If True, place only 1 lot but log what actual lot would be
+            strategy_manager: Optional StrategyManager for strategy-level P&L tracking
         """
         self.config = config or PortfolioConfig()
         self.db_manager = db_manager
-        
-        # Initialize portfolio with database manager
-        self.portfolio = PortfolioStateManager(initial_capital, self.config, db_manager)
+        self.test_mode = test_mode
+        self.strategy_manager = strategy_manager
+
+        if test_mode:
+            logger.warning("🧪 TEST MODE ENABLED: Orders will place 1 lot only, actual lots logged")
+
+        # Initialize portfolio with database manager and strategy manager
+        self.portfolio = PortfolioStateManager(
+            initial_capital, self.config, db_manager, strategy_manager
+        )
         self.stop_manager = TomBassoStopManager()
         self.pyramid_controller = PyramidGateController(self.portfolio, self.config)
         self.openalgo = openalgo_client
-        
+
         # Position sizers per instrument (SAME as backtest)
         self.sizers = {
             InstrumentType.GOLD_MINI: TomBassoPositionSizer(
@@ -64,12 +84,12 @@ class LiveTradingEngine:
                 get_instrument_config(InstrumentType.BANK_NIFTY)
             )
         }
-        
+
         # Initialize pyramiding tracking (will be populated by CrashRecoveryManager on startup)
         # Track for pyramiding (SAME as backtest)
         self.last_pyramid_price = {}
         self.base_positions = {}
-        
+
         # Statistics
         self.stats = {
             'signals_received': 0,
@@ -89,22 +109,41 @@ class LiveTradingEngine:
         self.rollover_scanner = RolloverScanner(self.config)
         self.rollover_executor: Optional[RolloverExecutor] = None
         self._last_rollover_check: Optional[datetime] = None
-        
+
         # Signal validation components
         validation_config = self.config.signal_validation_config or SignalValidationConfig()
         self.signal_validator = SignalValidator(
             config=validation_config,
             portfolio_manager=self.portfolio
         )
-        
+
         # Metrics collection
         self.metrics = SignalValidationMetrics(window_size=1000)
-        
+
         # Order executor based on config
         if self.config.execution_strategy == "simple_limit":
             self.order_executor: OrderExecutor = SimpleLimitExecutor(openalgo_client=self.openalgo)
         else:  # progressive (default)
             self.order_executor: OrderExecutor = ProgressiveExecutor(openalgo_client=self.openalgo)
+
+        # Symbol mapper and synthetic futures executor for Bank Nifty
+        self.symbol_mapper = None
+        self.synthetic_executor = None
+        try:
+            from core.symbol_mapper import get_symbol_mapper
+            self.symbol_mapper = get_symbol_mapper()
+            if self.symbol_mapper:
+                self.synthetic_executor = SyntheticFuturesExecutor(
+                    openalgo_client=self.openalgo,
+                    symbol_mapper=self.symbol_mapper,
+                    timeout_seconds=30,  # 30 second timeout for each leg
+                    poll_interval_seconds=0.5
+                )
+                logger.info("[LIVE] SyntheticFuturesExecutor initialized for Bank Nifty 2-leg execution")
+            else:
+                logger.warning("[LIVE] SymbolMapper not initialized - synthetic futures disabled")
+        except Exception as e:
+            logger.warning(f"[LIVE] Failed to initialize synthetic executor: {e}")
 
         # EOD (End-of-Day) Pre-Close Execution Components
         self.eod_monitor: Optional[EODMonitor] = None
@@ -120,26 +159,26 @@ class LiveTradingEngine:
             f"Execution strategy={self.config.execution_strategy}, "
             f"EOD={'enabled' if self.config.eod_enabled else 'disabled'}"
         )
-    
+
     def _get_broker_price_with_timeout(
-        self, 
-        instrument: str, 
+        self,
+        instrument: str,
         fallback_price: float,
         timeout_seconds: float = 2.0,
         max_retries: int = 3
     ) -> Tuple[Optional[float], bool]:
         """
         Fetch broker price with timeout and exponential backoff retry.
-        
+
         Args:
             instrument: Instrument symbol
             fallback_price: Price to use if broker API fails
             timeout_seconds: Timeout per attempt (default: 2.0s)
             max_retries: Maximum retry attempts (default: 3)
-        
+
         Returns:
             Tuple of (broker_price, validation_bypassed)
-            - broker_price: LTP from broker, or fallback_price if failed
+            - broker_price: Mid-price (avg of bid/ask) from broker, or fallback_price if failed
             - validation_bypassed: True if broker API failed (used fallback)
         """
         for attempt in range(max_retries):
@@ -149,16 +188,26 @@ class LiveTradingEngine:
                     backoff_delay = attempt * 0.5
                     logger.debug(f"[LIVE] Retry {attempt}/{max_retries} after {backoff_delay}s backoff")
                     time.sleep(backoff_delay)
-                
+
                 # Attempt to get quote with timeout
                 # Note: OpenAlgo client doesn't support timeout parameter directly
                 # This is a placeholder - actual implementation depends on client API
                 quote = self.openalgo.get_quote(instrument)
-                broker_price = quote.get('ltp', fallback_price)
-                
-                logger.debug(f"[LIVE] Broker price fetched: ₹{broker_price:,.2f}")
+
+                # Use mid-price (avg of bid/ask) for fair limit price
+                bid = quote.get('bid')
+                ask = quote.get('ask')
+                ltp = quote.get('ltp', fallback_price)
+
+                if bid and ask:
+                    broker_price = (float(bid) + float(ask)) / 2
+                    logger.debug(f"[LIVE] Mid-price: ₹{broker_price:,.2f} (bid={bid}, ask={ask})")
+                else:
+                    # Fall back to LTP if bid/ask not available
+                    broker_price = float(ltp) if ltp else fallback_price
+                    logger.debug(f"[LIVE] Using LTP (bid/ask unavailable): ₹{broker_price:,.2f}")
                 return broker_price, False  # Success, validation not bypassed
-                
+
             except TimeoutError as e:
                 logger.warning(
                     f"[LIVE] Broker API timeout (attempt {attempt + 1}/{max_retries}): {e}"
@@ -169,7 +218,7 @@ class LiveTradingEngine:
                         f"using signal price ₹{fallback_price:,.2f} (VALIDATION BYPASSED)"
                     )
                     return fallback_price, True  # Failed, validation bypassed
-                    
+
             except ConnectionError as e:
                 logger.warning(
                     f"[LIVE] Broker API connection error (attempt {attempt + 1}/{max_retries}): {e}"
@@ -180,27 +229,27 @@ class LiveTradingEngine:
                         f"using signal price ₹{fallback_price:,.2f} (VALIDATION BYPASSED)"
                     )
                     return fallback_price, True  # Failed, validation bypassed
-                    
+
             except Exception as e:
                 logger.error(
                     f"[LIVE] Broker API error (attempt {attempt + 1}/{max_retries}): {e}, "
                     f"using signal price ₹{fallback_price:,.2f} (VALIDATION BYPASSED)"
                 )
                 return fallback_price, True  # Failed, validation bypassed
-        
+
         # Should never reach here, but safety fallback
         return fallback_price, True
-    
+
     def process_signal(self, signal: Signal, coordinator=None) -> Dict:
         """
         Process signal in live mode
-        
+
         SAME logic as backtest, but calls OpenAlgo for execution
-        
+
         Args:
             signal: Trading signal from TradingView
             coordinator: Optional RedisCoordinator for leader verification
-            
+
         Returns:
             Dict with execution result
         """
@@ -227,14 +276,18 @@ class LiveTradingEngine:
         self.stats['signals_received'] += 1
 
         logger.info(f"[LIVE] Processing: {signal.signal_type.value} {signal.position} @ ₹{signal.price}")
-        
+
         # Step 1: Condition validation (trusts TradingView signal price)
-        if self.config.signal_validation_enabled:
+        # Skip validation in test mode for easier testing
+        if self.test_mode:
+            logger.info(f"🧪 [TEST MODE] Bypassing signal validation")
+
+        if self.config.signal_validation_enabled and not self.test_mode:
             portfolio_state = self.portfolio.get_current_state()
             condition_result = self.signal_validator.validate_conditions_with_signal_price(
                 signal, portfolio_state
             )
-            
+
             # Record validation metric
             self.metrics.record_validation(
                 signal_type=signal.signal_type,
@@ -245,7 +298,7 @@ class LiveTradingEngine:
                 signal_age_seconds=condition_result.signal_age_seconds,
                 rejection_reason=condition_result.reason if not condition_result.is_valid else None
             )
-            
+
             if not condition_result.is_valid:
                 age_str = f"{condition_result.signal_age_seconds:.1f}s" if condition_result.signal_age_seconds is not None else "N/A"
                 logger.warning(
@@ -259,14 +312,14 @@ class LiveTradingEngine:
                     'validation_reason': condition_result.reason,
                     'signal_age_seconds': condition_result.signal_age_seconds
                 }
-            
+
             # Log validation severity if not normal
             if condition_result.severity.value != "normal":
                 logger.info(
                     f"[LIVE] Signal condition validation passed with {condition_result.severity.value} severity "
                     f"(age: {condition_result.signal_age_seconds:.1f}s)"
                 )
-        
+
         if signal.signal_type == SignalType.BASE_ENTRY:
             return self._handle_base_entry_live(signal)
         elif signal.signal_type == SignalType.PYRAMID:
@@ -275,15 +328,15 @@ class LiveTradingEngine:
             return self._handle_exit_live(signal)
         else:
             return {'status': 'error', 'reason': f'Unknown signal type'}
-    
+
     def _handle_base_entry_live(self, signal: Signal) -> Dict:
         """
         Handle base entry in live mode
-        
+
         IDENTICAL sizing logic as backtest, but executes via OpenAlgo
         """
         instrument = signal.instrument
-        
+
         # Get instrument type
         if instrument == "GOLD_MINI":
             inst_type = InstrumentType.GOLD_MINI
@@ -291,10 +344,10 @@ class LiveTradingEngine:
             inst_type = InstrumentType.BANK_NIFTY
         else:
             return {'status': 'error', 'reason': f'Unknown instrument'}
-        
+
         inst_config = get_instrument_config(inst_type)
         sizer = self.sizers[inst_type]
-        
+
         # Get LIVE equity from OpenAlgo
         # TODO: TESTING ONLY - Using portfolio equity instead of broker equity
         # Uncomment below for production:
@@ -306,37 +359,37 @@ class LiveTradingEngine:
         live_equity = self.portfolio.closed_equity
         logger.info(f"[LIVE] Using portfolio equity for testing: ₹{live_equity:,.2f}")
         available_margin = live_equity * 0.6  # Use 60% of equity as margin
-        
+
         # Calculate position size (SAME as backtest)
         constraints = sizer.calculate_base_entry_size(
             signal,
             equity=live_equity,
             available_margin=available_margin
         )
-        
+
         if constraints.final_lots == 0:
             self.stats['entries_blocked'] += 1
             return {
                 'status': 'blocked',
                 'reason': f'Zero lots (limited by {constraints.limiter})'
             }
-        
+
         # Check portfolio gate (SAME as backtest)
         est_risk = (signal.price - signal.stop) * constraints.final_lots * inst_config.point_value
         est_vol = signal.atr * constraints.final_lots * inst_config.point_value
-        
+
         gate_allowed, gate_reason = self.portfolio.check_portfolio_gate(est_risk, est_vol)
-        
+
         if not gate_allowed:
             self.stats['entries_blocked'] += 1
             return {'status': 'blocked', 'reason': gate_reason}
-        
+
         # Step 2: Execution validation (uses broker API price)
         original_lots = constraints.final_lots
         execution_price = signal.price  # Default to signal price
         execution_result = None  # Initialize
         validation_bypassed = False  # Track if validation was bypassed
-        
+
         if self.config.signal_validation_enabled:
             # Fetch broker price with timeout and retry
             broker_price, validation_bypassed = self._get_broker_price_with_timeout(
@@ -346,19 +399,19 @@ class LiveTradingEngine:
                 max_retries=3
             )
             execution_price = broker_price
-            
+
             logger.info(
                 f"[LIVE] Broker price: ₹{broker_price:,.2f} (signal: ₹{signal.price:,.2f})"
                 + (" [VALIDATION BYPASSED]" if validation_bypassed else "")
             )
-            
-            # Only validate if broker API succeeded
-            if not validation_bypassed:
+
+            # Only validate if broker API succeeded AND not in test mode
+            if not validation_bypassed and not self.test_mode:
                 # Validate execution price
                 exec_result = self.signal_validator.validate_execution_price(
                     signal, broker_price, signal.signal_type
                 )
-                
+
                 # Record execution validation metric
                 self.metrics.record_validation(
                     signal_type=signal.signal_type,
@@ -369,7 +422,7 @@ class LiveTradingEngine:
                     risk_increase_pct=exec_result.risk_increase_pct,
                     rejection_reason=exec_result.reason if not exec_result.is_valid else None
                 )
-                
+
                 if not exec_result.is_valid:
                     logger.warning(
                         f"[LIVE] Signal rejected at execution validation: {exec_result.reason} "
@@ -384,17 +437,8 @@ class LiveTradingEngine:
                         'divergence_pct': exec_result.divergence_pct,
                         'risk_increase_pct': exec_result.risk_increase_pct
                     }
-                
-                # Adjust position size if risk increased
-                if exec_result.risk_increase_pct and exec_result.risk_increase_pct > 0:
-                    adjusted_lots = self.signal_validator.adjust_position_size_for_execution(
-                        signal, broker_price, original_lots
-                    )
-                    if adjusted_lots != original_lots:
-                        logger.info(
-                            f"[LIVE] Position size adjusted: {original_lots} → {adjusted_lots} lots "
-                            f"(risk increase: {exec_result.risk_increase_pct:.2%})"
-                        )
+            elif self.test_mode:
+                logger.info("🧪 [TEST MODE] Bypassing execution validation")
             else:
                 # Validation bypassed due to broker API failure
                 logger.warning(
@@ -409,114 +453,208 @@ class LiveTradingEngine:
                     result='bypassed',
                     rejection_reason='broker_api_unavailable'
                 )
-        
+
         # Step 3: Execute order using OrderExecutor
         import time
         execution_start = time.time()
-        
-        try:
-            exec_result = self.order_executor.execute(
-                signal=signal,
-                lots=original_lots,
-                limit_price=execution_price
+
+        # TEST MODE: Override lots to 1, but log original calculated lots
+        calculated_lots = original_lots  # Store for logging
+        if self.test_mode:
+            logger.warning(
+                f"🧪 [TEST MODE] {signal.instrument} BASE_ENTRY: "
+                f"Calculated lots={calculated_lots}, executing with 1 lot only"
             )
-            
-            execution_time_ms = (time.time() - execution_start) * 1000
-            
-            # Record execution metric
-            self.metrics.record_execution(
-                signal_type=signal.signal_type,
+            original_lots = 1
+
+        # Voice announcement: Pre-trade (BASE_ENTRY)
+        announcer = get_announcer()
+        if announcer:
+            announcer.announce_pre_trade(
                 instrument=signal.instrument,
-                execution_strategy=self.config.execution_strategy,
-                status=exec_result.status,
+                position=signal.position,
+                signal_type=signal.signal_type.value,
                 lots=original_lots,
-                slippage_pct=exec_result.slippage_pct,
-                attempts=exec_result.attempts,
-                execution_time_ms=execution_time_ms,
-                rejection_reason=exec_result.rejection_reason if exec_result.status != ExecutionStatus.EXECUTED else None
+                price=execution_price,
+                stop=signal.stop,
+                risk_amount=est_risk,
+                risk_percent=(est_risk / live_equity * 100) if live_equity > 0 else 0
             )
-            
-            if exec_result.status == ExecutionStatus.EXECUTED:
-                # Order executed successfully
-                fill_price = exec_result.execution_price or execution_price
-                filled_lots = exec_result.lots_filled or original_lots
-                
-                execution_result = {
-                    'status': 'success',
-                    'order_details': {
-                        'order_id': exec_result.order_id,
-                        'fill_price': fill_price,
-                        'lots_filled': filled_lots,
-                        'slippage_pct': exec_result.slippage_pct,
+
+        try:
+            # Route to appropriate executor based on instrument type
+            if inst_type == InstrumentType.BANK_NIFTY:
+                # ============================
+                # BANK NIFTY: Use Synthetic Futures Executor (2-leg options)
+                # ============================
+                execution_result = self._execute_entry_openalgo(signal, original_lots, inst_type)
+                execution_time_ms = (time.time() - execution_start) * 1000
+
+                # Record execution metric for synthetic futures
+                self.metrics.record_execution(
+                    signal_type=signal.signal_type,
+                    instrument=signal.instrument,
+                    execution_strategy='synthetic_futures',
+                    status=ExecutionStatus.EXECUTED if execution_result.get('status') == 'success' else ExecutionStatus.REJECTED,
+                    lots=original_lots,
+                    slippage_pct=0.0,  # Synthetic futures don't track slippage the same way
+                    attempts=1,
+                    execution_time_ms=execution_time_ms,
+                    rejection_reason=execution_result.get('error') if execution_result.get('status') != 'success' else None
+                )
+
+                if execution_result.get('status') != 'success':
+                    # Execution failed
+                    error_msg = execution_result.get('error', 'unknown_error')
+                    logger.error(f"[LIVE] Bank Nifty synthetic execution failed: {error_msg}")
+                    self.stats['orders_failed'] += 1
+
+                    # Voice announcement: Error (repeats until acknowledged)
+                    if announcer:
+                        announcer.announce_error(
+                            f"{signal.instrument} synthetic order rejected. {error_msg}",
+                            error_type="execution"
+                        )
+
+                    return {
+                        'status': 'rejected',
+                        'reason': 'execution_failed',
+                        'execution_reason': error_msg,
+                        'execution_status': 'rejected',
+                        'attempts': 1
+                    }
+
+                # Add fill_price to order_details for position creation compatibility
+                if 'order_details' in execution_result:
+                    # Use PE entry price as the fill price (or signal price as fallback)
+                    pe_price = execution_result['order_details'].get('pe_entry_price', execution_price)
+                    ce_price = execution_result['order_details'].get('ce_entry_price', execution_price)
+                    # Average of PE and CE for synthetic position entry price
+                    execution_result['order_details']['fill_price'] = execution_price
+                    execution_result['order_details']['lots_filled'] = original_lots
+
+            else:
+                # ============================
+                # GOLD MINI: Use Standard Order Executor
+                # ============================
+                exec_result = self.order_executor.execute(
+                    signal=signal,
+                    lots=original_lots,
+                    limit_price=execution_price
+                )
+
+                execution_time_ms = (time.time() - execution_start) * 1000
+
+                # Record execution metric
+                self.metrics.record_execution(
+                    signal_type=signal.signal_type,
+                    instrument=signal.instrument,
+                    execution_strategy=self.config.execution_strategy,
+                    status=exec_result.status,
+                    lots=original_lots,
+                    slippage_pct=exec_result.slippage_pct,
+                    attempts=exec_result.attempts,
+                    execution_time_ms=execution_time_ms,
+                    rejection_reason=exec_result.rejection_reason if exec_result.status != ExecutionStatus.EXECUTED else None
+                )
+
+                if exec_result.status == ExecutionStatus.EXECUTED:
+                    # Order executed successfully
+                    fill_price = exec_result.execution_price or execution_price
+                    filled_lots = exec_result.lots_filled or original_lots
+
+                    execution_result = {
+                        'status': 'success',
+                        'order_details': {
+                            'order_id': exec_result.order_id,
+                            'fill_price': fill_price,
+                            'lots_filled': filled_lots,
+                            'slippage_pct': exec_result.slippage_pct,
+                            'attempts': exec_result.attempts
+                        }
+                    }
+                elif exec_result.status == ExecutionStatus.PARTIAL:
+                    # Partial fill - use filled lots
+                    fill_price = exec_result.execution_price or execution_price
+                    filled_lots = exec_result.lots_filled or 0
+
+                    logger.warning(
+                        f"[LIVE] Partial fill: {filled_lots}/{original_lots} lots filled, "
+                        f"remaining {exec_result.lots_cancelled} cancelled"
+                    )
+
+                    execution_result = {
+                        'status': 'success',
+                        'order_details': {
+                            'order_id': exec_result.order_id,
+                            'fill_price': fill_price,
+                            'lots_filled': filled_lots,
+                            'slippage_pct': exec_result.slippage_pct,
+                            'attempts': exec_result.attempts,
+                            'partial_fill': True,
+                            'lots_cancelled': exec_result.lots_cancelled
+                        }
+                    }
+                    original_lots = filled_lots  # Use filled lots for position creation
+                else:
+                    # Execution failed
+                    logger.error(
+                        f"[LIVE] Order execution failed: {exec_result.rejection_reason} "
+                        f"(status: {exec_result.status.value})"
+                    )
+                    self.stats['orders_failed'] += 1
+
+                    # Voice announcement: Error (repeats until acknowledged)
+                    if announcer:
+                        announcer.announce_error(
+                            f"{signal.instrument} order rejected. {exec_result.rejection_reason}",
+                            error_type="execution"
+                        )
+
+                    return {
+                        'status': 'rejected',
+                        'reason': 'execution_failed',
+                        'execution_reason': exec_result.rejection_reason,
+                        'execution_status': exec_result.status.value,
                         'attempts': exec_result.attempts
                     }
-                }
-            elif exec_result.status == ExecutionStatus.PARTIAL:
-                # Partial fill - use filled lots
-                fill_price = exec_result.execution_price or execution_price
-                filled_lots = exec_result.lots_filled or 0
-                
-                logger.warning(
-                    f"[LIVE] Partial fill: {filled_lots}/{original_lots} lots filled, "
-                    f"remaining {exec_result.lots_cancelled} cancelled"
-                )
-                
-                execution_result = {
-                    'status': 'success',
-                    'order_details': {
-                        'order_id': exec_result.order_id,
-                        'fill_price': fill_price,
-                        'lots_filled': filled_lots,
-                        'slippage_pct': exec_result.slippage_pct,
-                        'attempts': exec_result.attempts,
-                        'partial_fill': True,
-                        'lots_cancelled': exec_result.lots_cancelled
-                    }
-                }
-                original_lots = filled_lots  # Use filled lots for position creation
-            else:
-                # Execution failed
-                logger.error(
-                    f"[LIVE] Order execution failed: {exec_result.rejection_reason} "
-                    f"(status: {exec_result.status.value})"
-                )
-                self.stats['orders_failed'] += 1
-                return {
-                    'status': 'rejected',
-                    'reason': 'execution_failed',
-                    'execution_reason': exec_result.rejection_reason,
-                    'execution_status': exec_result.status.value,
-                    'attempts': exec_result.attempts
-                }
         except Exception as e:
             logger.error(f"[LIVE] Error during order execution: {e}")
             self.stats['orders_failed'] += 1
+
+            # Voice announcement: Error (repeats until acknowledged)
+            if announcer:
+                announcer.announce_error(
+                    f"{signal.instrument} execution error. {str(e)}",
+                    error_type="execution"
+                )
+
             return {
                 'status': 'error',
                 'reason': 'execution_error',
                 'error': str(e)
             }
-        
+
         if execution_result['status'] == 'success':
             # Create position record (SAME structure as backtest)
             initial_stop = self.stop_manager.calculate_initial_stop(
                 signal.price, signal.atr, inst_type
             )
-            
+
             # Extract PE/CE entry prices from execution result if available
             # These are needed for accurate rollover P&L calculation
             pe_entry_price = execution_result.get('order_details', {}).get('pe_entry_price')
             ce_entry_price = execution_result.get('order_details', {}).get('ce_entry_price')
-            
+
             # Use execution price (broker price) for entry, not signal price
             entry_price = execution_result['order_details'].get('fill_price', execution_price)
-            
+
             position = Position(
                 position_id=f"{instrument}_{signal.position}",
                 instrument=instrument,
                 entry_timestamp=signal.timestamp,
                 entry_price=entry_price,  # Use actual fill price
-                lots=original_lots,  # Use adjusted lots
+                lots=original_lots,  # Use adjusted lots (or 1 in test mode)
                 quantity=original_lots * inst_config.lot_size,
                 initial_stop=initial_stop,
                 current_stop=initial_stop,
@@ -525,15 +663,17 @@ class LiveTradingEngine:
                 is_base_position=True,  # Mark as base position
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
-                **{k: v for k, v in execution_result.get('order_details', {}).items() 
-                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price', 
+                is_test=self.test_mode,  # Mark as test position if in test mode
+                original_lots=calculated_lots if self.test_mode else None,  # Store original calculated lots
+                **{k: v for k, v in execution_result.get('order_details', {}).items()
+                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price',
                                 'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled']}  # Exclude execution metadata
             )
-            
+
             self.portfolio.add_position(position)
             self.base_positions[instrument] = position
             self.last_pyramid_price[instrument] = signal.price
-            
+
             # Persist to database
             if self.db_manager:
                 self.db_manager.save_position(position)
@@ -541,14 +681,25 @@ class LiveTradingEngine:
                     instrument, signal.price, position.position_id
                 )
                 logger.debug(f"Position and pyramiding state saved to database")
-            
+
             self.stats['entries_executed'] += 1
-            
+
             logger.info(
                 f"✓ [LIVE] Entry executed: {original_lots} lots @ ₹{entry_price:,.2f} "
                 f"(signal: ₹{signal.price:,.2f}, slippage: {execution_result['order_details'].get('slippage_pct', 0):.2%})"
             )
-            
+
+            # Voice announcement: Post-trade (BASE_ENTRY)
+            if announcer:
+                announcer.announce_trade_executed(
+                    instrument=signal.instrument,
+                    position=signal.position,
+                    signal_type=signal.signal_type.value,
+                    lots=original_lots,
+                    price=entry_price,
+                    order_id=execution_result['order_details'].get('order_id')
+                )
+
             return {
                 'status': 'executed',
                 'lots': original_lots,
@@ -559,94 +710,170 @@ class LiveTradingEngine:
             'status': 'error',
             'reason': 'unexpected_execution_state'
         }
-    
+
     def _execute_entry_openalgo(
-        self, 
-        signal: Signal, 
-        lots: int, 
+        self,
+        signal: Signal,
+        lots: int,
         inst_type: InstrumentType
     ) -> Dict:
         """
         Execute entry via OpenAlgo API
-        
-        For Bank Nifty: Execute synthetic future (SELL PE + BUY CE)
+
+        For Bank Nifty: Execute synthetic future (SELL PE + BUY CE) with rollback
         For Gold Mini: Execute futures contract
-        
+
         Args:
             signal: Entry signal
             lots: Calculated lot size
             inst_type: Instrument type
-            
+
         Returns:
             Execution result dict
         """
-        logger.info(f"[OPENALGO] Executing {inst_type.value} entry: {lots} lots")
-        
-        # This will be implemented with actual OpenAlgo client
-        # For now, return mock success for testing
+        logger.info(f"[OPENALGO] Executing {inst_type.value} entry: {lots} lots @ ₹{signal.price:,.2f}")
+
         if inst_type == InstrumentType.BANK_NIFTY:
-            # For Bank Nifty synthetic futures
-            strike = int(signal.price // 100) * 100  # Round to nearest 100
-            return {
-                'status': 'success',
-                'order_details': {
-                    'pe_order_id': f'MOCK_PE_{signal.timestamp.timestamp()}',
-                    'ce_order_id': f'MOCK_CE_{signal.timestamp.timestamp()}',
-                    'pe_entry_price': signal.price,
-                    'ce_entry_price': signal.price,
-                    'strike': strike,
-                    'expiry': '2025-12-25',  # Mock expiry
-                    'pe_symbol': f'BANKNIFTY251225{strike}PE',
-                    'ce_symbol': f'BANKNIFTY251225{strike}CE'
+            # ============================
+            # BANK NIFTY: Synthetic Futures (2-leg with rollback)
+            # ============================
+            if not self.synthetic_executor:
+                logger.error("[OPENALGO] SyntheticFuturesExecutor not initialized!")
+                return {
+                    'status': 'error',
+                    'error': 'synthetic_executor_not_initialized'
                 }
-            }
+
+            # Execute synthetic futures entry
+            result = self.synthetic_executor.execute_entry(
+                instrument="BANK_NIFTY",
+                lots=lots,
+                current_price=signal.price
+            )
+
+            if result.status == ExecutionStatus.EXECUTED:
+                # Use actual executed symbols - they contain all info (strike, expiry in the name)
+                return {
+                    'status': 'success',
+                    'order_details': {
+                        'pe_order_id': result.pe_result.order_id if result.pe_result else None,
+                        'ce_order_id': result.ce_result.order_id if result.ce_result else None,
+                        'pe_entry_price': result.pe_result.fill_price if result.pe_result else signal.price,
+                        'ce_entry_price': result.ce_result.fill_price if result.ce_result else signal.price,
+                        'pe_symbol': result.pe_symbol,  # e.g., BANKNIFTY30DEC2560000PE
+                        'ce_symbol': result.ce_symbol   # e.g., BANKNIFTY30DEC2560000CE
+                    }
+                }
+            else:
+                # Execution failed (possibly with rollback)
+                error_msg = result.rejection_reason or "execution_failed"
+                if result.rollback_performed:
+                    if result.rollback_success:
+                        error_msg += " (rollback_successful)"
+                    else:
+                        error_msg += " (ROLLBACK_FAILED_CRITICAL)"
+                        logger.critical(f"[OPENALGO] CRITICAL: Bank Nifty rollback failed! {result.notes}")
+
+                return {
+                    'status': 'error',
+                    'error': error_msg,
+                    'notes': result.notes
+                }
+
         else:
-            # For Gold Mini futures
-            return {
-                'status': 'success',
-                'order_details': {
-                    'futures_order_id': f'MOCK_{signal.timestamp.timestamp()}',
-                    'fill_price': signal.price,
-                    'futures_symbol': 'GOLDM25DEC31FUT',
-                    'contract_month': 'DEC25'
+            # ============================
+            # GOLD MINI: Simple Futures
+            # ============================
+            if not self.symbol_mapper:
+                logger.error("[OPENALGO] SymbolMapper not initialized!")
+                return {
+                    'status': 'error',
+                    'error': 'symbol_mapper_not_initialized'
                 }
-            }
-    
+
+            # Translate symbol
+            try:
+                translated = self.symbol_mapper.translate(
+                    instrument="GOLD_MINI",
+                    action="BUY",
+                    current_price=signal.price
+                )
+                # Gold Mini is single-leg futures, use first symbol
+                futures_symbol = translated.symbols[0] if translated.symbols else None
+                if not futures_symbol:
+                    raise ValueError("No symbol generated for Gold Mini")
+                expiry = translated.expiry_date.strftime("%Y-%m-%d") if translated.expiry_date else None
+            except Exception as e:
+                logger.error(f"[OPENALGO] Symbol translation failed: {e}")
+                return {
+                    'status': 'error',
+                    'error': f'symbol_translation_failed: {e}'
+                }
+
+            logger.info(f"[OPENALGO] Gold Mini entry: {futures_symbol}")
+
+            # Execute using standard order executor
+            exec_result = self.order_executor.execute(
+                signal=signal,
+                lots=lots,
+                limit_price=signal.price,
+                action="BUY"
+            )
+
+            if exec_result.status == ExecutionStatus.EXECUTED:
+                return {
+                    'status': 'success',
+                    'order_details': {
+                        'futures_order_id': exec_result.order_id,
+                        'fill_price': exec_result.execution_price,
+                        'futures_symbol': futures_symbol,
+                        'expiry': expiry
+                    }
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'error': exec_result.rejection_reason or 'execution_failed'
+                }
+
     def _handle_pyramid_live(self, signal: Signal) -> Dict:
         """Handle pyramid in live mode (SAME logic as backtest)"""
         instrument = signal.instrument
-        
+
         if instrument not in self.base_positions:
             self.stats['pyramids_blocked'] += 1
             return {'status': 'blocked', 'reason': 'No base position'}
-        
+
         base_pos = self.base_positions[instrument]
         last_pyr_price = self.last_pyramid_price.get(instrument, base_pos.entry_price)
-        
-        # Check pyramid gates (SAME as backtest)
-        gate_check = self.pyramid_controller.check_pyramid_allowed(
-            signal, instrument, base_pos, last_pyr_price
-        )
-        
-        if not gate_check.allowed:
-            self.stats['pyramids_blocked'] += 1
-            return {'status': 'blocked', 'reason': gate_check.reason}
-        
+
+        # Check pyramid gates (SAME as backtest) - BYPASSED in test mode
+        if self.test_mode:
+            logger.info(f"🧪 [TEST MODE] Bypassing pyramid gate check")
+        else:
+            gate_check = self.pyramid_controller.check_pyramid_allowed(
+                signal, instrument, base_pos, last_pyr_price
+            )
+
+            if not gate_check.allowed:
+                self.stats['pyramids_blocked'] += 1
+                return {'status': 'blocked', 'reason': gate_check.reason}
+
         # Get instrument type
         if instrument == "GOLD_MINI":
             inst_type = InstrumentType.GOLD_MINI
         else:
             inst_type = InstrumentType.BANK_NIFTY
-        
+
         inst_config = get_instrument_config(inst_type)
         lots = signal.suggested_lots
-        
+
         # Step 2: Execution validation (uses broker API price)
         original_lots = lots
         execution_price = signal.price  # Default to signal price
         execution_result = None  # Initialize
         validation_bypassed = False  # Track if validation was bypassed
-        
+
         if self.config.signal_validation_enabled:
             # Fetch broker price with timeout and retry
             broker_price, validation_bypassed = self._get_broker_price_with_timeout(
@@ -656,19 +883,19 @@ class LiveTradingEngine:
                 max_retries=3
             )
             execution_price = broker_price
-            
+
             logger.info(
                 f"[LIVE] Broker price: ₹{broker_price:,.2f} (signal: ₹{signal.price:,.2f})"
                 + (" [VALIDATION BYPASSED]" if validation_bypassed else "")
             )
-            
+
             # Only validate if broker API succeeded
             if not validation_bypassed:
                 # Validate execution price
                 exec_result = self.signal_validator.validate_execution_price(
                     signal, broker_price, signal.signal_type
                 )
-                
+
                 # Record execution validation metric
                 self.metrics.record_validation(
                     signal_type=signal.signal_type,
@@ -679,7 +906,7 @@ class LiveTradingEngine:
                     risk_increase_pct=exec_result.risk_increase_pct,
                     rejection_reason=exec_result.reason if not exec_result.is_valid else None
                 )
-                
+
                 if not exec_result.is_valid:
                     logger.warning(
                         f"[LIVE] Pyramid signal rejected at execution validation: {exec_result.reason} "
@@ -694,7 +921,7 @@ class LiveTradingEngine:
                         'divergence_pct': exec_result.divergence_pct,
                         'risk_increase_pct': exec_result.risk_increase_pct
                     }
-                
+
                 # Adjust position size if risk increased
                 if exec_result.risk_increase_pct and exec_result.risk_increase_pct > 0:
                     adjusted_lots = self.signal_validator.adjust_position_size_for_execution(
@@ -720,109 +947,201 @@ class LiveTradingEngine:
                     result='bypassed',
                     rejection_reason='broker_api_unavailable'
                 )
-        
+
         # Step 3: Execute order using OrderExecutor
         import time
         execution_start = time.time()
-        
-        try:
-            exec_result = self.order_executor.execute(
-                signal=signal,
-                lots=original_lots,
-                limit_price=execution_price
+
+        # TEST MODE: Override lots to 1, but log original calculated lots
+        calculated_lots = original_lots  # Store for logging
+        if self.test_mode:
+            logger.warning(
+                f"🧪 [TEST MODE] {signal.instrument} PYRAMID: "
+                f"Calculated lots={calculated_lots}, executing with 1 lot only"
             )
-            
-            execution_time_ms = (time.time() - execution_start) * 1000
-            
-            # Record execution metric
-            self.metrics.record_execution(
-                signal_type=signal.signal_type,
+            original_lots = 1
+
+        # Calculate risk for announcement (variables needed by announcer)
+        est_risk = (execution_price - signal.stop) * original_lots * inst_config.point_value
+        live_equity = self.portfolio.closed_equity
+
+        # Voice announcement: Pre-trade (PYRAMID)
+        announcer = get_announcer()
+        if announcer:
+            announcer.announce_pre_trade(
                 instrument=signal.instrument,
-                execution_strategy=self.config.execution_strategy,
-                status=exec_result.status,
+                position=signal.position,
+                signal_type=signal.signal_type.value,
                 lots=original_lots,
-                slippage_pct=exec_result.slippage_pct,
-                attempts=exec_result.attempts,
-                execution_time_ms=execution_time_ms,
-                rejection_reason=exec_result.rejection_reason if exec_result.status != ExecutionStatus.EXECUTED else None
+                price=execution_price,
+                stop=signal.stop,
+                risk_amount=est_risk,
+                risk_percent=(est_risk / live_equity * 100) if live_equity > 0 else 0
             )
-            
-            if exec_result.status == ExecutionStatus.EXECUTED:
-                fill_price = exec_result.execution_price or execution_price
-                filled_lots = exec_result.lots_filled or original_lots
-                
-                execution_result = {
-                    'status': 'success',
-                    'order_details': {
-                        'order_id': exec_result.order_id,
-                        'fill_price': fill_price,
-                        'lots_filled': filled_lots,
-                        'slippage_pct': exec_result.slippage_pct,
+
+        try:
+            # Route to appropriate executor based on instrument type
+            if inst_type == InstrumentType.BANK_NIFTY:
+                # ============================
+                # BANK NIFTY: Use Synthetic Futures Executor (2-leg options)
+                # ============================
+                execution_result = self._execute_entry_openalgo(signal, original_lots, inst_type)
+                execution_time_ms = (time.time() - execution_start) * 1000
+
+                # Record execution metric for synthetic futures
+                self.metrics.record_execution(
+                    signal_type=signal.signal_type,
+                    instrument=signal.instrument,
+                    execution_strategy='synthetic_futures',
+                    status=ExecutionStatus.EXECUTED if execution_result.get('status') == 'success' else ExecutionStatus.REJECTED,
+                    lots=original_lots,
+                    slippage_pct=0.0,
+                    attempts=1,
+                    execution_time_ms=execution_time_ms,
+                    rejection_reason=execution_result.get('error') if execution_result.get('status') != 'success' else None
+                )
+
+                if execution_result.get('status') != 'success':
+                    error_msg = execution_result.get('error', 'unknown_error')
+                    logger.error(f"[LIVE] Bank Nifty pyramid synthetic execution failed: {error_msg}")
+                    self.stats['orders_failed'] += 1
+
+                    if announcer:
+                        announcer.announce_error(
+                            f"{signal.instrument} pyramid synthetic order rejected. {error_msg}",
+                            error_type="execution"
+                        )
+
+                    return {
+                        'status': 'rejected',
+                        'reason': 'execution_failed',
+                        'execution_reason': error_msg,
+                        'execution_status': 'rejected',
+                        'attempts': 1
+                    }
+
+                # Add fill_price for position update compatibility
+                if 'order_details' in execution_result:
+                    execution_result['order_details']['fill_price'] = execution_price
+                    execution_result['order_details']['lots_filled'] = original_lots
+
+            else:
+                # ============================
+                # GOLD MINI: Use Standard Order Executor
+                # ============================
+                exec_result = self.order_executor.execute(
+                    signal=signal,
+                    lots=original_lots,
+                    limit_price=execution_price
+                )
+
+                execution_time_ms = (time.time() - execution_start) * 1000
+
+                # Record execution metric
+                self.metrics.record_execution(
+                    signal_type=signal.signal_type,
+                    instrument=signal.instrument,
+                    execution_strategy=self.config.execution_strategy,
+                    status=exec_result.status,
+                    lots=original_lots,
+                    slippage_pct=exec_result.slippage_pct,
+                    attempts=exec_result.attempts,
+                    execution_time_ms=execution_time_ms,
+                    rejection_reason=exec_result.rejection_reason if exec_result.status != ExecutionStatus.EXECUTED else None
+                )
+
+                if exec_result.status == ExecutionStatus.EXECUTED:
+                    fill_price = exec_result.execution_price or execution_price
+                    filled_lots = exec_result.lots_filled or original_lots
+
+                    execution_result = {
+                        'status': 'success',
+                        'order_details': {
+                            'order_id': exec_result.order_id,
+                            'fill_price': fill_price,
+                            'lots_filled': filled_lots,
+                            'slippage_pct': exec_result.slippage_pct,
+                            'attempts': exec_result.attempts
+                        }
+                    }
+                elif exec_result.status == ExecutionStatus.PARTIAL:
+                    fill_price = exec_result.execution_price or execution_price
+                    filled_lots = exec_result.lots_filled or 0
+
+                    logger.warning(
+                        f"[LIVE] Partial fill: {filled_lots}/{original_lots} lots filled, "
+                        f"remaining {exec_result.lots_cancelled} cancelled"
+                    )
+
+                    execution_result = {
+                        'status': 'success',
+                        'order_details': {
+                            'order_id': exec_result.order_id,
+                            'fill_price': fill_price,
+                            'lots_filled': filled_lots,
+                            'slippage_pct': exec_result.slippage_pct,
+                            'attempts': exec_result.attempts,
+                            'partial_fill': True,
+                            'lots_cancelled': exec_result.lots_cancelled
+                        }
+                    }
+                    original_lots = filled_lots
+                else:
+                    logger.error(
+                        f"[LIVE] Pyramid order execution failed: {exec_result.rejection_reason} "
+                        f"(status: {exec_result.status.value})"
+                    )
+                    self.stats['orders_failed'] += 1
+
+                    # Voice announcement: Error (repeats until acknowledged)
+                    if announcer:
+                        announcer.announce_error(
+                            f"{signal.instrument} pyramid order rejected. {exec_result.rejection_reason}",
+                            error_type="execution"
+                        )
+
+                    return {
+                        'status': 'rejected',
+                        'reason': 'execution_failed',
+                        'execution_reason': exec_result.rejection_reason,
+                        'execution_status': exec_result.status.value,
                         'attempts': exec_result.attempts
                     }
-                }
-            elif exec_result.status == ExecutionStatus.PARTIAL:
-                fill_price = exec_result.execution_price or execution_price
-                filled_lots = exec_result.lots_filled or 0
-                
-                logger.warning(
-                    f"[LIVE] Partial fill: {filled_lots}/{original_lots} lots filled, "
-                    f"remaining {exec_result.lots_cancelled} cancelled"
-                )
-                
-                execution_result = {
-                    'status': 'success',
-                    'order_details': {
-                        'order_id': exec_result.order_id,
-                        'fill_price': fill_price,
-                        'lots_filled': filled_lots,
-                        'slippage_pct': exec_result.slippage_pct,
-                        'attempts': exec_result.attempts,
-                        'partial_fill': True,
-                        'lots_cancelled': exec_result.lots_cancelled
-                    }
-                }
-                original_lots = filled_lots
-            else:
-                logger.error(
-                    f"[LIVE] Pyramid order execution failed: {exec_result.rejection_reason} "
-                    f"(status: {exec_result.status.value})"
-                )
-                self.stats['orders_failed'] += 1
-                return {
-                    'status': 'rejected',
-                    'reason': 'execution_failed',
-                    'execution_reason': exec_result.rejection_reason,
-                    'execution_status': exec_result.status.value,
-                    'attempts': exec_result.attempts
-                }
         except Exception as e:
             logger.error(f"[LIVE] Error during pyramid order execution: {e}")
             self.stats['orders_failed'] += 1
+
+            # Voice announcement: Error (repeats until acknowledged)
+            if announcer:
+                announcer.announce_error(
+                    f"{signal.instrument} pyramid execution error. {str(e)}",
+                    error_type="execution"
+                )
+
             return {
                 'status': 'error',
                 'reason': 'execution_error',
                 'error': str(e)
             }
-        
+
         if execution_result and execution_result['status'] == 'success':
             initial_stop = self.stop_manager.calculate_initial_stop(
                 signal.price, signal.atr, inst_type
             )
-            
+
             # Extract PE/CE entry prices from execution result if available
             pe_entry_price = execution_result.get('order_details', {}).get('pe_entry_price')
             ce_entry_price = execution_result.get('order_details', {}).get('ce_entry_price')
-            
+
             # Use execution price (broker price) for entry, not signal price
             entry_price = execution_result['order_details'].get('fill_price', execution_price)
-            
+
             position = Position(
                 position_id=f"{instrument}_{signal.position}",
                 instrument=instrument,
                 entry_timestamp=signal.timestamp,
                 entry_price=entry_price,  # Use actual fill price
-                lots=original_lots,  # Use adjusted lots
+                lots=original_lots,  # Use adjusted lots (or 1 in test mode)
                 quantity=original_lots * inst_config.lot_size,
                 initial_stop=initial_stop,
                 current_stop=initial_stop,
@@ -830,14 +1149,16 @@ class LiveTradingEngine:
                 is_base_position=False,  # Mark as pyramid position
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
-                **{k: v for k, v in execution_result.get('order_details', {}).items() 
-                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price', 
+                is_test=self.test_mode,  # Mark as test position if in test mode
+                original_lots=calculated_lots if self.test_mode else None,  # Store original calculated lots
+                **{k: v for k, v in execution_result.get('order_details', {}).items()
+                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price',
                                 'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled']}  # Exclude execution metadata
             )
-            
+
             self.portfolio.add_position(position)
             self.last_pyramid_price[instrument] = signal.price
-            
+
             # Persist to database
             if self.db_manager:
                 self.db_manager.save_position(position)
@@ -846,14 +1167,25 @@ class LiveTradingEngine:
                     instrument, signal.price, base_pos_id
                 )
                 logger.debug(f"Pyramid position and state saved to database")
-            
+
             self.stats['pyramids_executed'] += 1
-            
+
             logger.info(
                 f"✓ [LIVE] Pyramid executed: {original_lots} lots @ ₹{entry_price:,.2f} "
                 f"(signal: ₹{signal.price:,.2f}, slippage: {execution_result['order_details'].get('slippage_pct', 0):.2%})"
             )
-            
+
+            # Voice announcement: Post-trade (PYRAMID)
+            if announcer:
+                announcer.announce_trade_executed(
+                    instrument=signal.instrument,
+                    position=signal.position,
+                    signal_type=signal.signal_type.value,
+                    lots=original_lots,
+                    price=entry_price,
+                    order_id=execution_result['order_details'].get('order_id')
+                )
+
             return {
                 'status': 'executed',
                 'lots': original_lots,
@@ -864,57 +1196,331 @@ class LiveTradingEngine:
             'status': 'error',
             'reason': 'unexpected_execution_state'
         }
-    
+
     def _handle_exit_live(self, signal: Signal) -> Dict:
         """Handle exit in live mode"""
+        # Handle "EXIT ALL" - close all positions for this instrument
+        if signal.position.upper() == "ALL":
+            return self._handle_exit_all_live(signal)
+
         position_id = f"{signal.instrument}_{signal.position}"
-        
+
         if position_id not in self.portfolio.positions:
             return {'status': 'error', 'reason': 'Position not found'}
-        
-        # Execute exit via OpenAlgo
+
+    def _handle_exit_all_live(self, signal: Signal) -> Dict:
+        """Handle EXIT ALL - close all positions for an instrument"""
+        # Find all open positions for this instrument
+        positions_to_close = [
+            (pos_id, pos) for pos_id, pos in self.portfolio.positions.items()
+            if pos.instrument == signal.instrument and pos.status == "open"
+        ]
+
+        if not positions_to_close:
+            return {'status': 'error', 'reason': f'No open positions found for {signal.instrument}'}
+
+        logger.info(f"[LIVE] EXIT ALL: Closing {len(positions_to_close)} positions for {signal.instrument}")
+
+        total_pnl = 0.0
+        failed_exits = []
+
+        for position_id, position in positions_to_close:
+            # Execute exit via OpenAlgo
+            execution_result = self._execute_exit_openalgo(position)
+
+            if execution_result['status'] == 'success':
+                # Close position using ACTUAL fill price, not signal price
+                actual_exit_price = execution_result['order_details'].get('exit_price', signal.price)
+                pnl = self.portfolio.close_position(position_id, actual_exit_price, signal.timestamp)
+                total_pnl += pnl
+
+                # Persist to database
+                if self.db_manager:
+                    closed_position = self.portfolio.positions.get(position_id)
+                    if closed_position:
+                        closed_position.exit_reason = signal.reason or 'EXIT_ALL'
+                        self.db_manager.save_position(closed_position)
+
+                        # Clear base_positions if this was a base position
+                        if closed_position.is_base_position:
+                            if closed_position.instrument in self.base_positions:
+                                del self.base_positions[closed_position.instrument]
+                                logger.info(f"[LIVE] EXIT ALL: Cleared base position for {closed_position.instrument}")
+                            # Also clear pyramiding state in DB
+                            self.db_manager.save_pyramiding_state(
+                                closed_position.instrument,
+                                self.last_pyramid_price.get(closed_position.instrument, 0.0),
+                                None  # Clear base_position_id
+                            )
+
+                logger.info(f"[LIVE] EXIT ALL: Closed {position_id}, P&L: ₹{pnl:,.2f}")
+            else:
+                failed_exits.append((position_id, execution_result.get('reason', 'unknown')))
+
+        if failed_exits:
+            logger.error(f"[LIVE] EXIT ALL: {len(failed_exits)} exits failed: {failed_exits}")
+
+        # Update stats
+        self.stats['exits_executed'] += len(positions_to_close) - len(failed_exits)
+
+        # Voice announcement
+        announcer = get_announcer()
+        if announcer:
+            announcer.announce_trade_executed(
+                instrument=signal.instrument,
+                position="ALL",
+                signal_type="EXIT",
+                lots=sum(pos.lots for _, pos in positions_to_close),
+                price=signal.price,
+                pnl=total_pnl
+            )
+
+        return {
+            'status': 'executed' if not failed_exits else 'partial',
+            'pnl': total_pnl,
+            'positions_closed': len(positions_to_close) - len(failed_exits),
+            'failed': failed_exits
+        }
+
+        # Get position details for announcement
         position = self.portfolio.positions[position_id]
+
+        # Voice announcement: Pre-trade (EXIT)
+        announcer = get_announcer()
+        if announcer:
+            announcer.announce_pre_trade(
+                instrument=signal.instrument,
+                position=signal.position,
+                signal_type="EXIT",
+                lots=position.lots,
+                price=signal.price,
+                stop=0,  # No stop for exit
+                risk_amount=0,
+                risk_percent=0
+            )
+
+        # Execute exit via OpenAlgo
         execution_result = self._execute_exit_openalgo(position)
-        
+
         if execution_result['status'] == 'success':
-            # Close position (SAME as backtest)
-            pnl = self.portfolio.close_position(position_id, signal.price, signal.timestamp)
-            
+            # Close position using ACTUAL fill price, not signal price
+            actual_exit_price = execution_result['order_details'].get('exit_price', signal.price)
+            pnl = self.portfolio.close_position(position_id, actual_exit_price, signal.timestamp)
+
             # Persist closed position to database
             if self.db_manager:
                 position = self.portfolio.positions.get(position_id)
                 if position:
+                    # Set exit reason from signal (e.g., STOP_LOSS, EOD)
+                    position.exit_reason = signal.reason or 'SIGNAL'
                     self.db_manager.save_position(position)  # Save with status='closed'
                     logger.debug(f"Closed position saved to database")
-                
+
                 # Update pyramiding state if base position was closed
                 if position and position.is_base_position:
                     # Clear base position reference
                     self.db_manager.save_pyramiding_state(
-                        position.instrument, 
+                        position.instrument,
                         self.last_pyramid_price.get(position.instrument, 0.0),
                         None  # Clear base_position_id
                     )
                     if position.instrument in self.base_positions:
                         del self.base_positions[position.instrument]
-            
+
             self.stats['exits_executed'] += 1
-            
+
+            # Voice announcement: Post-trade (EXIT)
+            if announcer:
+                announcer.announce_trade_executed(
+                    instrument=signal.instrument,
+                    position=signal.position,
+                    signal_type="EXIT",
+                    lots=position.lots,
+                    price=signal.price,
+                    pnl=pnl
+                )
+
             return {'status': 'executed', 'pnl': pnl}
         else:
+            # Voice announcement: Error
+            if announcer:
+                announcer.announce_error(
+                    f"{signal.instrument} exit failed. {execution_result.get('reason', 'Unknown error')}",
+                    error_type="execution"
+                )
             return execution_result
-    
-    def _execute_exit_openalgo(self, position: Position) -> Dict:
-        """Execute exit via OpenAlgo API"""
-        logger.info(f"[OPENALGO] Executing exit: {position.position_id}")
 
-        # Mock for testing
-        return {
-            'status': 'success',
-            'order_details': {
-                'order_id': f'EXIT_{position.position_id}'
-            }
-        }
+    def _execute_exit_openalgo(self, position: Position) -> Dict:
+        """
+        Execute exit via OpenAlgo API
+
+        For Bank Nifty: Close synthetic future (BUY PE + SELL CE) with rollback
+        For Gold Mini: Sell futures contract
+
+        Args:
+            position: Position to exit
+
+        Returns:
+            Execution result dict
+        """
+        logger.info(f"[OPENALGO] Executing exit: {position.position_id}, {position.lots} lots")
+
+        # Derive instrument type from position.instrument string
+        if position.instrument == "BANK_NIFTY":
+            inst_type = InstrumentType.BANK_NIFTY
+        elif position.instrument == "GOLD_MINI":
+            inst_type = InstrumentType.GOLD_MINI
+        else:
+            inst_type = InstrumentType.BANK_NIFTY  # Default fallback
+
+        if inst_type == InstrumentType.BANK_NIFTY:
+            # ============================
+            # BANK NIFTY: Close Synthetic Futures (2-leg with rollback)
+            # ============================
+            if not self.synthetic_executor:
+                logger.error("[OPENALGO] SyntheticFuturesExecutor not initialized!")
+                return {
+                    'status': 'error',
+                    'error': 'synthetic_executor_not_initialized'
+                }
+
+            # Get stored symbols from position (direct fields on Position object)
+            pe_symbol = getattr(position, 'pe_symbol', None)
+            ce_symbol = getattr(position, 'ce_symbol', None)
+
+            # CRITICAL: We MUST have stored symbols for exit
+            # Without them, we cannot close the correct positions - would create naked exposure!
+            if not (pe_symbol and ce_symbol):
+                logger.critical(
+                    f"[OPENALGO] CRITICAL: Missing stored symbols for {position.position_id}! "
+                    f"PE={pe_symbol}, CE={ce_symbol}. Cannot exit safely - manual intervention required!"
+                )
+                return {
+                    'status': 'error',
+                    'error': 'missing_stored_symbols_critical',
+                    'notes': f"Position {position.position_id} has no stored PE/CE symbols. Manual exit required."
+                }
+
+            logger.info(f"[OPENALGO] BN Exit: PE={pe_symbol}, CE={ce_symbol}, lots={position.lots}")
+
+            # Execute synthetic futures exit using stored symbols
+            # current_price is not used when pe_symbol/ce_symbol are provided
+            result = self.synthetic_executor.execute_exit(
+                instrument="BANK_NIFTY",
+                lots=position.lots,
+                current_price=0,  # Not used when symbols are provided
+                pe_symbol=pe_symbol,
+                ce_symbol=ce_symbol
+            )
+
+            if result.status == ExecutionStatus.EXECUTED:
+                # Use actual fill prices from execution, not index price
+                return {
+                    'status': 'success',
+                    'order_details': {
+                        'pe_order_id': result.pe_result.order_id if result.pe_result else None,
+                        'ce_order_id': result.ce_result.order_id if result.ce_result else None,
+                        'pe_exit_price': result.pe_result.fill_price if result.pe_result else None,
+                        'ce_exit_price': result.ce_result.fill_price if result.ce_result else None
+                    }
+                }
+            else:
+                error_msg = result.rejection_reason or "exit_execution_failed"
+                if result.rollback_performed:
+                    if result.rollback_success:
+                        error_msg += " (rollback_successful)"
+                    else:
+                        error_msg += " (ROLLBACK_FAILED_CRITICAL)"
+                        logger.critical(f"[OPENALGO] CRITICAL: Bank Nifty exit rollback failed! {result.notes}")
+
+                return {
+                    'status': 'error',
+                    'error': error_msg,
+                    'notes': result.notes
+                }
+
+        else:
+            # ============================
+            # GOLD MINI: Sell Futures
+            # ============================
+            if not self.symbol_mapper:
+                logger.error("[OPENALGO] SymbolMapper not initialized!")
+                return {
+                    'status': 'error',
+                    'error': 'symbol_mapper_not_initialized'
+                }
+
+            # Get current price for exit - use mid-price (avg of bid/ask) for fair limit
+            exit_price = position.entry_price
+            try:
+                quote = self.openalgo.get_quote("GOLD_MINI")
+                bid = quote.get('bid') or quote.get('ltp')
+                ask = quote.get('ask') or quote.get('ltp')
+                if bid and ask:
+                    exit_price = (float(bid) + float(ask)) / 2  # Mid-price
+                else:
+                    exit_price = quote.get('ltp', position.entry_price)
+                logger.debug(f"[OPENALGO] Exit price: mid={exit_price:.2f} (bid={bid}, ask={ask})")
+            except Exception as e:
+                logger.warning(f"[OPENALGO] Could not fetch exit price: {e}")
+
+            # Translate symbol
+            try:
+                translated = self.symbol_mapper.translate(
+                    instrument="GOLD_MINI",
+                    action="SELL",
+                    current_price=exit_price
+                )
+                # Gold Mini is single-leg futures, use first symbol
+                futures_symbol = translated.symbols[0] if translated.symbols else None
+                if not futures_symbol:
+                    raise ValueError("No symbol generated for Gold Mini")
+            except Exception as e:
+                logger.error(f"[OPENALGO] Symbol translation failed: {e}")
+                return {
+                    'status': 'error',
+                    'error': f'symbol_translation_failed: {e}'
+                }
+
+            logger.info(f"[OPENALGO] Gold Mini exit: {futures_symbol}")
+
+            # Create a signal for the exit (placeholder values for required fields)
+            exit_signal = Signal(
+                timestamp=datetime.now(),
+                instrument=position.instrument,
+                signal_type=SignalType.EXIT,
+                position=position.position_id.split("_")[-1] if "_" in position.position_id else "Long_1",
+                price=exit_price,
+                stop=position.current_stop or exit_price,  # Use stored stop or exit price
+                suggested_lots=position.lots,
+                atr=0.0,  # Not needed for exit
+                er=0.0,   # Not needed for exit
+                supertrend=exit_price,  # Placeholder
+                reason="EXIT_ALL"
+            )
+
+            # Execute using standard order executor with SELL action
+            exec_result = self.order_executor.execute(
+                signal=exit_signal,
+                lots=position.lots,
+                limit_price=exit_price,
+                action="SELL"
+            )
+
+            if exec_result.status == ExecutionStatus.EXECUTED:
+                return {
+                    'status': 'success',
+                    'order_details': {
+                        'futures_order_id': exec_result.order_id,
+                        'exit_price': exec_result.execution_price,
+                        'futures_symbol': futures_symbol
+                    }
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'error': exec_result.rejection_reason or 'exit_execution_failed'
+                }
 
     # =========================================================================
     # ROLLOVER METHODS
@@ -1374,4 +1980,3 @@ class LiveTradingEngine:
             }
 
         return status
-

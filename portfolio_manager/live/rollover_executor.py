@@ -278,7 +278,7 @@ class RolloverExecutor:
                     if current_price > 0:
                         logger.info(f"Using alternative symbol: {alt_symbol}")
                         break
-                
+
                 if current_price <= 0:
                     result.error = f"Could not get Bank Nifty futures price (tried: {bn_futures_symbol}, {', '.join(alt_symbols)})"
                     return result
@@ -301,7 +301,7 @@ class RolloverExecutor:
             old_pe_symbol = position.pe_symbol
             old_ce_symbol = position.ce_symbol
             quantity = position.quantity
-            
+
             # Store old symbols in result for reconciliation
             result.old_pe_symbol = old_pe_symbol
             result.old_ce_symbol = old_ce_symbol
@@ -414,7 +414,7 @@ class RolloverExecutor:
             position.original_expiry = candidate.current_expiry
             position.original_strike = position.strike
             position.original_entry_price = position.entry_price
-            
+
             # Store original PE/CE entry prices if not already stored (for first rollover)
             # Note: In a real system, these should be stored at initial entry from execution_result
             # For now, we approximate using current market prices (will be accurate for first rollover)
@@ -426,7 +426,7 @@ class RolloverExecutor:
                 position.pe_entry_price = old_pe_quote.get('ltp', pe_close.fill_price)
                 position.ce_entry_price = old_ce_quote.get('ltp', ce_close.fill_price)
                 logger.debug(f"Stored estimated entry prices: PE={position.pe_entry_price}, CE={position.ce_entry_price}")
-            
+
             # Update position with new contract details
             position.expiry = candidate.next_expiry
             position.strike = new_strike
@@ -438,7 +438,7 @@ class RolloverExecutor:
             position.rollover_status = RolloverStatus.ROLLED.value
             position.rollover_timestamp = datetime.now()
             position.rollover_count += 1
-            
+
             # Update highest_close if new entry is higher
             if position.entry_price > position.highest_close:
                 position.highest_close = position.entry_price
@@ -458,7 +458,7 @@ class RolloverExecutor:
             # CE: Was bought at entry, sold at close -> profit if close > entry (price went up)
             ce_close_pnl = (ce_close.fill_price - position.ce_entry_price) * quantity
             close_pnl = pe_close_pnl + ce_close_pnl
-            
+
             # Cost of opening new position (spread + slippage)
             # For synthetic futures: SELL PE (receive premium), BUY CE (pay premium)
             # Net premium at entry: PE_price - CE_price (positive = we receive net, negative = we pay net)
@@ -468,14 +468,14 @@ class RolloverExecutor:
             net_premium_new = (pe_open.fill_price - ce_open.fill_price) * quantity  # New: what we'll receive/pay
             # Spread cost = difference (positive = costs more to enter new, negative = cheaper)
             spread_cost = net_premium_new - net_premium_old
-            
+
             # Total rollover cost = P&L from closing old + spread cost of opening new
             # close_pnl is the realized P&L from closing the old position
             result.close_pnl = close_pnl
             result.spread_cost = spread_cost
             result.total_rollover_cost = close_pnl + spread_cost
             position.rollover_pnl += result.total_rollover_cost
-            
+
             # Update portfolio closed equity with rollover P&L
             # Note: close_pnl is the realized P&L from closing the old position
             if close_pnl != 0:
@@ -594,7 +594,7 @@ class RolloverExecutor:
             # Store original values before updating
             position.original_expiry = candidate.current_expiry
             position.original_entry_price = position.entry_price
-            
+
             # Update position with new contract details
             position.expiry = candidate.next_expiry
             position.contract_month = candidate.next_expiry[2:5] + candidate.next_expiry[:2]  # DEC25
@@ -604,7 +604,7 @@ class RolloverExecutor:
             position.rollover_status = RolloverStatus.ROLLED.value
             position.rollover_timestamp = datetime.now()
             position.rollover_count += 1
-            
+
             # Update highest_close if new entry is higher
             if position.entry_price > position.highest_close:
                 position.highest_close = position.entry_price
@@ -624,12 +624,12 @@ class RolloverExecutor:
             # Cost of opening new position (spread + slippage)
             # This is the cost difference between closing old and opening new
             spread_cost = abs(open_result.fill_price - close_result.fill_price) * lots * point_value
-            
+
             result.close_pnl = close_pnl
             result.spread_cost = spread_cost
             result.total_rollover_cost = close_pnl + spread_cost
             position.rollover_pnl += result.total_rollover_cost
-            
+
             # Update portfolio closed equity with rollover P&L
             if close_pnl != 0:
                 self.portfolio.closed_equity += close_pnl
@@ -756,8 +756,19 @@ class RolloverExecutor:
                 else:
                     new_limit = min(mid_price, round(ltp * (1 - buffer_pct), 2))
 
-                # Modify order
-                modify_response = self.openalgo.modify_order(order_id, new_limit)
+                # Determine exchange from symbol (MCX for Gold, NFO for others)
+                exchange = "MCX" if "GOLD" in symbol.upper() else "NFO"
+
+                # Modify order with full params required by OpenAlgo
+                modify_response = self.openalgo.modify_order(
+                    order_id=order_id,
+                    new_price=new_limit,
+                    symbol=symbol,
+                    action=action,
+                    exchange=exchange,
+                    quantity=quantity,
+                    product="NRML"
+                )
                 logger.info(
                     f"[{description}] Retry {attempt}: modified to {new_limit} "
                     f"(mid={mid_price}, buffer={buffer_pct*100:.2f}%)"
@@ -802,7 +813,7 @@ class RolloverExecutor:
             result.error = str(e)
             logger.error(f"[{description}] Exception: {e}")
             return result
-    
+
     def reconcile_position_after_rollover(
         self,
         position: Position,
@@ -810,16 +821,16 @@ class RolloverExecutor:
     ) -> Dict[str, Any]:
         """
         Reconcile position state with broker after rollover
-        
+
         Verifies that:
         - Old position legs are closed in broker
         - New position legs are open in broker
         - Portfolio state matches broker state
-        
+
         Args:
             position: Position that was rolled
             rollover_result: Result from rollover execution
-            
+
         Returns:
             Dict with reconciliation status and any mismatches
         """
@@ -829,16 +840,16 @@ class RolloverExecutor:
             'mismatches': [],
             'warnings': []
         }
-        
+
         try:
             # Get broker positions
             broker_positions = self.openalgo.get_positions()
-            
+
             if position.instrument == "BANK_NIFTY":
                 # Check that old PE/CE are closed (use old symbols from rollover result)
                 old_pe_symbol = rollover_result.old_pe_symbol
                 old_ce_symbol = rollover_result.old_ce_symbol
-                
+
                 for bp in broker_positions:
                     bp_symbol = bp.get('symbol', '')
                     # Check if old symbols still exist in broker
@@ -846,11 +857,11 @@ class RolloverExecutor:
                         reconciliation['mismatches'].append(f"Old PE {old_pe_symbol} still open in broker (qty: {bp.get('quantity')})")
                     if old_ce_symbol and bp_symbol == old_ce_symbol:
                         reconciliation['mismatches'].append(f"Old CE {old_ce_symbol} still open in broker (qty: {bp.get('quantity')})")
-                
+
                 # Check that new PE/CE are open
                 new_pe_open = False
                 new_ce_open = False
-                
+
                 for bp in broker_positions:
                     if bp.get('symbol') == position.pe_symbol:
                         new_pe_open = True
@@ -865,12 +876,12 @@ class RolloverExecutor:
                             reconciliation['warnings'].append(
                                 f"CE quantity mismatch: portfolio={position.quantity}, broker={bp.get('quantity')}"
                             )
-                
+
                 if not new_pe_open:
                     reconciliation['mismatches'].append(f"New PE {position.pe_symbol} not found in broker")
                 if not new_ce_open:
                     reconciliation['mismatches'].append(f"New CE {position.ce_symbol} not found in broker")
-                    
+
             elif position.instrument == "GOLD_MINI":
                 # Check that old futures is closed
                 # Reconstruct old symbol from original expiry
@@ -881,12 +892,12 @@ class RolloverExecutor:
                     except Exception as e:
                         logger.debug(f"Could not reconstruct old futures symbol: {e}")
                         pass
-                
+
                 if old_futures_symbol:
                     for bp in broker_positions:
                         if bp.get('symbol') == old_futures_symbol:
                             reconciliation['mismatches'].append(f"Old futures {old_futures_symbol} still open in broker (qty: {bp.get('quantity')})")
-                
+
                 # Check that new futures is open
                 new_futures_open = False
                 for bp in broker_positions:
@@ -896,10 +907,10 @@ class RolloverExecutor:
                             reconciliation['warnings'].append(
                                 f"Futures quantity mismatch: portfolio={position.quantity}, broker={bp.get('quantity')}"
                             )
-                
+
                 if not new_futures_open:
                     reconciliation['mismatches'].append(f"New futures {position.futures_symbol} not found in broker")
-            
+
             if reconciliation['mismatches']:
                 reconciliation['status'] = 'mismatch'
                 logger.warning(f"Position reconciliation found mismatches: {reconciliation['mismatches']}")
@@ -908,9 +919,9 @@ class RolloverExecutor:
                 logger.info(f"Position reconciliation warnings: {reconciliation['warnings']}")
             else:
                 logger.info(f"Position {position.position_id} reconciled successfully")
-            
+
             return reconciliation
-            
+
         except Exception as e:
             reconciliation['status'] = 'error'
             reconciliation['error'] = str(e)

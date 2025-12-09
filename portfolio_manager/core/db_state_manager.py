@@ -142,7 +142,8 @@ class DatabaseStateManager:
                  rollover_pnl, rollover_count, strike, expiry, pe_symbol, ce_symbol,
                  pe_order_id, ce_order_id, pe_entry_price, ce_entry_price,
                  contract_month, futures_symbol, futures_order_id,
-                 atr, limiter, risk_contribution, vol_contribution, is_base_position, version)
+                 atr, limiter, risk_contribution, vol_contribution, is_base_position,
+                 exit_timestamp, exit_price, exit_reason, is_test, original_lots, strategy_id, version)
                 VALUES
                 (%(position_id)s, %(instrument)s, %(status)s, %(entry_timestamp)s, %(entry_price)s,
                  %(lots)s, %(quantity)s, %(initial_stop)s, %(current_stop)s, %(highest_close)s,
@@ -151,7 +152,9 @@ class DatabaseStateManager:
                  %(strike)s, %(expiry)s, %(pe_symbol)s, %(ce_symbol)s, %(pe_order_id)s,
                  %(ce_order_id)s, %(pe_entry_price)s, %(ce_entry_price)s, %(contract_month)s,
                  %(futures_symbol)s, %(futures_order_id)s, %(atr)s, %(limiter)s,
-                 %(risk_contribution)s, %(vol_contribution)s, %(is_base_position)s, 1)
+                 %(risk_contribution)s, %(vol_contribution)s, %(is_base_position)s,
+                 %(exit_timestamp)s, %(exit_price)s, %(exit_reason)s,
+                 %(is_test)s, %(original_lots)s, %(strategy_id)s, 1)
                 ON CONFLICT (position_id) DO UPDATE SET
                     status = EXCLUDED.status,
                     current_stop = EXCLUDED.current_stop,
@@ -162,6 +165,10 @@ class DatabaseStateManager:
                     rollover_timestamp = EXCLUDED.rollover_timestamp,
                     rollover_pnl = EXCLUDED.rollover_pnl,
                     rollover_count = EXCLUDED.rollover_count,
+                    exit_timestamp = EXCLUDED.exit_timestamp,
+                    exit_price = EXCLUDED.exit_price,
+                    exit_reason = EXCLUDED.exit_reason,
+                    strategy_id = EXCLUDED.strategy_id,
                     version = portfolio_positions.version + 1,
                     updated_at = CURRENT_TIMESTAMP
             """, pos_dict)
@@ -387,10 +394,10 @@ class DatabaseStateManager:
                 ON CONFLICT (fingerprint) DO UPDATE SET
                     is_duplicate = TRUE
             """, (
-                signal_data['instrument'],
-                signal_data['type'],
-                signal_data['position'],
-                signal_data['timestamp'],
+                signal_data.get('instrument', 'UNKNOWN'),
+                signal_data.get('type', 'UNKNOWN'),
+                signal_data.get('position', 'UNKNOWN'),
+                signal_data.get('timestamp', datetime.now().isoformat()),
                 fingerprint,
                 instance_id,
                 status,
@@ -444,7 +451,16 @@ class DatabaseStateManager:
             'limiter': position.limiter,
             'risk_contribution': position.risk_contribution or 0.0,
             'vol_contribution': position.vol_contribution or 0.0,
-            'is_base_position': getattr(position, 'is_base_position', False)
+            'is_base_position': getattr(position, 'is_base_position', False),
+            # Exit data
+            'exit_timestamp': getattr(position, 'exit_timestamp', None),
+            'exit_price': getattr(position, 'exit_price', None),
+            'exit_reason': getattr(position, 'exit_reason', None),
+            # Test mode data
+            'is_test': getattr(position, 'is_test', False),
+            'original_lots': getattr(position, 'original_lots', None),
+            # Strategy assignment
+            'strategy_id': getattr(position, 'strategy_id', 1)  # Default to ITJ Trend Follow
         }
 
     def _dict_to_position(self, row: dict) -> Position:
@@ -492,11 +508,20 @@ class DatabaseStateManager:
             limiter=row.get('limiter'),
             risk_contribution=float(row['risk_contribution']) if row.get('risk_contribution') is not None else 0.0,
             vol_contribution=float(row['vol_contribution']) if row.get('vol_contribution') is not None else 0.0,
-            is_base_position=row.get('is_base_position', False)
+            is_base_position=row.get('is_base_position', False),
+            # Exit data
+            exit_timestamp=row.get('exit_timestamp'),
+            exit_price=float(row['exit_price']) if row.get('exit_price') is not None else None,
+            exit_reason=row.get('exit_reason'),
+            # Test mode data
+            is_test=row.get('is_test', False),
+            original_lots=row.get('original_lots'),
+            # Strategy assignment
+            strategy_id=row.get('strategy_id', 1)  # Default to ITJ Trend Follow
         )
 
     # ===== INSTANCE METADATA OPERATIONS =====
-    
+
     def upsert_instance_metadata(
         self,
         instance_id: str,
@@ -508,14 +533,14 @@ class DatabaseStateManager:
     ) -> bool:
         """
         Insert or update instance metadata in database
-        
+
         Updates:
         - is_leader: Current leader status
         - last_heartbeat: Current timestamp
         - leader_acquired_at: Timestamp when leadership was acquired (if becoming leader)
         - status: Instance status (active, standby, crashed)
         - updated_at: Current timestamp
-        
+
         Args:
             instance_id: Unique instance identifier
             is_leader: Whether this instance is the leader
@@ -523,28 +548,28 @@ class DatabaseStateManager:
             hostname: Optional hostname
             port: Optional port
             version: Optional version string
-            
+
         Returns:
             True if successful, False otherwise
         """
         try:
             with self.transaction() as conn:
                 cursor = conn.cursor()
-                
+
                 # Check if instance exists
                 cursor.execute(
                     "SELECT is_leader, leader_acquired_at FROM instance_metadata WHERE instance_id = %s",
                     (instance_id,)
                 )
                 existing = cursor.fetchone()
-                
+
                 now = datetime.now()
                 leader_acquired_at = now if is_leader and (not existing or not existing[0]) else None
-                
+
                 # If instance exists and was already leader, preserve leader_acquired_at
                 if existing and existing[0] and is_leader and existing[1]:
                     leader_acquired_at = existing[1]
-                
+
                 # Upsert query
                 cursor.execute("""
                     INSERT INTO instance_metadata
@@ -572,24 +597,24 @@ class DatabaseStateManager:
                     version,
                     now  # updated_at
                 ))
-                
+
                 logger.debug(f"Instance metadata updated: {instance_id}, is_leader={is_leader}")
                 return True
-                
+
         except Exception as e:
             logger.error(f"Failed to update instance metadata: {e}")
             return False
-    
+
     def get_stale_instances(self, heartbeat_timeout: int = 30) -> List[dict]:
         """
         Detect instances with stale heartbeats (crashed or network-partitioned)
-        
+
         Returns list of instances where last_heartbeat is older than timeout.
         Critical for split-brain detection.
-        
+
         Args:
             heartbeat_timeout: Number of seconds since last heartbeat to consider stale (default: 30)
-            
+
         Returns:
             List of dictionaries with instance metadata for stale instances:
             [
@@ -609,7 +634,7 @@ class DatabaseStateManager:
                 # Calculate stale threshold: instances with heartbeat older than timeout
                 # Use EXTRACT to compare seconds directly (safer than string interpolation)
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         instance_id,
                         is_leader,
                         last_heartbeat,
@@ -625,21 +650,21 @@ class DatabaseStateManager:
         except Exception as e:
             logger.error(f"Failed to get stale instances: {e}")
             return []
-    
+
     def get_current_leader_from_db(self, force_fresh: bool = False) -> Optional[dict]:
         """
         Get current leader from database (for comparison with Redis)
-        
+
         Returns most recent instance marked as leader with fresh heartbeat.
         Use for split-brain detection.
-        
+
         Args:
             force_fresh: If True, ensures we see all committed transactions
                          by executing a sync point query before reading.
                          This guarantees the connection sees the latest commits
                          from other sessions. Use this for critical reads like
                          split-brain detection.
-        
+
         Returns:
             Dictionary with leader metadata if found, None otherwise:
             {
@@ -652,7 +677,7 @@ class DatabaseStateManager:
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor(cursor_factory=RealDictCursor)
-                
+
                 # CRITICAL: Force connection to sync with latest commits
                 # This ensures we see all committed transactions from other sessions
                 # before reading leader data. Prevents stale reads in split-brain detection.
@@ -661,9 +686,9 @@ class DatabaseStateManager:
                     # with the latest committed transactions
                     cursor.execute("SELECT pg_sleep(0)")
                     cursor.fetchone()
-                
+
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         instance_id,
                         hostname,
                         leader_acquired_at,
@@ -679,7 +704,7 @@ class DatabaseStateManager:
         except Exception as e:
             logger.error(f"Failed to get current leader from database: {e}")
             return None
-    
+
     def record_leadership_transition(
         self,
         instance_id: str,
@@ -689,17 +714,17 @@ class DatabaseStateManager:
     ) -> bool:
         """
         Record leadership state transitions for audit trail
-        
+
         Simplified version for Phase 1 - no release reason tracking.
         Creates a new history record when instance becomes leader,
         and updates the most recent record when instance releases leadership.
-        
+
         Args:
             instance_id: Unique instance identifier
             became_leader: True if becoming leader, False if releasing leadership
             reason: Optional reason for transition (not stored in Phase 1, kept for API compatibility)
             hostname: Optional hostname for the instance
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -707,7 +732,7 @@ class DatabaseStateManager:
             with self.transaction() as conn:
                 cursor = conn.cursor()
                 now = datetime.now()
-                
+
                 if became_leader:
                     # Becoming leader - create new history record
                     cursor.execute("""
@@ -732,7 +757,7 @@ class DatabaseStateManager:
                             LIMIT 1
                         )
                     """, (now, now, instance_id))
-                    
+
                     if cursor.rowcount > 0:
                         logger.debug(f"Leadership history updated: {instance_id} released leadership at {now}")
                     else:
@@ -743,17 +768,15 @@ class DatabaseStateManager:
                             (instance_id, became_leader_at, released_leader_at, leadership_duration_seconds, hostname)
                             VALUES (%s, %s, %s, 0, %s)
                         """, (instance_id, now, now, hostname))
-                
+
                 return True
-                
+
         except Exception as e:
             logger.error(f"Failed to record leadership transition: {e}")
             return False
-    
+
     def close_all_connections(self):
         """Close all database connections in pool"""
         if self.pool:
             self.pool.closeall()
             logger.info("All database connections closed")
-
-

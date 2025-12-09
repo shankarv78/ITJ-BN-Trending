@@ -2,7 +2,7 @@
   "master": {
     "tasks": [
       {
-        "id": 1,
+        "id": "1",
         "title": "Implement CrashRecoveryManager State Loading",
         "description": "Restore application state from PostgreSQL on startup to enable crash recovery",
         "details": "**Implementation Complete:**\n- Created CrashRecoveryManager class (live/recovery.py)\n- Data fetching with retry logic (exponential backoff: 1s, 2s, 4s)\n- PortfolioStateManager reconstruction\n- LiveTradingEngine reconstruction\n- State consistency validation (risk, margin with 0.01₹ tolerance)\n- Error handling with 3 error codes (DB_UNAVAILABLE, DATA_CORRUPT, VALIDATION_FAILED)\n- HA system integration (status updates: recovering → active/crashed)\n\n**Integration Complete:**\n- Removed old recovery from LiveTradingEngine.__init__\n- Integrated CrashRecoveryManager into portfolio_manager.py\n- Added --redis-config argument\n- Excellent error handling with fail-safe defaults\n\n**Status:** Implementation and integration complete. Requires integration test fixes before merge.",
@@ -160,7 +160,7 @@
         "updatedAt": "2025-12-01T14:20:08.641Z"
       },
       {
-        "id": 2,
+        "id": "2",
         "title": "Phase 1: Update Position Model",
         "description": "Add is_base_position field to Position dataclass for pyramid tracking",
         "details": "**Status:** ✅ Complete\n\n**Changes Made:**\n- Added `is_base_position: bool = False` field to Position dataclass in core/models.py\n- Field properly integrated in serialization/deserialization\n- Set to TRUE for base entries, FALSE for pyramid entries\n\n**File:** core/models.py (line ~205)\n\n**Verification:** All existing tests pass with new field",
@@ -172,7 +172,7 @@
         "updatedAt": "2025-11-30T03:24:11.973Z"
       },
       {
-        "id": 3,
+        "id": "3",
         "title": "Phase 1: Create Database Schema",
         "description": "Create PostgreSQL schema with 5 tables for state persistence",
         "details": "**Status:** ✅ Complete\n\n**Files Created:**\n- migrations/001_initial_schema.sql (200+ lines)\n- migrations/__init__.py\n\n**Tables Created:**\n1. portfolio_positions - All position data (36 columns, 5 indexes)\n2. portfolio_state - Single-row portfolio metrics\n3. pyramiding_state - Per-instrument pyramiding metadata\n4. signal_log - Signal audit trail with fingerprint deduplication\n5. instance_metadata - HA instance tracking\n\n**Indexes:**\n- idx_instrument_status\n- idx_status\n- idx_created_at\n- idx_instrument_entry\n- idx_rollover_status\n- idx_fingerprint\n- idx_processed_at\n- idx_instrument_timestamp\n\n**Constraints:**\n- status CHECK IN ('open', 'closed', 'partial')\n- rollover_status CHECK IN ('none', 'pending', 'in_progress', 'rolled', 'failed')\n- portfolio_state single row CHECK (id = 1)\n\n**Verification:**\n```bash\npsql -U pm_user -d portfolio_manager -f migrations/001_initial_schema.sql\npsql -U pm_user -d portfolio_manager -c \"\\dt\"\n```",
@@ -184,7 +184,7 @@
         "updatedAt": "2025-11-30T03:24:12.110Z"
       },
       {
-        "id": 4,
+        "id": "4",
         "title": "Phase 1: Implement DatabaseStateManager",
         "description": "Complete database persistence layer with connection pooling, caching, and transactions",
         "details": "**Status:** ✅ Complete\n\n**File Created:**\n- core/db_state_manager.py (500+ lines)\n\n**Features Implemented:**\n- Connection pooling (psycopg2.pool.ThreadedConnectionPool)\n- Retry logic with exponential backoff (1s, 2s, 4s)\n- Write-through L1 caching (positions, portfolio state)\n- Transaction management with automatic rollback\n- Optimistic locking (version field)\n\n**Methods Implemented:**\n- Position operations: save_position(), get_position(), get_all_open_positions()\n- Portfolio state: save_portfolio_state(), get_portfolio_state()\n- Pyramiding state: save_pyramiding_state(), get_pyramiding_state()\n- Signal deduplication: check_duplicate_signal(), log_signal()\n- Helper methods: _position_to_dict(), _dict_to_position()\n\n**Key Features:**\n- Automatic connection retry on failure\n- Transaction retry on connection loss\n- Cache invalidation on updates\n- Comprehensive error handling with logging\n\n**Verification:**\n```bash\npython -m py_compile core/db_state_manager.py\npython -c \"from core.db_state_manager import DatabaseStateManager; print('OK')\"\n```",
@@ -196,7 +196,7 @@
         "updatedAt": "2025-11-30T03:24:12.295Z"
       },
       {
-        "id": 5,
+        "id": "5",
         "title": "Phase 1: Create Unit Tests for DatabaseStateManager",
         "description": "Comprehensive unit test suite for database persistence layer",
         "details": "**Status:** ✅ Complete\n\n**File Created:**\n- tests/unit/test_db_state_manager.py (400+ lines, 20+ tests)\n\n**Test Coverage:**\n- Connection management (pool init, retry, transaction rollback)\n- Position CRUD (insert, update, optimistic locking, cache behavior)\n- Portfolio state (save, get, version increment)\n- Pyramiding state (save, get, nullable base_position_id)\n- Signal deduplication (exists check, log, duplicate detection)\n- Serialization (is_base_position field, NULL handling, type conversions)\n\n**Test Classes:**\n- TestDatabaseConnectionManagement (3 tests)\n- TestPositionCRUD (7 tests)\n- TestPortfolioState (3 tests)\n- TestPyramidingState (3 tests)\n- TestSignalDeduplication (4 tests)\n\n**Results:**\n- ✅ 20+ tests passing\n- ✅ >90% code coverage achieved\n- ✅ All edge cases covered\n\n**Verification:**\n```bash\npytest tests/unit/test_db_state_manager.py -v --cov=core.db_state_manager\n```",
@@ -208,7 +208,7 @@
         "updatedAt": "2025-11-30T03:24:12.474Z"
       },
       {
-        "id": 6,
+        "id": "6",
         "title": "Phase 1: Integrate with PortfolioStateManager",
         "description": "Add database hooks for closed_equity persistence",
         "details": "**Status:** ✅ Complete\n\n**File Modified:**\n- core/portfolio_state.py\n\n**Changes Made:**\n- Added `db_manager: Optional[DatabaseStateManager] = None` parameter to __init__\n- Load closed_equity from database on initialization (if db_manager provided)\n- Save closed_equity to database when positions close (in close_position method)\n- Backward compatible - works without database\n\n**Integration Points:**\n- Load state on startup: `closed_equity = db_manager.get_portfolio_state()['closed_equity']`\n- Save on position close: `db_manager.save_portfolio_state(portfolio_state)`\n\n**Verification:**\n```bash\npytest tests/unit/test_portfolio_state.py -v\npytest tests/ -v  # Ensure no regressions\n```",
@@ -220,7 +220,7 @@
         "updatedAt": "2025-11-30T03:24:12.696Z"
       },
       {
-        "id": 7,
+        "id": "7",
         "title": "Phase 1: Integrate with LiveTradingEngine",
         "description": "Add persistence calls for all signal processing and state recovery on startup",
         "details": "**Status:** ✅ Complete\n\n**File Modified:**\n- live/engine.py\n\n**Changes Made:**\n\n1. **Initialization:**\n   - Added `db_manager: Optional[DatabaseStateManager] = None` parameter\n   - Load state from database on startup if db_manager provided\n\n2. **State Recovery on Startup:**\n   - Load all open positions: `self.positions = db_manager.get_all_open_positions()`\n   - Load pyramiding state: `self.last_pyramid_price`, `self.base_positions`\n   - Load portfolio state: `closed_equity`\n\n3. **Persistence Calls:**\n   - **_handle_base_entry_live:** Save position, update pyramiding state, set is_base_position=True\n   - **_handle_pyramid_live:** Save position, update pyramiding state, set is_base_position=False\n   - **_handle_exit_live:** Save closed position (status='closed'), update portfolio state\n\n4. **is_base_position Tracking:**\n   - Set to TRUE for base entries\n   - Set to FALSE for pyramid entries\n\n**Verification:**\n```bash\npytest tests/integration/ -v\n# Manual test: Start engine, process signal, verify database\n```",
@@ -232,7 +232,7 @@
         "updatedAt": "2025-11-30T03:24:12.890Z"
       },
       {
-        "id": 8,
+        "id": "8",
         "title": "Phase 1: Update Main Application",
         "description": "Add database initialization and CLI arguments to portfolio_manager.py",
         "details": "**Status:** ✅ Complete\n\n**File Modified:**\n- portfolio_manager.py\n\n**Changes Made:**\n\n1. **Database Initialization:**\n   - Import DatabaseStateManager\n   - Load database config from database_config.json or environment\n   - Initialize DatabaseStateManager in run_live() function\n   - Pass db_manager to LiveTradingEngine and PortfolioStateManager\n\n2. **Command-Line Arguments:**\n   - `--db-config`: Path to database config JSON file\n   - `--db-env`: Environment name (local/production)\n\n3. **Database Status Endpoint:**\n   - `/db/status` endpoint to check database connection health\n   - Returns connection status, table counts, last update time\n\n4. **Graceful Fallback:**\n   - If database unavailable, continue with in-memory only\n   - Log warnings when database is not available\n\n**Verification:**\n```bash\npython portfolio_manager.py live --db-config database_config.json --db-env local\n# Check /db/status endpoint\ncurl http://localhost:5000/db/status\n```",
@@ -244,7 +244,7 @@
         "updatedAt": "2025-11-30T03:24:13.079Z"
       },
       {
-        "id": 9,
+        "id": "9",
         "title": "Phase 1: Create Integration Tests",
         "description": "End-to-end integration tests for signal → database → recovery flow",
         "details": "**Status:** ✅ Complete\n\n**File Created:**\n- tests/integration/test_persistence.py (300+ lines, 6+ tests)\n\n**Test Coverage:**\n\n1. **Signal → Database → Recovery:**\n   - Process BASE_ENTRY signal\n   - Verify position in database\n   - Restart engine\n   - Verify position loaded from database\n   - Verify state matches exactly\n\n2. **Full Signal Sequence:**\n   - BASE_ENTRY → PYRAMID → EXIT\n   - Verify all positions persisted\n   - Verify portfolio state updated\n   - Verify pyramiding state updated\n\n3. **Crash Recovery:**\n   - Create position\n   - Simulate crash (kill process)\n   - Restart engine\n   - Verify position recovered\n   - Verify can continue trading\n\n4. **Concurrent Updates:**\n   - Update position stop from two threads\n   - Verify optimistic locking prevents conflicts\n   - Verify version increments correctly\n\n**Test Classes:**\n- TestDatabasePersistence (2 tests)\n- TestRecoveryFlow (2 tests)\n- TestConcurrentUpdates (2 tests)\n\n**Results:**\n- ✅ 6+ integration tests passing\n- ✅ Full end-to-end flow verified\n- ✅ Recovery scenarios validated\n\n**Verification:**\n```bash\npytest tests/integration/test_persistence.py -v\n```",
@@ -256,7 +256,7 @@
         "updatedAt": "2025-11-30T03:24:13.269Z"
       },
       {
-        "id": 10,
+        "id": "10",
         "title": "Phase 1: Documentation",
         "description": "Complete documentation for database setup and usage",
         "details": "**Status:** ✅ Complete\n\n**Files Created:**\n- DATABASE_SETUP.md (400+ lines) - Complete setup guide\n- database_config.json.example - Configuration template\n\n**Files Modified:**\n- README.md - Added database setup section\n- requirements.txt - Added psycopg2-binary>=2.9.9\n\n**Documentation Includes:**\n\n1. **DATABASE_SETUP.md:**\n   - PostgreSQL installation (local/Docker)\n   - Database creation steps\n   - User and privileges setup\n   - Migration execution\n   - Connection troubleshooting\n   - Configuration examples\n   - Environment variable overrides\n\n2. **database_config.json.example:**\n   - Local configuration template\n   - Production configuration template\n   - Password placeholder support\n   - Connection pooling settings\n\n3. **README.md Updates:**\n   - Database setup section\n   - Quick start with database\n   - Configuration file examples\n   - CLI argument documentation\n\n**Verification:**\n- Documentation reviewed and complete\n- Examples tested and working\n- All configuration templates validated",
@@ -268,7 +268,7 @@
         "updatedAt": "2025-11-30T03:24:13.463Z"
       },
       {
-        "id": 11,
+        "id": "11",
         "title": "Task 21: Redis Configuration and Infrastructure",
         "description": "Implement foundational Redis infrastructure with connection pooling, retry logic, and fallback mechanisms",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Establish Redis infrastructure for distributed coordination in HA system\n\n**Files Created:**\n- redis_config.json.example - Configuration template\n- core/config_loader.py - Configuration loader with env overrides\n- core/redis_coordinator.py - Redis coordinator with connection pooling\n- tests/unit/test_config_loader.py - 18 unit tests\n- tests/unit/test_redis_coordinator.py - 18 unit tests\n\n**Key Features Implemented:**\n\n1. **Redis Configuration Management:**\n   - Environment variable support (REDIS_HOST, REDIS_PORT, etc.)\n   - Password placeholder support (${REDIS_PASSWORD})\n   - Automatic type conversion for overrides\n   - Fallback to local environment\n\n2. **RedisCoordinator Class:**\n   - Connection pooling (redis.ConnectionPool, 50 connections)\n   - Retry logic with exponential backoff (0.5s, 1s, 2s)\n   - Fallback mode (database-only when Redis unavailable)\n   - Health checking via ping() with retry\n   - Context manager support\n\n3. **Configuration Loader:**\n   - load_config_file() - Load JSON config\n   - apply_env_overrides() - Apply environment variables\n   - load_redis_config() - Redis config with overrides\n   - load_database_config() - Database config with overrides\n\n**Test Results:**\n- ✅ 36 tests passing (18 config + 18 coordinator)\n- ✅ 71% code coverage for redis_coordinator.py\n- ✅ No linter errors\n- ✅ Full type hints\n\n**Integration Points:**\n- Ready for Task 22 (Leader Election)\n- Ready for Task 23 (Distributed Locking)\n- Ready for Task 25 (Signal Deduplication)\n\n**Verification:**\n```bash\npytest tests/unit/test_config_loader.py -v\npytest tests/unit/test_redis_coordinator.py -v\n```\n\n**Documentation:** TASK21_IMPLEMENTATION_SUMMARY.md (280+ lines)",
@@ -280,7 +280,7 @@
         "updatedAt": "2025-11-30T03:24:47.673Z"
       },
       {
-        "id": 12,
+        "id": "12",
         "title": "Task 22: RedisCoordinator Leader Election",
         "description": "Implement atomic leader election primitives for distributed coordination",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Implement leader election mechanism using Redis atomic operations\n\n**Files Modified:**\n- core/redis_coordinator.py - Added leader election methods\n\n**Methods Implemented:**\n\n1. **try_become_leader() -> bool**\n   - Atomic SETNX with TTL (10 seconds)\n   - Sets leader key to instance ID\n   - Updates is_leader flag on success\n\n2. **renew_leadership() -> bool**\n   - Lua script for atomic get-and-set\n   - Verifies ownership before renewal\n   - Auto-detects leadership loss\n\n3. **get_current_leader() -> Optional[str]**\n   - Returns current leader instance ID\n   - Returns None if no leader exists\n\n4. **release_leadership() -> bool**\n   - Lua script for atomic delete\n   - Verifies ownership before release\n   - Updates is_leader flag\n\n**Instance ID Enhancement:**\n- Changed format from UUID to UUID-PID (e.g., \"550e8400-...-12345\")\n- Supports multiple concurrent instances on same host\n- Fixed critical bug in UUID parsing (dash counting)\n- Backward compatible with existing UUIDs\n\n**Lua Scripts:**\n- Renewal script: Atomic expire with ownership check\n- Release script: Atomic delete with ownership check\n\n**Test Coverage:**\n- 12 unit tests for leader election primitives\n- 5 tests for instance ID management\n- All tests passing ✅\n\n**Key Features:**\n- Atomic operations (no race conditions)\n- Automatic expiration (10s TTL)\n- Leadership loss detection\n- Graceful error handling\n- Fallback mode support\n\n**Verification:**\n```bash\npytest tests/unit/test_redis_coordinator.py::TestRedisCoordinatorLeaderElection -v\n```\n\n**Documentation:** TASK22_IMPLEMENTATION_SUMMARY.md (200+ lines)",
@@ -292,7 +292,7 @@
         "updatedAt": "2025-11-30T03:24:47.897Z"
       },
       {
-        "id": 13,
+        "id": "13",
         "title": "Task 22.11: Stale Leader Detection",
         "description": "Detect crashed or network-partitioned leaders to prevent split-brain scenarios",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Detect instances with stale heartbeats (>30 seconds) to identify crashed leaders\n\n**Files Modified:**\n- core/db_state_manager.py - Added 2 new methods\n- migrations/002_add_heartbeat_index.sql - New migration for performance\n\n**Methods Implemented:**\n\n1. **get_stale_instances(heartbeat_timeout: int = 30) -> List[dict]**\n   - Detects instances with heartbeats older than timeout\n   - Returns: instance_id, is_leader, last_heartbeat, seconds_stale\n   - Used for health monitoring and split-brain detection\n\n2. **get_current_leader_from_db() -> Optional[dict]**\n   - Returns most recent leader with fresh heartbeat (<30s)\n   - Used for split-brain detection comparison with Redis\n\n**Database Migration:**\n```sql\nCREATE INDEX IF NOT EXISTS idx_instance_metadata_heartbeat_leader\nON instance_metadata(last_heartbeat DESC, is_leader)\nWHERE is_leader = TRUE;\n```\n- Partial index for efficient stale leader queries\n- Optimizes get_current_leader_from_db() performance\n\n**Test Coverage:**\n- ✅ 8 unit tests (test_db_state_manager.py)\n- ✅ 1 integration test (test_redis_coordinator_integration.py)\n- All tests passing\n\n**Trading System Impact:**\n- Prevents duplicate signal execution (₹50L capital protection)\n- Detects leader failures within 30 seconds\n- Enables automatic failover\n\n**Verification:**\n```bash\npytest tests/unit/test_db_state_manager.py -k stale -v\npytest tests/integration/test_redis_coordinator_integration.py -k stale -v\n```",
@@ -304,7 +304,7 @@
         "updatedAt": "2025-11-30T03:25:37.924Z"
       },
       {
-        "id": 14,
+        "id": "14",
         "title": "Task 22.12: Split-Brain Detection + Auto-Demote",
         "description": "Detect when Redis and PostgreSQL report different leaders and automatically demote conflicting instance",
         "details": "**Status:** ✅ Complete (Critical Bug Fixed)\n\n**Objective:** Detect and resolve split-brain scenarios where Redis and DB disagree on leader\n\n**Files Modified:**\n- core/redis_coordinator.py - Added split-brain detection and auto-demote\n\n**Methods Implemented:**\n\n1. **detect_split_brain() -> Optional[dict]**\n   - Compares Redis leader with DB leader\n   - Returns: {'redis_leader': ..., 'db_leader': ..., 'conflict': True/False}\n   - Returns None if no DB manager or no conflict\n\n2. **Heartbeat Loop Integration:**\n   - Split-brain check runs every 10 iterations (~50 seconds)\n   - Auto-demotes if DB reports different leader\n   - Critical protection for financial safety\n\n**Auto-Demote Logic:**\n```python\nif conflict.get('db_leader') and conflict.get('db_leader') != self.instance_id:\n    logger.critical(f\"🚨 Self-demoting due to split-brain...\")\n    self.release_leadership()  # Release Redis lock FIRST\n    self.is_leader = False      # Then step down\n```\n\n**Critical Bug Fixed:**\n- **Issue:** Was setting is_leader=False BEFORE release_leadership(), causing early return\n- **Fix:** Call release_leadership() first (which sets is_leader=False internally), then explicitly set flag\n- **Impact:** Auto-demote now works correctly, prevents duplicate signal execution\n\n**Test Coverage:**\n- ✅ 7 unit tests (conflict detection, auto-demote)\n- ✅ 3 integration tests (real Redis + PostgreSQL)\n- All tests passing\n\n**Financial Safety:**\n- Prevents duplicate signal execution (2x position size = 2x risk)\n- Auto-resolves split-brain within ~50 seconds\n- No manual intervention required\n\n**Verification:**\n```bash\npytest tests/unit/test_redis_coordinator.py -k split_brain -v\npytest tests/integration/test_redis_coordinator_integration.py -k split_brain -v\n```",
@@ -316,7 +316,7 @@
         "updatedAt": "2025-11-30T03:25:38.170Z"
       },
       {
-        "id": 15,
+        "id": "15",
         "title": "Task 22.13: Leader Verification in Signal Processing",
         "description": "Ensure only the leader instance processes trading signals to prevent duplicate execution",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Add leader checks in webhook endpoint to prevent duplicate signal execution\n\n**Files Modified:**\n- portfolio_manager.py - Webhook endpoint with leader checks\n- live/engine.py - Optional leader check in process_signal()\n\n**Signal Processing Pipeline:**\n```\n1. Receive webhook signal\n2. Parse signal\n3. ✅ Initial leadership check (Step 3.5) ← NEW\n4. Check duplicates\n5. ✅ Re-check leadership (Step 4.5) ← NEW (Race condition protection)\n6. Process signal\n7. Return result\n```\n\n**Leader Checks:**\n\n1. **Initial Check (Step 3.5):**\n   - Before any signal processing\n   - Returns 200 OK with status='rejected', reason='not_leader'\n   - Prevents webhook retries\n\n2. **Re-check After Duplicate Detection (Step 4.5):**\n   - Protects against race conditions\n   - Returns 200 OK with reason='lost_leadership'\n   - Ensures leadership held throughout processing\n\n**Coordinator Integration:**\n- Added coordinator initialization with db_manager and redis_config\n- Added coordinator.start_heartbeat() for lifecycle management\n- Added coordinator.close() for graceful shutdown\n\n**Financial Safety:**\n- Prevents duplicate signal execution (₹1L per position risk)\n- Race condition protection (leadership can change during processing)\n- Graceful rejection (200 OK prevents webhook retries)\n\n**Test Coverage:**\n- ✅ Integration tests verify leader checks work correctly\n- ✅ Non-leader instances reject signals\n- ✅ Leadership loss during processing aborts signal\n\n**Verification:**\n- Manual testing: Multi-instance webhook processing\n- Integration tests: Leader/follower signal rejection",
@@ -328,7 +328,7 @@
         "updatedAt": "2025-11-30T03:25:38.420Z"
       },
       {
-        "id": 16,
+        "id": "16",
         "title": "Task 22.14: Observability/Metrics",
         "description": "Track critical HA metrics for monitoring and alerting",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Expose comprehensive metrics for HA system monitoring\n\n**Files Modified:**\n- core/redis_coordinator.py - Added CoordinatorMetrics class\n\n**CoordinatorMetrics Class:**\n```python\nclass CoordinatorMetrics:\n    - db_sync_success_count: int\n    - db_sync_failure_count: int\n    - db_sync_latency_ms: deque(maxlen=100)  # Rolling window\n    - leadership_changes: int\n    - last_heartbeat_time: Optional[datetime]\n```\n\n**Metrics Recording:**\n- _sync_leader_status_to_db(): Records DB sync success/failure and latency\n- _update_heartbeat_in_db(): Records DB sync success/failure and latency\n- is_leader setter: Records leadership changes\n- get_metrics(): Exposes comprehensive metrics snapshot\n\n**Metrics Exposed:**\n```python\n{\n    'db_sync_success': int,\n    'db_sync_failure': int,\n    'db_sync_failure_rate': float,  # failure_count / total_syncs\n    'db_sync_avg_latency_ms': float,  # Rolling window average\n    'leadership_changes': int,\n    'last_heartbeat': str,  # ISO format\n    'current_leader_redis': str | None,\n    'current_leader_db': str | None,\n    'this_instance': str,\n    'is_leader': bool,\n    'heartbeat_running': bool\n}\n```\n\n**Integration:**\n- Metrics accessible via coordinator.get_metrics()\n- Ready for Prometheus/StatsD export\n- Ready for Grafana dashboard integration\n\n**Monitoring Use Cases:**\n- Alert on high DB sync failure rate (>5%)\n- Alert on leadership changes (>3 per hour indicates instability)\n- Track DB sync latency (target <50ms p95)\n- Monitor heartbeat health\n\n**Verification:**\n```python\nmetrics = coordinator.get_metrics()\nprint(f\"DB Sync Failure Rate: {metrics['db_sync_failure_rate']:.2%}\")\nprint(f\"Leadership Changes: {metrics['leadership_changes']}\")\n```",
@@ -340,7 +340,7 @@
         "updatedAt": "2025-11-30T03:26:24.664Z"
       },
       {
-        "id": 17,
+        "id": "17",
         "title": "Task 22.15: Leadership Log Levels",
         "description": "Elevate log levels for critical leadership events with visual markers",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Make critical leadership events highly visible in logs for rapid troubleshooting\n\n**Files Modified:**\n- core/redis_coordinator.py - Updated log levels for leadership events\n\n**Log Level Changes:**\n\n1. **Leadership Acquisition:**\n   - Level: INFO → ERROR (with 🎯 marker)\n   - Example: \"🎯 [instance-123] Became LEADER\"\n   - Rationale: Critical event requiring visibility\n\n2. **Leadership Loss:**\n   - Level: WARNING → CRITICAL (with 🚨 marker)\n   - Example: \"🚨 [instance-123] Lost leadership\"\n   - Rationale: Unexpected event requiring investigation\n\n3. **Split-Brain Detection:**\n   - Level: ERROR → CRITICAL (with 🚨 marker)\n   - Example: \"🚨 [instance-123] SPLIT-BRAIN DETECTED: Redis says X, DB says Y\"\n   - Rationale: Financial safety issue requiring immediate attention\n\n4. **Auto-Demote:**\n   - Level: WARNING → CRITICAL (with 🚨 marker)\n   - Example: \"🚨 [instance-123] Self-demoting due to split-brain...\"\n   - Rationale: Automatic remediation action requiring awareness\n\n**Visual Markers:**\n- 🎯 Leadership acquired (positive event)\n- 🚨 Critical issues (loss, split-brain, auto-demote)\n- ⚠️  Warnings (stale heartbeat, DB sync failures)\n\n**Benefits:**\n- Critical events visible in log aggregators (Datadog, CloudWatch)\n- Easier troubleshooting during incidents\n- Automated alerting on ERROR/CRITICAL levels\n- Clear visual distinction in terminal output\n\n**Verification:**\n```bash\n# Start instance and watch logs\npython portfolio_manager.py live --redis-config redis.json | grep -E \"🎯|🚨\"\n```",
@@ -352,7 +352,7 @@
         "updatedAt": "2025-11-30T03:26:24.917Z"
       },
       {
-        "id": 18,
+        "id": "18",
         "title": "Task 22.16: Leadership History/Audit Trail",
         "description": "Track all leadership transitions in PostgreSQL for audit and debugging",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Maintain complete audit trail of leadership changes for debugging and compliance\n\n**Files Created:**\n- migrations/003_add_leadership_history.sql - New migration\n\n**Database Schema:**\n```sql\nCREATE TABLE leadership_history (\n    id BIGSERIAL PRIMARY KEY,\n    instance_id VARCHAR(50) NOT NULL,\n    event_type VARCHAR(20) NOT NULL,  -- 'acquired', 'renewed', 'lost', 'released'\n    previous_leader VARCHAR(50),\n    timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    metadata JSONB,\n    INDEX idx_leadership_history_timestamp (timestamp DESC),\n    INDEX idx_leadership_history_instance (instance_id, timestamp DESC)\n);\n```\n\n**Files Modified:**\n- core/db_state_manager.py - Added record_leadership_transition() method\n\n**Method Implemented:**\n```python\ndef record_leadership_transition(\n    instance_id: str,\n    event_type: str,  # acquired, renewed, lost, released\n    previous_leader: Optional[str] = None,\n    metadata: Optional[dict] = None\n) -> bool\n```\n\n**Automatic Recording:**\n- Leadership acquisition: Recorded in try_become_leader()\n- Leadership loss: Recorded when leadership lost\n- Auto-demote: Recorded with split-brain metadata\n- Graceful release: Recorded in release_leadership()\n\n**Metadata Examples:**\n```python\n# Split-brain auto-demote\n{'reason': 'split_brain', 'redis_leader': 'X', 'db_leader': 'Y'}\n\n# Leadership renewal failure\n{'reason': 'renewal_failed', 'last_renewal': '2025-11-30T10:00:00'}\n```\n\n**Query Examples:**\n```sql\n-- Get all leadership changes in last 24 hours\nSELECT * FROM leadership_history \nWHERE timestamp > NOW() - INTERVAL '24 hours'\nORDER BY timestamp DESC;\n\n-- Count leadership changes per instance\nSELECT instance_id, COUNT(*) as changes\nFROM leadership_history\nWHERE event_type = 'acquired'\nGROUP BY instance_id;\n```\n\n**Benefits:**\n- Complete audit trail for compliance\n- Debug leadership instability issues\n- Identify problem instances\n- Track split-brain occurrences\n\n**Verification:**\n```bash\npsql -U pm_user -d portfolio_manager -c \"SELECT * FROM leadership_history ORDER BY timestamp DESC LIMIT 10;\"\n```",
@@ -364,7 +364,7 @@
         "updatedAt": "2025-11-30T03:26:25.180Z"
       },
       {
-        "id": 19,
+        "id": "19",
         "title": "Task 23: Implement Distributed Signal Locking",
         "description": "Implement distributed locking to prevent duplicate signal processing across concurrent instances",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **In `RedisCoordinator`, implement locking methods:**\n   - `acquire_signal_lock(fingerprint, ttl=30)` → bool\n   - `release_signal_lock(fingerprint)` → bool\n\n2. **Use Redis atomic operations:**\n   - `SET key value NX EX 30` for atomic lock acquisition with TTL\n   - Key format: `signal_lock:{fingerprint}`\n   - Value: instance_id\n\n3. **Implement fallback mechanism:**\n   - If Redis is down, log error and default to database-level deduplication\n   - Graceful degradation ensures system continues operating\n\n4. **Error handling:**\n   - Handle Redis connection failures\n   - Log lock acquisition failures\n   - Ensure locks auto-expire after 30 seconds\n\n5. **Test coverage:**\n   - Unit tests for acquire/release\n   - Integration tests with Redis\n   - Fallback mode tests\n\n**Financial Safety:**\n- Prevents duplicate signal execution (₹1L per position risk)\n- Lock TTL ensures recovery from crashed instances\n- Fallback to database ensures no trading halt\n\n**Dependencies:**\n- Task 11 (Redis Infrastructure) must be complete",
@@ -377,7 +377,7 @@
         "subtasks": []
       },
       {
-        "id": 20,
+        "id": "20",
         "title": "Task 24: Implement Signal Fingerprinting Logic",
         "description": "Create a standardized fingerprinting mechanism to uniquely identify signals for deduplication",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **Create `core/fingerprint.py`:**\n   ```python\n   def generate_fingerprint(signal_data: dict) -> str:\n       # Concatenate instrument, signal_type, position_id, normalized timestamp\n       # Return SHA-256 hash\n   ```\n\n2. **Fingerprint components:**\n   - `instrument` (e.g., \"BANKNIFTY\")\n   - `signal_type` (e.g., \"BASE_ENTRY\", \"PYRAMID\", \"EXIT\")\n   - `position_id` (optional for BASE_ENTRY)\n   - Normalized `timestamp` (to second precision)\n\n3. **Timestamp normalization:**\n   - Round to nearest second\n   - Handle timezone differences\n   - Use ISO 8601 format\n\n4. **Hash generation:**\n   - Use SHA-256 for collision resistance\n   - Return hex digest (64 characters)\n\n5. **Edge cases:**\n   - Handle missing position_id (BASE_ENTRY signals)\n   - Handle malformed timestamps\n   - Handle special characters in instrument names\n\n6. **Test coverage:**\n   - Unit tests for hash stability (same input → same hash)\n   - Tests for different signal types\n   - Tests for timestamp normalization\n   - Collision resistance tests\n\n**Example:**\n```python\nsignal = {\n    'instrument': 'BANKNIFTY',\n    'signal_type': 'BASE_ENTRY',\n    'timestamp': '2025-11-30T10:15:32.123Z'\n}\nfingerprint = generate_fingerprint(signal)\n# → 'a1b2c3d4...' (SHA-256 hash)\n```",
@@ -388,7 +388,7 @@
         "subtasks": []
       },
       {
-        "id": 21,
+        "id": "21",
         "title": "Task 25: Implement 3-Layer Signal Deduplication",
         "description": "Implement the core logic to check for duplicates at Memory, Redis, and Database levels",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **Create `core/deduplication.py` with DeduplicationManager class:**\n\n2. **Layer 1: In-Memory Cache (LRU)**\n   - Use `functools.lru_cache` or `collections.OrderedDict`\n   - Cache last 1000 fingerprints\n   - O(1) lookup performance\n   - Resets on application restart\n\n3. **Layer 2: Redis Distributed Lock**\n   - Call `RedisCoordinator.acquire_signal_lock(fingerprint, ttl=30)`\n   - If lock acquired, signal is unique across all instances\n   - If lock fails, signal is duplicate or Redis is down\n   - Auto-expires after 30 seconds\n\n4. **Layer 3: PostgreSQL Deduplication**\n   - Query `signal_log` table for fingerprint\n   - Insert with UNIQUE constraint on fingerprint\n   - Handle `IntegrityError` as duplicate detection\n   - Permanent record for auditing\n\n5. **Integration logic:**\n   ```python\n   def is_duplicate(fingerprint: str) -> bool:\n       # Layer 1: Memory\n       if fingerprint in memory_cache:\n           return True\n       \n       # Layer 2: Redis\n       if not redis_coordinator.acquire_signal_lock(fingerprint):\n           return True\n       \n       # Layer 3: Database\n       if db_manager.check_duplicate_signal(fingerprint):\n           redis_coordinator.release_signal_lock(fingerprint)\n           return True\n       \n       # Not duplicate - add to memory cache\n       memory_cache.add(fingerprint)\n       return False\n   ```\n\n6. **Error handling:**\n   - Redis unavailable: Skip Layer 2, rely on Layer 3\n   - Database unavailable: HALT (cannot guarantee deduplication)\n   - Lock release failure: Log warning (TTL ensures cleanup)\n\n7. **Test coverage:**\n   - Unit tests for each layer\n   - Integration tests with all layers\n   - Fallback mode tests (Redis down)\n   - Race condition tests (concurrent signals)\n\n**Financial Safety:**\n- Triple redundancy prevents duplicate execution\n- Database layer is authoritative source of truth\n- Halts on database failure (safe failure mode)\n\n**Dependencies:**\n- Task 19 (Distributed Signal Locking)\n- Task 20 (Signal Fingerprinting)",
@@ -402,7 +402,7 @@
         "subtasks": []
       },
       {
-        "id": 22,
+        "id": "22",
         "title": "Task 26: Integrate Coordination into Webhook Endpoint",
         "description": "Update the main application entry point to use the new Redis coordination and deduplication logic",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **Initialize RedisCoordinator in `portfolio_manager.py`:**\n   ```python\n   # In run_live() function\n   redis_coordinator = RedisCoordinator(redis_config, db_manager)\n   dedup_manager = DeduplicationManager(redis_coordinator, db_manager)\n   ```\n\n2. **Update webhook handler (`/webhook` endpoint):**\n   ```python\n   @app.route('/webhook', methods=['POST'])\n   def webhook():\n       signal_data = request.get_json()\n       \n       # Step 1: Generate fingerprint\n       fingerprint = generate_fingerprint(signal_data)\n       \n       # Step 2: Check deduplication (3 layers)\n       if dedup_manager.is_duplicate(fingerprint):\n           logger.warning(f\"Duplicate signal rejected: {fingerprint}\")\n           return jsonify({'status': 'duplicate', 'fingerprint': fingerprint}), 200\n       \n       try:\n           # Step 3: Process signal\n           result = engine.process_signal(signal_data)\n           \n           # Step 4: Log as processed\n           db_manager.log_signal(fingerprint, signal_data, status='processed')\n           \n           return jsonify({'status': 'success', 'result': result}), 200\n       \n       except Exception as e:\n           # Log as failed\n           db_manager.log_signal(fingerprint, signal_data, status='failed', error=str(e))\n           raise\n       \n       finally:\n           # Step 5: Release Redis lock\n           redis_coordinator.release_signal_lock(fingerprint)\n   ```\n\n3. **Update signal_log table:**\n   - Add `status` column ('pending', 'processed', 'failed')\n   - Add `error` column for failure details\n   - Add `processed_at` timestamp\n\n4. **Error handling:**\n   - Ensure lock is always released (finally block)\n   - Log all failures with context\n   - Return 200 OK for duplicates (prevent retries)\n\n5. **Monitoring:**\n   - Log duplicate count (warn if >5% of signals)\n   - Track lock acquisition failures\n   - Track processing time\n\n6. **Test coverage:**\n   - Integration test: Full webhook flow\n   - Test: Duplicate signal rejection\n   - Test: Lock release on error\n   - Test: Redis unavailable fallback\n   - Test: Database unavailable halt\n\n**Financial Safety:**\n- Deduplication prevents double execution\n- Lock ensures single processing\n- Database log provides audit trail\n\n**Dependencies:**\n- Task 21 (3-Layer Deduplication)",
@@ -415,7 +415,7 @@
         "subtasks": []
       },
       {
-        "id": 23,
+        "id": "23",
         "title": "Task 28: Implement Statistics Persistence",
         "description": "Enable persistence of trading statistics for analytics and recovery",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **Create database migration:**\n   ```sql\n   -- migrations/004_add_trading_statistics.sql\n   ALTER TABLE portfolio_state ADD COLUMN IF NOT EXISTS stats JSONB;\n   \n   CREATE INDEX IF NOT EXISTS idx_portfolio_state_stats \n   ON portfolio_state USING gin(stats);\n   ```\n\n2. **Statistics to persist:**\n   ```python\n   stats = {\n       'total_trades': int,\n       'winning_trades': int,\n       'losing_trades': int,\n       'total_pnl': Decimal,\n       'max_drawdown': Decimal,\n       'win_rate': float,\n       'profit_factor': float,\n       'avg_win': Decimal,\n       'avg_loss': Decimal,\n       'largest_win': Decimal,\n       'largest_loss': Decimal,\n       'consecutive_wins': int,\n       'consecutive_losses': int,\n       'max_consecutive_wins': int,\n       'max_consecutive_losses': int\n   }\n   ```\n\n3. **Update `DatabaseStateManager`:**\n   - Add `save_statistics(stats: dict) -> bool`\n   - Add `get_statistics() -> dict`\n   - Use JSONB column for flexible schema\n\n4. **Update `PortfolioStateManager`:**\n   - Track statistics in memory\n   - Update statistics on position close\n   - Persist to database via `db_manager.save_statistics()`\n\n5. **Recovery integration:**\n   - Load statistics on startup (CrashRecoveryManager)\n   - Verify consistency with positions\n\n6. **Reporting:**\n   - Add `/stats` endpoint to expose statistics\n   - Add daily rollover stats snapshot\n\n7. **Test coverage:**\n   - Unit tests for statistics calculation\n   - Integration tests for persistence\n   - Recovery tests (load stats after crash)\n\n**Benefits:**\n- Analytics and performance tracking\n- Recover statistics after crash\n- Historical performance analysis\n- Monitoring dashboard integration\n\n**Dependencies:**\n- Task 1 (CrashRecoveryManager) for loading stats on startup",
@@ -428,7 +428,7 @@
         "subtasks": []
       },
       {
-        "id": 24,
+        "id": "24",
         "title": "Task 29: Implement Graceful Shutdown Mechanism",
         "description": "Ensure the application shuts down cleanly, releasing resources and locks",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **Register signal handlers in `portfolio_manager.py`:**\n   ```python\n   import signal\n   \n   shutdown_flag = False\n   \n   def shutdown_handler(signum, frame):\n       global shutdown_flag\n       logger.info(\"Shutdown signal received - initiating graceful shutdown\")\n       shutdown_flag = True\n   \n   signal.signal(signal.SIGINT, shutdown_handler)   # Ctrl+C\n   signal.signal(signal.SIGTERM, shutdown_handler)  # Docker/K8s shutdown\n   ```\n\n2. **Update webhook handler:**\n   ```python\n   @app.route('/webhook', methods=['POST'])\n   def webhook():\n       if shutdown_flag:\n           return jsonify({'status': 'shutting_down'}), 503  # Service Unavailable\n       \n       # Normal processing...\n   ```\n\n3. **Shutdown sequence:**\n   ```python\n   def graceful_shutdown():\n       logger.info(\"Starting graceful shutdown sequence...\")\n       \n       # 1. Stop accepting new webhooks (done via shutdown_flag)\n       \n       # 2. Wait for pending signals to complete (max 30 seconds)\n       timeout = 30\n       start = time.time()\n       while redis_coordinator.has_pending_signals() and (time.time() - start) < timeout:\n           time.sleep(0.5)\n       \n       # 3. Release leadership (if leader)\n       if redis_coordinator.is_leader:\n           redis_coordinator.release_leadership()\n       \n       # 4. Release all signal locks\n       redis_coordinator.release_all_signal_locks()\n       \n       # 5. Close database connections\n       db_manager.close()\n       \n       # 6. Close Redis connections\n       redis_coordinator.close()\n       \n       logger.info(\"Graceful shutdown complete\")\n   ```\n\n4. **Add cleanup methods:**\n   - `RedisCoordinator.release_all_signal_locks()`: Release all locks held by this instance\n   - `RedisCoordinator.has_pending_signals()`: Check if any locks are held\n   - `DatabaseStateManager.close()`: Close connection pool\n\n5. **Health endpoint integration:**\n   - `/health` returns 503 when shutdown_flag is True\n   - Load balancer removes instance from rotation\n\n6. **Test coverage:**\n   - Unit tests for signal handlers\n   - Integration tests for shutdown sequence\n   - Test: Pending signals complete before shutdown\n   - Test: Leadership released\n   - Test: Locks released\n   - Test: Connections closed\n\n**Benefits:**\n- No interrupted signal processing\n- Clean leadership transfer\n- No orphaned locks\n- Database connection cleanup\n- Load balancer integration\n\n**Dependencies:**\n- Task 22 (Webhook Coordination Integration) for signal lock management",
@@ -441,7 +441,7 @@
         "subtasks": []
       },
       {
-        "id": 25,
+        "id": "25",
         "title": "Task 30: Implement Health and Readiness Endpoints",
         "description": "Add endpoints for load balancer health checks and deployment readiness",
         "details": "**Status:** Pending\n\n**Implementation Plan:**\n\n1. **Create `endpoints/health.py`:**\n\n2. **Health endpoint (`GET /health`):**\n   ```python\n   @app.route('/health', methods=['GET'])\n   def health():\n       # Check connectivity\n       checks = {\n           'database': check_database_connection(),\n           'redis': check_redis_connection(),\n           'status': 'healthy' if all else 'unhealthy'\n       }\n       \n       status_code = 200 if checks['status'] == 'healthy' else 503\n       return jsonify(checks), status_code\n   \n   def check_database_connection() -> bool:\n       try:\n           db_manager.ping()  # Simple SELECT 1\n           return True\n       except Exception:\n           return False\n   \n   def check_redis_connection() -> bool:\n       try:\n           redis_coordinator.ping()\n           return True\n       except Exception:\n           return False\n   ```\n\n3. **Readiness endpoint (`GET /ready`):**\n   ```python\n   @app.route('/ready', methods=['GET'])\n   def ready():\n       # Check if application is ready to accept traffic\n       checks = {\n           'database': check_database_connection(),\n           'redis': check_redis_connection(),\n           'recovery_complete': recovery_manager.is_recovery_complete(),\n           'shutdown_flag': not shutdown_flag,\n           'status': 'ready' if all else 'not_ready'\n       }\n       \n       status_code = 200 if checks['status'] == 'ready' else 503\n       return jsonify(checks), status_code\n   ```\n\n4. **Add recovery completion tracking:**\n   ```python\n   # In CrashRecoveryManager\n   def is_recovery_complete(self) -> bool:\n       return self._recovery_complete\n   \n   # Set to True after successful load_state()\n   ```\n\n5. **Liveness endpoint (`GET /live`):**\n   ```python\n   @app.route('/live', methods=['GET'])\n   def liveness():\n       # Simple liveness check (process is running)\n       return jsonify({'status': 'alive'}), 200\n   ```\n\n6. **Integration with Kubernetes:**\n   ```yaml\n   # k8s deployment.yaml\n   livenessProbe:\n     httpGet:\n       path: /live\n       port: 5000\n     initialDelaySeconds: 10\n     periodSeconds: 5\n   \n   readinessProbe:\n     httpGet:\n       path: /ready\n       port: 5000\n     initialDelaySeconds: 30\n     periodSeconds: 10\n   ```\n\n7. **Test coverage:**\n   - Unit tests for health checks\n   - Integration tests with real dependencies\n   - Test: Database down\n   - Test: Redis down\n   - Test: Recovery incomplete\n   - Test: Shutdown flag set\n\n**Benefits:**\n- Load balancer health checks\n- Kubernetes liveness/readiness probes\n- Graceful deployment (wait for recovery)\n- Traffic routing based on health\n\n**Dependencies:**\n- Task 1 (CrashRecoveryManager) for recovery status\n- Task 24 (Graceful Shutdown) for shutdown flag",
@@ -455,7 +455,7 @@
         "subtasks": []
       },
       {
-        "id": 26,
+        "id": "26",
         "title": "Task 31: Fix DB Sync Race Condition in Leader Status Sync",
         "description": "Resolve critical race condition where leader status updates in database are not immediately visible to other connections",
         "details": "**Status:** ✅ Complete\n\n**Objective:** Ensure strict consistency for split-brain detection by forcing fresh connections for critical reads\n\n**Problem Identified:**\n- PostgreSQL connection pooling can return stale connections\n- Leader status updates may not be visible immediately on other connections\n- Split-brain detection could read stale data\n- Race condition window: <100ms but critical for financial safety\n\n**Solution Implemented:**\n- Force fresh connections for split-brain detection reads\n- `get_current_leader_from_db()` closes and reopens connection\n- Guarantees read-after-write consistency\n- Eliminates need for polling/retry delays\n\n**Implementation:**\n```python\ndef get_current_leader_from_db(self) -> Optional[dict]:\n    # Close current connection (return to pool)\n    self._close_connection()\n    \n    # Get fresh connection (guaranteed latest data)\n    conn = self._get_connection()\n    \n    # Read leader status\n    # ...\n```\n\n**Benefits:**\n- Eliminates stale read race condition\n- No performance overhead on write path\n- Minimal overhead on read path (only for split-brain checks every ~50s)\n- Strict consistency for financial safety\n\n**Testing:**\n- ✅ Unit tests verify fresh connection logic\n- ✅ Integration tests verify split-brain detection accuracy\n- ✅ No false positives in testing\n\n**Documentation:**\n- Detailed analysis in `CRITICAL_DB_SYNC_INVESTIGATION.md`\n- Fix details in `FIXPLAN_FEEDBACK.md`\n- Implementation verified in `PHASE1_CRITICAL_FIXES_SUMMARY.md`\n\n**Dependencies:**\n- Task 12 (Leader Election) required for baseline functionality\n- Integrated with Task 14 (Split-Brain Detection)",
@@ -469,7 +469,7 @@
         "updatedAt": "2025-11-30T05:01:32.936Z"
       },
       {
-        "id": 27,
+        "id": "27",
         "title": "Research and Implement Historical OHLC Data Download",
         "description": "Decide on data source and implement download mechanism for 1-minute OHLC historical data for backtesting",
         "details": "**Objective:** Enable proper backtesting with continuous OHLC data (not just signal events)\n\n**Problem:**\n- TradingView backtest exports only contain signal events (BASE_ENTRY, PYRAMID, EXIT)\n- No intermediate bars for tracking P&L, stops, drawdowns\n- Need complete 1-minute OHLC data for accurate backtesting\n\n**Data Sources to Evaluate:**\n\n1. **Zerodha Kite Historical API** ⭐ Recommended\n   - Pros: Direct from broker, accurate, 1-min granularity\n   - Cons: Requires API subscription, rate limits\n   - URL: https://kite.trade/docs/connect/v3/historical/\n   - Cost: Free with Kite Connect subscription\n\n2. **NSE Bhavcopy Archives**\n   - Pros: Free, official data\n   - Cons: Daily data only (not intraday), futures data separate\n   - URL: https://nsearchives.nseindia.com/\n   - Granularity: End-of-day only\n\n3. **TradingView Chart Export**\n   - Pros: Easy to export, same source as strategy\n   - Cons: Manual process, limited date range\n   - Method: Right-click chart → \"Export chart data\"\n   - Granularity: 1-min, 5-min, 15-min, etc.\n\n4. **Commercial Data Providers**\n   - True Data API\n   - eSignal\n   - MetaStock\n   - Cons: Expensive\n\n5. **Yahoo Finance**\n   - Pros: Free\n   - Cons: Limited India data, often incomplete for derivatives\n\n**Instruments Needed:**\n- Bank Nifty Futures (BANKNIFTY) - 1-min OHLC\n- Gold Mini Futures (GOLDM) - 1-min OHLC\n- Date range: 2015-2025 (10 years for robust backtesting)\n\n**Implementation Tasks:**\n\n1. **Evaluate Sources:**\n   - Test Zerodha Historical API access\n   - Check data quality and completeness\n   - Compare with TradingView chart data\n   - Verify alignment with strategy timestamps\n\n2. **Download Script:**\n   ```python\n   # backtest/data_downloader.py\n   class HistoricalDataDownloader:\n       def download_ohlc(\n           instrument: str,\n           start_date: str,\n           end_date: str,\n           interval: str = \"1minute\"\n       ) -> pd.DataFrame\n   ```\n\n3. **Data Storage:**\n   - Format: CSV or Parquet (for large datasets)\n   - Structure: timestamp, open, high, low, close, volume\n   - Location: `data/historical/BANKNIFTY_1min_2015_2025.csv`\n\n4. **Data Validation:**\n   - Check for gaps in data\n   - Verify against known market events\n   - Handle holidays, trading halts\n   - Align with signal timestamps\n\n5. **Integration with Backtest Engine:**\n   - Update backtest engine to load OHLC data\n   - Process bar-by-bar with signal overlay\n   - Calculate accurate P&L, drawdowns, stops\n\n**Acceptance Criteria:**\n- [ ] Data source selected and documented\n- [ ] Download script implemented and tested\n- [ ] Historical data downloaded for both instruments\n- [ ] Data quality validated (no major gaps)\n- [ ] Backtest engine integrated with OHLC data\n- [ ] Sample backtest runs successfully with continuous P&L tracking\n\n**Estimated Effort:** 4-6 hours\n**Dependencies:** None (can run in parallel)\n**Priority:** Medium (needed for production-grade backtesting)",
@@ -480,7 +480,7 @@
         "subtasks": []
       },
       {
-        "id": 29,
+        "id": "29",
         "title": "Implement HA Routing Infrastructure for Multi-Instance Deployment",
         "description": "Implement production-ready routing solution to direct TradingView webhooks to the current leader instance. Current limitation: TradingView can only send to one URL/port, but we have multiple instances on different ports.",
         "details": "## Problem\n- TradingView webhook supports only ONE target URL (e.g., http://server:5000/webhook)\n- Multiple Portfolio Manager instances run on different ports (5002, 5001)\n- Need routing layer to automatically forward requests to current leader instance\n\n## Solution Options\n\n### Option 1: Nginx Reverse Proxy with Health Checks (RECOMMENDED)\n- Nginx listens on single port (5000)\n- Health check endpoint returns leader status\n- Route requests only to leader instance\n- Automatic failover when health check fails\n\n### Option 2: Virtual IP (VIP) with Keepalived\n- Floating VIP managed by keepalived\n- Leader instance holds VIP\n- Automatic VIP migration on failover\n- Both instances on different physical machines\n\n### Option 3: Shared Port with Leader-Only Binding\n- Only leader binds to webhook port\n- Follower attempts to bind when promoted to leader\n- Simplest but requires separate machines\n\n### Option 4: Custom API Gateway\n- Gateway queries Redis for current leader\n- Routes webhook to leader dynamically\n- More complex but highly flexible\n\n## Implementation Requirements\n1. Health check endpoint enhancement (return is_leader status)\n2. Nginx configuration with upstream health checks\n3. Deployment documentation for production setup\n4. Testing with simulated TradingView webhooks\n5. Monitoring and alerting for routing failures\n\n## Dependencies\n- Redis coordinator (already implemented)\n- Leader election (already implemented)\n- Health endpoint (exists, needs leader status)\n\n## Testing Criteria\n- Single webhook URL receives all TradingView signals\n- Automatic routing to current leader\n- Failover completes within 10 seconds\n- No webhook loss during failover\n- Split-brain prevention\n\n## References\n- MANUAL_TESTING_GUIDE.md (Scenario 4 identifies this issue)\n- core/redis_coordinator.py (leader election implementation)",
@@ -491,7 +491,7 @@
         "subtasks": []
       },
       {
-        "id": 30,
+        "id": "30",
         "title": "Implement Signal Validation and Execution System",
         "description": "Implement comprehensive signal validation system to handle price divergence, market surge/pullback scenarios, and execution slippage. Includes two-stage validation (condition validation with signal price, execution validation with broker price), risk-based position sizing adjustment, and progressive order execution strategies. Supports BASE_ENTRY, PYRAMID, and EXIT signal types with tiered signal age handling.",
         "details": "**Goal**: Ensure safe signal execution by validating price divergence, risk increase, and using appropriate execution strategies before placing orders.\n\n**Key Components**:\n1. SignalValidator class (two-stage validation)\n2. OrderExecutor strategies (Simple Limit, Progressive)\n3. Risk-based position size adjustment\n4. MockBrokerSimulator for testing\n5. Comprehensive test coverage (123 test cases)\n\n**Reference Documents**: \n- SIGNAL_VALIDATION_SPECIFICATION.md (v1.1)\n- TASK28_REVIEW_FEEDBACK.md\n\n**Key v1.1 Updates**:\n- EXIT signal validation (1% unfavorable divergence limit)\n- Tiered signal age handling (Fresh <10s, Slightly Delayed 10-30s, Delayed 30-60s, Stale >60s)\n- MockBrokerSimulator for testing without paper trading dependency\n- File locations use core/ for reusable components\n\n**Phases**:\n- Phase 0: Mock Infrastructure (Pre-requisite)\n- Phase 1: Core Validation Logic (Week 1)\n- Phase 2: Execution Strategies (Week 2)\n- Phase 3: Integration & Testing (Week 3)\n- Phase 4: Production Hardening (Week 4)\n\n**Success Criteria**:\n- All validation scenarios from spec v1.1 covered\n- 123 automated tests passing\n- Manual testing with paper trading successful\n- Zero production incidents due to price divergence",
@@ -615,7 +615,7 @@
         "updatedAt": "2025-12-02T08:42:16.083Z"
       },
       {
-        "id": 31,
+        "id": "31",
         "title": "Fix Circular Import Between core.config and core.signal_validator",
         "description": "Resolve circular import issue that prevents importing signal validation modules. Current issue: core.config imports SignalValidationConfig from core.signal_validator, while core.signal_validator imports PortfolioConfig from core.config.",
         "details": "**Problem:**\nCircular import chain:\n- core.config imports core.signal_validator (SignalValidationConfig)\n- core.signal_validator imports core.portfolio_state (PortfolioStateManager)\n- core.portfolio_state imports core.config (PortfolioConfig, get_instrument_config)\n\n**Impact:**\n- Cannot import signal validation modules\n- Blocks running integration tests for Task 30 bug fixes\n- Prevents proper testing of signal validation system\n\n**Solution Options:**\n\n1. **Move SignalValidationConfig to separate file** (RECOMMENDED)\n   - Create core/signal_validation_config.py\n   - Move SignalValidationConfig dataclass there\n   - Update imports in core.config and core.signal_validator\n   - No circular dependency\n\n2. **Use lazy imports**\n   - Import inside functions instead of module level\n   - Less clean but quick fix\n\n3. **Restructure config module**\n   - Split core.config into multiple files\n   - Separate signal validation config from portfolio config\n\n**Recommended Approach:**\nOption 1 - Create core/signal_validation_config.py\n\n**Files to Modify:**\n- NEW: core/signal_validation_config.py (move SignalValidationConfig)\n- core/config.py (import from new file)\n- core/signal_validator.py (import from new file)\n\n**Testing:**\n- Verify imports work: `python -c \"from core.signal_validation_alerts import SignalValidationAlerts\"`\n- Run Task 30 bug fix tests: `pytest tests/unit/test_bug_fixes.py -v`\n- Run full test suite: `pytest tests/ -v`\n\n**Priority:** High (blocks Task 30 testing)\n**Estimated Time:** 30 minutes",
@@ -629,7 +629,7 @@
         "updatedAt": "2025-12-02T07:16:59.258Z"
       },
       {
-        "id": 32,
+        "id": "32",
         "title": "Implement EOD Pre-Close Execution System",
         "description": "Implement a system to detect and execute trades before market close for EOD candles. TradingView sends signals AFTER candle close, but for the last candle of the day, the market is already closed by then. This system will use TradingView EOD_MONITOR signals with all indicator values, and Python will handle precise timing to execute orders 30 seconds before market close.",
         "details": "## Problem Statement\n\nTradingView sends signals AFTER candle close. For the last candle of the day:\n- Bank Nifty: 2:15 PM - 3:30 PM (75-min), signal arrives at 3:30 PM when market is CLOSED\n- Gold Mini: Last candle closes at 11:30 PM when MCX closes\n\nThis causes:\n- Missed trades (can't execute after market close)\n- Gap risk (next day opens at different price)\n- Signal price becomes invalid\n\n## Solution: Hybrid TradingView + Python\n\nTradingView sends `EOD_MONITOR` signals with ALL indicator values (RSI, EMA, DC upper, ADX, ER, SuperTrend, ATR) during the EOD window. Python handles precise timing:\n\n**Execution Timeline:**\n```\nT-15 min (3:15 PM)  → TradingView starts sending EOD_MONITOR signals (~1/min)\nT-45 sec (3:29:15)  → Python: Final condition check + position sizing + margin validation\nT-30 sec (3:29:30)  → Python: Place limit order (if all 7 conditions met)\nT-15 sec (3:29:45)  → Python: Track order to completion\nT-0 (3:30:00)       → Market closes\n```\n\n## Key Requirements\n\n1. **All indicator values needed**: RSI, EMA, DC upper, ADX, ER, SuperTrend, ATR (not just price)\n2. **Both entries AND exits**: BASE_ENTRY, PYRAMID, and EXIT signals\n3. **Position sizing**: Full calculation before execution\n4. **Order tracking**: 15 sec window for completion\n5. **Deduplication**: Prevent dual execution with regular bar-close signals\n\n## Reference Files\n\n- Plan: /Users/shankarvasudevan/.claude/plans/plucky-toasting-phoenix.md\n- Models: /portfolio_manager/core/models.py\n- Config: /portfolio_manager/core/config.py\n- Engine: /portfolio_manager/live/engine.py\n- Webhook: /portfolio_manager/core/webhook_parser.py\n- Main: /portfolio_manager/portfolio_manager.py\n- Pine Script: /trend_following_strategy_v6.pine",
@@ -777,10 +777,10 @@
         "updatedAt": "2025-12-02T11:49:52.648Z"
       },
       {
-        "id": 33,
+        "id": "33",
         "title": "Implement OpenAlgo Symbol Format Translation",
         "description": "Add dynamic symbol translation from generic names (GOLD_MINI, BANK_NIFTY) to OpenAlgo standard format. GOLD_MINI translates to simple futures (GOLDM05JAN26FUT). BANK_NIFTY uses SYNTHETIC FUTURES requiring TWO symbols: ATM PE Sell + ATM CE Buy with dynamic strike calculation. OpenAlgo handles broker-specific translation automatically via its adapter layer. Must be generic and future-compatible - not hardcoded for specific expiries.",
-        "status": "pending",
+        "status": "in-progress",
         "dependencies": [],
         "priority": "high",
         "details": "**Problem Discovered:**\n- Portfolio Manager uses generic names: `GOLD_MINI`, `BANK_NIFTY`\n- OpenAlgo requires standard format: `GOLDM05JAN26FUT`, `BANKNIFTY26DEC50000PE/CE`\n- Current code sends wrong symbol format causing 400 BAD REQUEST errors\n- **KEY INSIGHT**: OpenAlgo abstracts broker-specific translation - we only translate to OpenAlgo standard format\n\n**CRITICAL: Bank Nifty Uses SYNTHETIC FUTURES (Not Simple Futures):**\n- Synthetic Future = ATM PE Sell + ATM CE Buy (TWO legs)\n- Uses MONTHLY options (not weekly)\n- Dynamic strike selection: Round Bank Nifty price to nearest 100\n- Symbol format examples:\n  - Put: BANKNIFTY26DEC50000PE\n  - Call: BANKNIFTY26DEC50000CE\n- Requires rollover logic 3-5 days before monthly expiry\n- **CRITICAL RISK**: Leg failure requires rollback logic to prevent naked option exposure\n\n**Design Document Created:**\n- Full specification in `SYMBOL_MAPPING_DESIGN.md`\n- End-to-end signal flow: TradingView → Portfolio Manager (GOLD_MINI) → OpenAlgo Standard (GOLDM05JAN26FUT) → Broker (auto-translated)\n- TranslatedSymbol dataclass for structured symbol representation\n- Expiry calendar logic:\n  - Gold Mini: 5th of each month (MCX)\n  - Bank Nifty: Last Thursday of month (NFO)\n\n**Requirements:**\n1. Dynamic expiry calculation (not hardcoded dates)\n2. Support for multiple instruments with different complexities:\n   - **GOLD_MINI**: Single futures contract → `GOLDM[DDMMMYY]FUT`\n   - **BANK_NIFTY**: Synthetic futures (TWO symbols) → `BANKNIFTY[DDMMMYY][STRIKE]PE/CE`\n3. Handle expiry rollover automatically\n4. Exchange-specific format rules (MCX vs NFO)\n5. Dynamic ATM strike calculation for Bank Nifty (round to nearest 100)\n6. Return multiple symbols for synthetic futures\n7. Rollback logic for synthetic futures leg failure\n\n**Architecture Components:**\n1. **SymbolMapper** - Core translation logic\n   - Simple futures translation (Gold Mini)\n   - Synthetic futures translation (Bank Nifty) returning TWO symbols\n   - ATM strike calculation\n   - Expiry date calculation\n2. **PriceProvider** - Fetch current market prices for ATM calculation\n3. **OrderExecutor Updates** - Handle TWO orders for synthetic futures with rollback\n\n**Implementation Phases:**\n- **Phase 1**: Core Symbol Mapper module (`core/symbol_mapper.py`)\n  - TranslatedSymbol dataclass\n  - Expiry calculation logic\n  - Symbol format generation\n- **Phase 2**: Order Executor integration (`core/order_executor.py`)\n  - Handle TWO orders for Bank Nifty entries/exits\n  - Rollback logic for leg failure\n- **Phase 3**: Price Provider for ATM calculation\n  - Fetch current Bank Nifty price\n  - Integration with OpenAlgo price API\n- **Phase 4**: Testing and validation\n\n**Files to Modify:**\n- `core/order_executor.py` - Add symbol translation before order placement\n  - **CRITICAL**: Must handle TWO orders for Bank Nifty entries/exits\n  - Place PE Sell order (first leg)\n  - Place CE Buy order (second leg)\n  - Rollback first leg if second leg fails\n- `brokers/openalgo_client.py` - Add price fetch API integration\n- New file: `core/symbol_mapper.py` - Centralized symbol translation logic\n  - Method for simple futures (Gold Mini)\n  - Method for synthetic futures (Bank Nifty) returning TWO symbols\n  - ATM strike calculation logic\n  - Expiry date calculation\n\n**Symbol Mapper Interface:**\n```python\n@dataclass\nclass TranslatedSymbol:\n    generic_name: str\n    openalgo_symbols: List[str]  # Single for futures, two for synthetic\n    exchange: str\n    expiry_date: date\n    strike: Optional[int] = None\n    is_synthetic: bool = False\n\nclass SymbolMapper:\n    def translate(self, generic_symbol: str) -> TranslatedSymbol:\n        # Returns single symbol for GOLD_MINI\n        # Returns TWO symbols for BANK_NIFTY\n        pass\n    \n    def calculate_atm_strike(self, price: float, step: int = 100) -> int:\n        # Round to nearest step (100 for Bank Nifty)\n        pass\n    \n    def get_next_expiry(self, instrument: str, from_date: date) -> date:\n        # Calculate next expiry based on instrument rules\n        pass\n```\n\n**Risk Considerations:**\n- ATM strike drift during volatile markets\n- Leg failure in synthetic futures (requires rollback)\n- Expiry rollover timing (3-5 days before expiry)\n- Price data unavailability for ATM calculation\n<info added on 2025-12-03T16:25:58.790Z>\n**Design Document Reference:**\n\nThe complete specification for this symbol translation system is documented in `SYMBOL_MAPPING_DESIGN.md`. This design document serves as the authoritative reference for implementation and includes:\n\n**Key Sections:**\n- **Quick Reference: End-to-End Signal/Order Flow Architecture** - ASCII diagram showing complete flow from TradingView → Webhook → Portfolio Manager → OpenAlgo → Broker\n- **Quick Reference: Symbol Format by Layer** - Comprehensive table mapping symbol formats across all layers (TradingView, Webhook, Portfolio Manager, OpenAlgo, Broker-specific)\n- **Instrument Complexity Comparison Table** - Side-by-side comparison of GOLD_MINI (simple futures) vs BANK_NIFTY (synthetic futures)\n- **Architecture Decision: OpenAlgo Abstraction** - Explains how OpenAlgo handles broker-specific translation automatically, eliminating need for broker-specific code in Portfolio Manager\n- **OpenAlgo Symbol Format Specification** - Detailed format rules for both Futures (GOLDM[DDMMMYY]FUT) and Options (BANKNIFTY[DDMMMYY][STRIKE]PE/CE)\n- **SymbolMapper Class Design** - Complete class structure with code examples for TranslatedSymbol dataclass and all translation methods\n- **Expiry Calendar Logic** - Detailed rules for Gold Mini (5th of month, MCX) and Bank Nifty (last Thursday, NFO) with edge case handling\n- **Order Executor Updates for Synthetic Futures** - Two-leg execution flow with rollback logic for leg failure scenarios\n- **Risk Considerations** - Comprehensive coverage of leg failure rollback, ATM strike drift during volatility, expiry rollover timing, and price data unavailability\n- **Appendix A: Symbol Format Quick Reference** - Quick lookup table for all symbol formats\n- **Appendix B: Synthetic Futures Order Matrix** - Matrix showing entry/exit order combinations for Bank Nifty synthetic futures\n\n**Document Location:** `SYMBOL_MAPPING_DESIGN.md` in project root\n\nAll implementation decisions, code examples, and architectural patterns should reference this design document to ensure consistency and completeness.\n</info added on 2025-12-03T16:25:58.790Z>",
@@ -792,8 +792,10 @@
             "description": "Implement the core SymbolMapper class in core/symbol_mapper.py with TranslatedSymbol dataclass for structured symbol representation. Include basic structure for translate(), calculate_atm_strike(), and get_next_expiry() methods. Set up configuration for instrument-specific rules (exchange, expiry logic, strike steps).",
             "dependencies": [],
             "details": "Create the foundational SymbolMapper class following the design in SYMBOL_MAPPING_DESIGN.md. The TranslatedSymbol dataclass should contain: generic_name, openalgo_symbols (list), exchange, expiry_date, optional strike, and is_synthetic flag. Implement instrument configuration dictionary with rules for GOLD_MINI (MCX, 5th of month) and BANK_NIFTY (NFO, last Thursday, 100 strike step). Set up method stubs with proper type hints and docstrings.",
-            "status": "pending",
-            "testStrategy": "Unit test TranslatedSymbol dataclass instantiation. Test configuration loading for both instruments. Verify method signatures and return types match specification."
+            "status": "done",
+            "testStrategy": "Unit test TranslatedSymbol dataclass instantiation. Test configuration loading for both instruments. Verify method signatures and return types match specification.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.472Z"
           },
           {
             "id": 2,
@@ -803,8 +805,10 @@
               1
             ],
             "details": "Implement expiry calculation algorithms: For Gold Mini, find 5th of current/next month. For Bank Nifty, find last Thursday of current/next month using calendar logic. Add holiday calendar support (initially empty, extensible). Include rollover detection logic (3-5 days before expiry should return next expiry). Handle edge cases: if 5th falls on weekend/holiday, use next trading day. Add comprehensive unit tests for various dates and scenarios.",
-            "status": "pending",
-            "testStrategy": "Test expiry calculation for multiple months and years. Test edge cases: 5th on weekend, last Thursday on holiday, leap years. Test rollover timing (3 days before expiry). Verify both current and next expiry logic."
+            "status": "done",
+            "testStrategy": "Test expiry calculation for multiple months and years. Test edge cases: 5th on weekend, last Thursday on holiday, leap years. Test rollover timing (3 days before expiry). Verify both current and next expiry logic.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.479Z"
           },
           {
             "id": 3,
@@ -813,9 +817,11 @@
             "dependencies": [
               1
             ],
-            "details": "Implement rounding logic: round(price / step) * step with proper handling of 0.5 cases (round up). Support configurable step size (100 for Bank Nifty, extensible for others). Add validation for reasonable price ranges. Include comprehensive unit tests covering: 50,347→50,300, 50,350→50,400, 50,399→50,400, exact strikes, negative prices (error case), zero/None handling.",
-            "status": "pending",
-            "testStrategy": "Test all rounding scenarios from specification. Test with different step sizes (50, 100, 500). Test edge cases: exact strikes, midpoints, boundary values. Test error handling for invalid inputs."
+            "details": "Implement rounding logic: round(price / step) * step with proper handling of 0.5 cases (round up). Support configurable step size (100 for Bank Nifty, extensible for others). Add validation for reasonable price ranges. Include comprehensive unit tests covering: 50,347→50,300, 50,350→50,400, 50,399→50,400, exact strikes, negative prices (error case), zero/None handling.\n<info added on 2025-12-07T14:52:50.833Z>\nUpdated ATM strike calculation requirement: Round to nearest 500 instead of nearest 100, with preference for 1000s over 500s when equidistant. Logic: First round to nearest 500, then if the result is exactly between two 500-step strikes and one of them is a 1000-step strike, prefer the 1000. Examples: 50347→50500 (nearest 500), 50750→51000 (prefer 1000 over 500), 50250→50000 (prefer 1000 when equidistant). Update step size from 100 to 500 for Bank Nifty. Modify unit tests accordingly: 50347→50500, 50750→51000, 50250→50000, 50500→50500 (exact), 51000→51000 (exact 1000).\n</info added on 2025-12-07T14:52:50.833Z>",
+            "status": "done",
+            "testStrategy": "Test all rounding scenarios from specification. Test with different step sizes (50, 100, 500). Test edge cases: exact strikes, midpoints, boundary values. Test error handling for invalid inputs.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.486Z"
           },
           {
             "id": 4,
@@ -826,8 +832,10 @@
               2
             ],
             "details": "Implement GOLD_MINI translation logic: call get_next_expiry() for Gold Mini, format date as DDMMMYY (e.g., 05JAN26), construct symbol as GOLDM{date}FUT. Return TranslatedSymbol with single symbol in openalgo_symbols list, exchange=MCX, is_synthetic=False. Add validation for symbol format. Include unit tests with various dates to verify format correctness and dynamic expiry handling.",
-            "status": "pending",
-            "testStrategy": "Test symbol generation for multiple months/years. Verify format matches OpenAlgo specification. Test with mock expiry dates. Verify TranslatedSymbol structure is correct."
+            "status": "done",
+            "testStrategy": "Test symbol generation for multiple months/years. Verify format matches OpenAlgo specification. Test with mock expiry dates. Verify TranslatedSymbol structure is correct.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.491Z"
           },
           {
             "id": 5,
@@ -839,8 +847,10 @@
               3
             ],
             "details": "Implement BANK_NIFTY translation logic: requires current price as parameter, call calculate_atm_strike() with price, call get_next_expiry() for Bank Nifty, format date as DDMMMYY, construct TWO symbols: BANKNIFTY{date}{strike}PE and BANKNIFTY{date}{strike}CE. Return TranslatedSymbol with TWO symbols in openalgo_symbols list, exchange=NFO, is_synthetic=True, include strike value. Add validation for symbol format. Handle missing price error case.",
-            "status": "pending",
-            "testStrategy": "Test with various Bank Nifty prices and dates. Verify TWO symbols generated correctly. Test ATM strike integration. Verify format matches OpenAlgo specification. Test error handling for missing price."
+            "status": "done",
+            "testStrategy": "Test with various Bank Nifty prices and dates. Verify TWO symbols generated correctly. Test ATM strike integration. Verify format matches OpenAlgo specification. Test error handling for missing price.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.496Z"
           },
           {
             "id": 6,
@@ -848,8 +858,10 @@
             "description": "Create PriceProvider class/interface to fetch current market prices from OpenAlgo API. Required for ATM strike calculation in Bank Nifty translation. Support both live and mock implementations for testing.",
             "dependencies": [],
             "details": "Create PriceProvider abstract base class with get_current_price(symbol: str) method. Implement OpenAlgoPriceProvider that calls OpenAlgo price API endpoint. Implement MockPriceProvider for testing with configurable price returns. Add error handling for API failures, market closed scenarios, and invalid symbols. Include retry logic with exponential backoff. Add caching with short TTL (5-10 seconds) to avoid excessive API calls.",
-            "status": "pending",
-            "testStrategy": "Test OpenAlgo API integration with real endpoint. Test error handling for API failures. Test MockPriceProvider with various scenarios. Test caching behavior and TTL expiry."
+            "status": "done",
+            "testStrategy": "Test OpenAlgo API integration with real endpoint. Test error handling for API failures. Test MockPriceProvider with various scenarios. Test caching behavior and TTL expiry.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.502Z"
           },
           {
             "id": 7,
@@ -860,8 +872,10 @@
               6
             ],
             "details": "Add PriceProvider as constructor parameter to SymbolMapper. Update BANK_NIFTY translation logic to fetch current price using price_provider.get_current_price('BANK_NIFTY' or appropriate index symbol). Handle price fetch failures gracefully with clear error messages. Add optional price parameter to translate() for testing/override scenarios. Update all unit tests to use MockPriceProvider.",
-            "status": "pending",
-            "testStrategy": "Test Bank Nifty translation with live price fetch. Test with MockPriceProvider. Test error handling when price fetch fails. Test optional price override parameter."
+            "status": "done",
+            "testStrategy": "Test Bank Nifty translation with live price fetch. Test with MockPriceProvider. Test error handling when price fetch fails. Test optional price override parameter.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.507Z"
           },
           {
             "id": 8,
@@ -871,8 +885,10 @@
               7
             ],
             "details": "Add SymbolMapper instance to OrderExecutor. Before placing order, call symbol_mapper.translate(signal.symbol) to get TranslatedSymbol. For simple futures (is_synthetic=False): place single order with openalgo_symbols[0]. For synthetic futures (is_synthetic=True): prepare TWO orders (PE sell, CE buy). Update order placement logic to use translated symbols. Add logging for symbol translation. Preserve existing order execution logic, only add translation layer.",
-            "status": "pending",
-            "testStrategy": "Test Gold Mini order with symbol translation. Test Bank Nifty order preparation (TWO orders). Mock SymbolMapper for unit tests. Integration test with full order flow."
+            "status": "done",
+            "testStrategy": "Test Gold Mini order with symbol translation. Test Bank Nifty order preparation (TWO orders). Mock SymbolMapper for unit tests. Integration test with full order flow.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.512Z"
           },
           {
             "id": 9,
@@ -882,8 +898,10 @@
               8
             ],
             "details": "Implement atomic two-leg execution: 1) Place PE Sell order, wait for confirmation, store order ID. 2) Place CE Buy order, wait for confirmation. 3) If CE Buy fails, immediately place opposite order to close PE position (PE Buy to exit). Add comprehensive error handling and logging. Track both leg order IDs together. Add timeout handling (if confirmation takes too long, attempt rollback). Include state tracking for partial fills. Add alerts/notifications for rollback scenarios.",
-            "status": "pending",
-            "testStrategy": "Test successful two-leg execution. Test second leg failure with rollback. Test first leg failure (no second leg placed). Test timeout scenarios. Test partial fill handling. Mock broker API for controlled failure scenarios."
+            "status": "done",
+            "testStrategy": "Test successful two-leg execution. Test second leg failure with rollback. Test first leg failure (no second leg placed). Test timeout scenarios. Test partial fill handling. Mock broker API for controlled failure scenarios.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.517Z"
           },
           {
             "id": 10,
@@ -893,8 +911,10 @@
               2
             ],
             "details": "Add rollover detection in SymbolMapper: check if current date is within rollover window (configurable, default 3 days) of expiry. If yes, use next expiry instead of current. Add configuration for rollover_days per instrument (Gold Mini: 3 days, Bank Nifty: 5 days). Add logging when rollover occurs. Consider existing positions (don't rollover existing positions, only new entries). Add manual override capability for testing.",
-            "status": "pending",
-            "testStrategy": "Test rollover detection at various dates relative to expiry. Test with different rollover windows. Test that existing positions aren't affected. Test manual override. Test logging output."
+            "status": "done",
+            "testStrategy": "Test rollover detection at various dates relative to expiry. Test with different rollover windows. Test that existing positions aren't affected. Test manual override. Test logging output.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:08.523Z"
           },
           {
             "id": 11,
@@ -905,8 +925,10 @@
               10
             ],
             "details": "Create tests/unit/test_symbol_mapper.py with test cases for: Gold Mini translation (multiple dates), Bank Nifty translation (various prices), ATM strike calculation (all scenarios from specification), expiry calculation (both instruments, edge cases), rollover logic, error handling (missing price, invalid symbol), TranslatedSymbol dataclass, configuration loading. Use pytest fixtures for common setup. Mock PriceProvider for controlled testing.",
-            "status": "pending",
-            "testStrategy": "Run pytest with coverage report. Verify >90% coverage. Test all edge cases from specification. Verify all error paths are tested."
+            "status": "done",
+            "testStrategy": "Run pytest with coverage report. Verify >90% coverage. Test all edge cases from specification. Verify all error paths are tested.",
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T16:56:02.552Z"
           },
           {
             "id": 12,
@@ -917,7 +939,8 @@
             ],
             "details": "Create tests/integration/test_symbol_translation_openalgo.py with tests for: Symbol format validation via OpenAlgo API, price fetch integration, order placement with translated symbols (paper trading), broker adapter abstraction (test with multiple brokers if possible). Use real OpenAlgo instance or staging environment. Add configuration for test credentials. Include cleanup logic to cancel test orders.",
             "status": "pending",
-            "testStrategy": "Run against OpenAlgo staging/test environment. Verify symbols are accepted. Test with Dhan broker adapter. Verify no broker-specific code needed. Check order responses for correct symbol format."
+            "testStrategy": "Run against OpenAlgo staging/test environment. Verify symbols are accepted. Test with Dhan broker adapter. Verify no broker-specific code needed. Check order responses for correct symbol format.",
+            "parentId": "undefined"
           },
           {
             "id": 13,
@@ -928,7 +951,8 @@
             ],
             "details": "Add structured logging for: symbol translation requests/results, ATM strike calculations, expiry rollovers, two-leg execution status, rollback events. Add metrics: translation success/failure rates, rollback frequency, price fetch latency. Add alerts for: repeated translation failures, rollback events (critical), price fetch failures. Integrate with existing monitoring system (HA status updates). Include context in logs (signal ID, timestamp, prices, strikes).",
             "status": "pending",
-            "testStrategy": "Verify logs are structured and parseable. Test alert triggering for failure scenarios. Verify metrics are collected correctly. Test log volume under load."
+            "testStrategy": "Verify logs are structured and parseable. Test alert triggering for failure scenarios. Verify metrics are collected correctly. Test log volume under load.",
+            "parentId": "undefined"
           },
           {
             "id": 14,
@@ -939,22 +963,244 @@
             ],
             "details": "Create documentation covering: architecture diagram (signal flow from TradingView to broker), SymbolMapper API reference, configuration options (rollover timing, strike steps, expiry rules), PriceProvider setup, troubleshooting guide (common errors, resolution steps), operational runbook (monitoring rollover, handling rollback alerts, adding new instruments), testing procedures. Reference SYMBOL_MAPPING_DESIGN.md. Include examples for each instrument type.",
             "status": "pending",
-            "testStrategy": "Review documentation with team. Verify all configuration options documented. Test troubleshooting steps. Ensure runbook covers all operational scenarios."
+            "testStrategy": "Review documentation with team. Verify all configuration options documented. Test troubleshooting steps. Ensure runbook covers all operational scenarios.",
+            "parentId": "undefined"
+          },
+          {
+            "id": 15,
+            "title": "Implement Holiday Calendar with CSV Loading",
+            "description": "Create holiday calendar system that loads NSE and MCX trading holidays from CSV files. Support 2025 calendar initially with structure for future years. Integrate with expiry calculation to adjust for holidays (if expiry falls on holiday, use previous trading day).",
+            "details": "Create core/holiday_calendar.py with: 1) HolidayCalendar class with load_from_csv(exchange, filepath) method, 2) Support separate calendars for NSE (Bank Nifty) and MCX (Gold Mini), 3) CSV format: date,exchange,description (e.g., 2025-01-26,NSE,Republic Day), 4) is_holiday(date, exchange) method, 5) get_previous_trading_day(date, exchange) method for expiry adjustment, 6) Store holidays in memory with optional persistence to db_config.json or separate file. User will provide NSE and MCX 2025 holiday CSV files.",
+            "status": "done",
+            "dependencies": [
+              2
+            ],
+            "parentTaskId": 33,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:32.408Z"
+          },
+          {
+            "id": 16,
+            "title": "Add REST Endpoint to Update Holiday Calendar",
+            "description": "Add REST API endpoint in portfolio_manager.py to upload/update holiday calendars from frontend. Support CSV upload and individual holiday add/remove operations.",
+            "details": "Add endpoints: 1) POST /holidays/upload - Upload CSV file for exchange (NSE or MCX), replace existing calendar, 2) GET /holidays/{exchange} - Get current holidays for exchange, 3) POST /holidays/{exchange} - Add single holiday {date, description}, 4) DELETE /holidays/{exchange}/{date} - Remove holiday. Include validation for date format and exchange. Persist changes to disk. Add authentication (use same EMERGENCY_API_KEY for admin operations). Return success/failure with count of holidays loaded.",
+            "status": "done",
+            "dependencies": [
+              15
+            ],
+            "parentTaskId": 33,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T15:47:32.410Z"
+          }
+        ],
+        "updatedAt": "2025-12-07T16:56:02.552Z"
+      },
+      {
+        "id": "34",
+        "title": "Implement 5 REST API Endpoints for Frontend Dashboard Integration",
+        "description": "Create 5 REST API endpoints in portfolio_manager.py to support the Lovable frontend dashboard, including endpoints for Risk Management page, Dashboard equity curve chart, and Operations page functionality.",
+        "details": "**Objective:** Implement production-ready REST API endpoints to enable full frontend dashboard functionality.\n\n**Endpoints to Implement:**\n\n1. **GET /api/risk-metrics** - Risk Management Page\n   - Return current portfolio risk metrics\n   - Response: `{ \"total_exposure\": float, \"margin_used\": float, \"margin_available\": float, \"risk_per_trade\": float, \"max_drawdown\": float, \"current_positions\": int, \"max_positions\": int }`\n   - Source data from PortfolioStateManager\n   - Include timestamp and instance_id for HA awareness\n\n2. **GET /api/equity-curve** - Dashboard Equity Curve Chart\n   - Return historical equity curve data for charting\n   - Query params: `?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&interval=daily|hourly`\n   - Response: `{ \"timestamps\": [], \"equity_values\": [], \"drawdown_values\": [], \"benchmark_values\": [] }`\n   - Query from PostgreSQL trades/positions history\n   - Calculate cumulative P&L over time\n\n3. **GET /api/operations/status** - Operations Page Status\n   - Return system operational status\n   - Response: `{ \"instance_id\": str, \"role\": \"leader|follower\", \"uptime_seconds\": int, \"last_signal_time\": timestamp, \"active_positions\": int, \"pending_orders\": int, \"system_health\": \"healthy|degraded|unhealthy\" }`\n   - Integrate with HAManager for role information\n   - Include Redis connectivity status\n\n4. **GET /api/positions** - Current Positions List\n   - Return all active positions with details\n   - Response: `{ \"positions\": [{ \"symbol\": str, \"quantity\": int, \"entry_price\": float, \"current_price\": float, \"unrealized_pnl\": float, \"entry_time\": timestamp }] }`\n   - Source from PortfolioStateManager.positions\n   - Include real-time P&L calculations\n\n5. **GET /api/trades/history** - Trade History\n   - Return paginated trade history\n   - Query params: `?page=1&limit=50&symbol=GOLD_MINI&status=closed`\n   - Response: `{ \"trades\": [], \"total_count\": int, \"page\": int, \"limit\": int }`\n   - Query from PostgreSQL trades table\n   - Support filtering by symbol, date range, status\n\n**Implementation Requirements:**\n\n- Use Flask blueprints for organization\n- Add CORS headers for frontend access\n- Implement request validation with error handling\n- Add rate limiting (100 requests/minute per IP)\n- Include authentication middleware (API key validation)\n- Log all API requests with response times\n- Return consistent error format: `{ \"error\": str, \"code\": str, \"timestamp\": str }`\n- Add Prometheus metrics for endpoint latency\n- Ensure thread-safe access to shared state\n\n**Error Handling:**\n- 400: Invalid request parameters\n- 401: Unauthorized (missing/invalid API key)\n- 404: Resource not found\n- 500: Internal server error\n- 503: Service unavailable (Redis/DB down)\n\n**Performance Considerations:**\n- Cache risk metrics for 5 seconds (avoid recalculation on every request)\n- Use database connection pooling for history queries\n- Implement pagination for large result sets\n- Add response compression for equity curve data",
+        "testStrategy": "**Unit Tests:**\n1. Test each endpoint with valid requests and verify response structure\n2. Test query parameter validation (invalid dates, negative limits, etc.)\n3. Test error responses for missing authentication\n4. Test pagination logic for trade history endpoint\n5. Mock PortfolioStateManager and verify data retrieval\n6. Test CORS headers are present in responses\n7. Test rate limiting triggers after threshold\n\n**Integration Tests:**\n1. Test /api/risk-metrics returns accurate data from live PortfolioStateManager\n2. Test /api/equity-curve queries PostgreSQL correctly with date filters\n3. Test /api/operations/status reflects actual HAManager role (leader/follower)\n4. Test /api/positions returns real-time position data\n5. Test /api/trades/history pagination with 100+ trades in database\n6. Verify all endpoints work when Redis is unavailable (graceful degradation)\n7. Test concurrent requests to same endpoint (thread safety)\n\n**Manual Testing:**\n1. Use Postman/curl to verify all 5 endpoints return expected JSON\n2. Test frontend dashboard integration with real API calls\n3. Verify equity curve chart renders correctly with returned data\n4. Test Operations page updates in real-time\n5. Verify API key authentication blocks unauthorized requests\n6. Load test with 200 concurrent requests to verify rate limiting\n7. Monitor Prometheus metrics for endpoint latency (target: <100ms p95)\n\n**Acceptance Criteria:**\n- All 5 endpoints return valid JSON responses\n- Frontend dashboard displays data without errors\n- API response times under 100ms for 95th percentile\n- Rate limiting prevents abuse\n- Error responses are consistent and informative",
+        "status": "pending",
+        "dependencies": [
+          "1",
+          "12",
+          "33"
+        ],
+        "priority": "medium",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Implement GET /equity endpoint",
+            "description": "Create endpoint to return historical equity curve data for the Dashboard chart. Should return timestamped equity values from portfolio_state table for charting.",
+            "details": "Priority: Medium. Used by: Dashboard Equity Curve chart. Return format: array of {timestamp, equity, closedEquity, openEquity} objects.",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 34,
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Implement GET /risk/constraints endpoint",
+            "description": "Create endpoint to return per-instrument Tom Basso 3-constraint calculations (risk, volatility, margin constraints) for the Risk Management page.",
+            "details": "Priority: Medium. Used by: Risk page - Tom Basso 3-Constraint Sizing section. Return format: per-instrument constraint values and which constraint is limiting.",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 34,
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Implement GET /risk/pyramid-gates endpoint",
+            "description": "Create endpoint to return pyramid gate status for each instrument showing whether pyramids are allowed, blocked, or at warning level.",
+            "details": "Priority: Medium. Used by: Risk page - Pyramid Gate Status section. Return format: per-instrument gate status (open/warning/blocked) and current levels.",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 34,
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement GET /rollover/history endpoint",
+            "description": "Create endpoint to return historical rollover executions with details like old/new contracts, slippage, and execution status.",
+            "details": "Priority: Low. Used by: Operations page - Rollover History tab. Return format: array of past rollover records with timestamps and execution details.",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 34,
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Implement GET /logs endpoint",
+            "description": "Create endpoint to return recent system logs with timestamp, level (INFO/WARNING/ERROR), and message for the Operations page System Logs tab.",
+            "details": "Priority: Low. Used by: Operations page - System Logs tab. Return format: array of log entries with filtering by level and search capability.",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 34,
+            "parentId": "undefined"
           }
         ]
+      },
+      {
+        "id": "35",
+        "title": "Implement Live Trading Safety Features and Emergency Controls",
+        "description": "Implement comprehensive safety measures for live trading including pre-order margin checks with voice alerts, emergency kill switch endpoints, broker state synchronization, startup reconciliation, signal validation safety rules, and Telegram bot integration for notifications and remote control.",
+        "details": "**Objective:** Add critical safety layers before enabling live trading to prevent margin calls, detect state drift, and provide emergency controls.\n\n**1. PRE-ORDER MARGIN SAFETY CHECK (live/margin_safety.py)**\n- Create MarginSafetyChecker class\n- Method: `check_margin_before_order(order_value: float) -> MarginCheckResult`\n- Query broker API for current margin utilization percentage\n- Logic:\n  * < 50%: Allow order, no alert\n  * 50-79%: Allow order, trigger voice alert \"Warning: Margin utilization at X percent\"\n  * >= 80%: Block order, loud voice alert \"Critical: Margin utilization at X percent. Order blocked. Manual override required.\"\n- Return enum: ALLOWED, ALLOWED_WITH_WARNING, BLOCKED\n- Integrate into LiveTradingEngine.execute_order() before broker API call\n- Use text-to-speech library (pyttsx3 or gTTS) for voice alerts\n- Add override mechanism: `override_margin_block(order_id, admin_token) -> bool`\n\n**2. KILL SWITCH ENDPOINTS (portfolio_manager.py)**\n- Add emergency control endpoints:\n  * `POST /emergency/stop` - Set global flag `trading_paused = True`, stop accepting new signals\n  * `POST /emergency/resume` - Set `trading_paused = False`, resume normal operation\n  * `POST /emergency/close-all` - Iterate all open positions, place market orders to exit immediately, log all actions\n- Require authentication token for emergency endpoints\n- Update `GET /health` response to include: `{ \"trading_paused\": bool, \"emergency_mode\": bool }`\n- Add middleware to check `trading_paused` flag before processing any signal\n- Log all emergency actions with timestamp and reason\n\n**3. BROKER STATE SYNC (live/broker_sync.py)**\n- Create BrokerStateSynchronizer class\n- Method: `sync_positions() -> SyncReport`\n- Fetch positions from broker API\n- Compare with PortfolioStateManager.get_all_positions()\n- Detect discrepancies:\n  * Position in broker but not in PM (orphaned position)\n  * Position in PM but not in broker (ghost position)\n  * Quantity mismatch for same instrument\n- Generate SyncReport with list of discrepancies\n- If discrepancies found: Send Telegram alert, log to database\n- Implement periodic sync: Background thread running every 5 minutes\n- Add manual sync endpoint: `POST /sync/broker` returns SyncReport JSON\n- Store sync history in database table: sync_reports (timestamp, discrepancies_found, details)\n\n**4. STARTUP RECONCILIATION (live/startup_reconciliation.py)**\n- Create StartupReconciliator class\n- Method: `reconcile_on_startup() -> ReconciliationResult`\n- Called in portfolio_manager.py startup sequence after CrashRecoveryManager\n- Steps:\n  1. Load positions from database (via PortfolioStateManager)\n  2. Fetch positions from broker API\n  3. Compare and detect mismatches\n  4. Generate reconciliation report\n- If mismatches found:\n  * Log all discrepancies with details\n  * Send Telegram alert with summary\n  * Option 1: Auto-sync (update PM state to match broker) - configurable\n  * Option 2: Require manual resolution (block trading until resolved)\n- Configuration: `auto_sync_on_startup: bool` in config\n- Return ReconciliationResult: { \"status\": \"OK\" | \"MISMATCH\", \"discrepancies\": [...], \"action_taken\": \"auto_synced\" | \"manual_required\" }\n\n**5. SIGNAL VALIDATION SAFETY (live/signal_safety_validator.py)**\n- Create SignalSafetyValidator class (separate from Task 30's price validation)\n- Method: `validate_signal_safety(signal: dict) -> ValidationResult`\n- Checks:\n  1. **Market Hours Check:**\n     - NSE: 9:15 AM - 3:30 PM IST\n     - MCX: 9:00 AM - 11:30 PM IST\n     - Reject signals outside hours with reason \"OUTSIDE_MARKET_HOURS\"\n  2. **Instrument Whitelist Check:**\n     - Load allowed instruments from config\n     - Reject if signal.instrument not in whitelist with reason \"INSTRUMENT_NOT_ALLOWED\"\n  3. **Price Deviation Check:**\n     - Fetch last known price from broker or cache\n     - Calculate deviation: abs(signal_price - last_price) / last_price\n     - Reject if deviation > 5% with reason \"PRICE_DEVIATION_EXCEEDED\"\n- Log all rejected signals to database: rejected_signals (timestamp, signal_data, rejection_reason)\n- Return ValidationResult: { \"valid\": bool, \"reason\": str | None }\n- Integrate into signal processing pipeline before Task 30's validation\n\n**6. TELEGRAM BOT INTEGRATION (integrations/telegram_bot.py)**\n- Use python-telegram-bot library\n- Create TelegramNotifier class\n- Configuration: Store bot_token and chat_id in config/telegram_config.json\n- Message Types:\n  * **INFO**: New signal received, Order placed, Position opened, Position closed, Daily P&L summary\n  * **ALERT**: Order failure, Margin warning (>50%), Sync discrepancy, System error, Emergency action\n- Formatting: Use Telegram markdown for structured messages\n- Methods:\n  * `send_info(message: str)`\n  * `send_alert(message: str)` - Use bold/emoji for visibility\n  * `send_daily_summary()` - Scheduled at 3:30 PM IST\n- Bot Commands (webhook or polling):\n  * `/status` - Return current system status, positions count, margin usage\n  * `/positions` - List all open positions with P&L\n  * `/pause` - Call emergency/stop endpoint\n  * `/resume` - Call emergency/resume endpoint\n- Implement command handler with authentication (whitelist chat_ids)\n- Add retry logic for failed message sends (3 retries with exponential backoff)\n\n**Integration Points:**\n- Margin check: Integrate into LiveTradingEngine.execute_order() (before broker call)\n- Kill switch: Add middleware in portfolio_manager.py signal processing\n- Broker sync: Start background thread in main() after initialization\n- Startup reconciliation: Call in main() after CrashRecoveryManager.load_state()\n- Signal safety validation: Add to signal processing pipeline before SignalValidator (Task 30)\n- Telegram: Initialize in main(), inject into all components for notifications\n\n**Configuration Files:**\n- config/safety_config.json: margin thresholds, sync interval, auto_sync_on_startup\n- config/telegram_config.json: bot_token, chat_id, allowed_commands\n- config/market_hours.json: NSE and MCX trading hours\n- config/allowed_instruments.json: Whitelist of tradeable instruments",
+        "testStrategy": "**Unit Tests:**\n\n1. **MarginSafetyChecker Tests (test_margin_safety.py):**\n   - Test margin check at 30%, 50%, 80%, 95% utilization\n   - Verify correct MarginCheckResult returned\n   - Mock voice alert calls and verify invocation\n   - Test override mechanism with valid/invalid tokens\n\n2. **Kill Switch Endpoint Tests (test_emergency_endpoints.py):**\n   - Test POST /emergency/stop sets trading_paused flag\n   - Test POST /emergency/resume clears flag\n   - Test POST /emergency/close-all with mock positions\n   - Verify /health endpoint includes trading_paused status\n   - Test authentication for emergency endpoints\n\n3. **BrokerStateSynchronizer Tests (test_broker_sync.py):**\n   - Mock broker API responses with various position states\n   - Test detection of orphaned positions (broker only)\n   - Test detection of ghost positions (PM only)\n   - Test quantity mismatch detection\n   - Test SyncReport generation\n   - Test periodic sync background thread\n\n4. **StartupReconciliator Tests (test_startup_reconciliation.py):**\n   - Test reconciliation with matching positions (no discrepancies)\n   - Test reconciliation with mismatches\n   - Test auto-sync mode (updates PM state)\n   - Test manual resolution mode (blocks trading)\n   - Verify ReconciliationResult structure\n\n5. **SignalSafetyValidator Tests (test_signal_safety_validator.py):**\n   - Test market hours validation for NSE and MCX\n   - Test signals at 9:00 AM, 3:00 PM, 5:00 PM (various times)\n   - Test instrument whitelist validation\n   - Test price deviation check with 3%, 5%, 7% deviations\n   - Test rejected signals logging to database\n\n6. **TelegramNotifier Tests (test_telegram_bot.py):**\n   - Mock telegram bot API calls\n   - Test send_info and send_alert methods\n   - Test message formatting and markdown\n   - Test command handlers (/status, /positions, /pause, /resume)\n   - Test authentication for commands\n   - Test retry logic for failed sends\n\n**Integration Tests:**\n\n1. **End-to-End Margin Safety Test:**\n   - Start PM with mock broker showing 85% margin usage\n   - Send signal that would trigger order\n   - Verify order is blocked and alert is sent\n\n2. **Kill Switch Integration Test:**\n   - Start PM, send signal (should process)\n   - Call POST /emergency/stop\n   - Send another signal (should be rejected)\n   - Call POST /emergency/resume\n   - Send signal (should process again)\n\n3. **Broker Sync Integration Test:**\n   - Start PM with positions in database\n   - Mock broker API with different positions\n   - Trigger manual sync via POST /sync/broker\n   - Verify SyncReport shows discrepancies\n   - Verify Telegram alert sent\n\n4. **Startup Reconciliation Integration Test:**\n   - Populate database with positions\n   - Mock broker API with mismatched positions\n   - Restart PM\n   - Verify reconciliation runs and reports mismatches\n   - Test both auto-sync and manual modes\n\n5. **Signal Safety Pipeline Test:**\n   - Send signal outside market hours (should reject)\n   - Send signal for non-whitelisted instrument (should reject)\n   - Send signal with 10% price deviation (should reject)\n   - Verify all rejections logged to database\n\n6. **Telegram Bot Integration Test:**\n   - Start PM with Telegram bot enabled\n   - Trigger various events (signal received, order placed, margin warning)\n   - Verify INFO and ALERT messages sent to Telegram\n   - Test bot commands via mock Telegram updates\n\n**Manual Testing:**\n\n1. Test voice alerts by manually triggering margin warnings\n2. Test emergency endpoints via curl/Postman\n3. Test Telegram bot commands from actual Telegram client\n4. Verify daily summary sent at 3:30 PM IST\n5. Test complete safety pipeline with live broker connection (paper trading mode)",
+        "status": "done",
+        "dependencies": [
+          "1",
+          "30",
+          "33"
+        ],
+        "priority": "high",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Pre-Order Margin Safety Check",
+            "description": "Add margin utilization check before placing orders. At 50%: voice warning + proceed. At 80%: block order + loud alert + require manual override.",
+            "details": "Integrate into order execution flow in live/engine.py. Check margin_utilization_percent from PortfolioState before execute(). Add override parameter to bypass for emergencies.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T14:17:37.342Z"
+          },
+          {
+            "id": 2,
+            "title": "Kill Switch Endpoints",
+            "description": "Implement emergency control endpoints: POST /emergency/stop (pause signals), POST /emergency/resume, POST /emergency/close-all (exit all positions at market).",
+            "details": "Add trading_paused flag to engine. When paused, webhook returns 503 with message. close-all iterates all positions and places market exit orders. Add status to /health endpoint.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T14:17:37.344Z"
+          },
+          {
+            "id": 3,
+            "title": "Broker State Sync",
+            "description": "Implement periodic sync with broker positions (every 5 min) and manual sync endpoint POST /sync/broker. Alert on discrepancies between PM and broker state.",
+            "details": "Use OpenAlgo/Zerodha API to fetch actual positions. Compare with PortfolioState. Log and alert any mismatch. Integrate existing sync_from_broker.py logic.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T14:17:37.346Z"
+          },
+          {
+            "id": 4,
+            "title": "Startup Reconciliation",
+            "description": "On PM startup, reconcile database positions with broker positions. Alert on mismatch, optionally auto-sync or require manual resolution.",
+            "details": "Add startup check in run_live() after engine initialization. Compare DB positions with broker API response. Log discrepancies. Add --skip-reconciliation flag for development.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T14:17:37.349Z"
+          },
+          {
+            "id": 5,
+            "title": "Signal Validation Safety",
+            "description": "Add safety validations: reject signals outside market hours, for unknown instruments, or with price > 5% deviation from last known price.",
+            "details": "Enhance signal_validator.py with market hours check (NSE 9:15-15:30, MCX 9:00-23:30). Add price sanity check against last trade price or LTP. Log rejected signals with reason.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T14:17:37.351Z"
+          },
+          {
+            "id": 6,
+            "title": "Telegram Bot Integration",
+            "description": "Create Telegram bot for notifications. INFO: signals, orders, positions. ALERTS: failures, margin warnings, sync issues. Commands: /status, /positions, /pause, /resume.",
+            "details": "Use python-telegram-bot library. Create core/telegram_notifier.py. Store TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in config or env. Integrate with voice_announcer for dual notification. Send daily summary at EOD.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "parentId": "undefined",
+            "updatedAt": "2025-12-07T14:17:37.353Z"
+          }
+        ],
+        "updatedAt": "2025-12-07T14:17:37.353Z"
+      },
+      {
+        "id": "36",
+        "title": "CRITICAL: Add Authentication to Emergency Endpoints",
+        "description": "Add API key authentication to emergency endpoints (/emergency/stop, /emergency/resume, /emergency/close-all) to prevent unauthorized access.",
+        "details": "**Location:** portfolio_manager.py:1475-1550\n\n**Risk:** HIGH - Anyone can pause trading or close all positions without authentication\n\n**Current State:**\n- POST /emergency/stop - No auth\n- POST /emergency/resume - No auth\n- POST /emergency/close-all - No auth (if implemented)\n\n**Fix:**\nAdd to each endpoint:\n```python\napi_key = request.headers.get('X-API-KEY')\nif api_key != os.environ.get('EMERGENCY_API_KEY'):\n    return jsonify({'error': 'Unauthorized'}), 401\n```\n\n**Estimated Time:** 15 minutes",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [],
+        "updatedAt": "2025-12-07T16:34:19.453Z"
+      },
+      {
+        "id": "37",
+        "title": "CRITICAL: Fix Bank Nifty Lot Size in Broker Sync (15→35)",
+        "description": "Update Bank Nifty lot size from 15 to 35 in broker_sync.py to prevent false reconciliation discrepancies.",
+        "details": "**Location:** core/broker_sync.py:324\n\n**Risk:** HIGH - Broker reconciliation will always show discrepancies\n\n**Current:** `return 15  # Bank Nifty lot size`\n**Should Be:** `return 35  # Current lot size (as of 2024-Nov)`\n\n**Impact:** \nSync will detect false discrepancies.\nExample: 2 lots in PM = 70 qty, but broker sync calculates as 70/15 = 4 lots\n\n**Fix:**\n```python\n# Line 324\nreturn 35  # Bank Nifty lot size (as of Nov 2024)\n```\n\n**Estimated Time:** 5 minutes",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [],
+        "updatedAt": "2025-12-07T16:34:19.461Z"
+      },
+      {
+        "id": "38",
+        "title": "CRITICAL: Implement Real Exit Execution (Replace Mock)",
+        "description": "Replace mock exit execution with actual OpenAlgo API calls or OrderExecutor integration. Currently exits return fake success without placing broker orders.",
+        "details": "**Location:** live/engine.py:1033-1043\n\n**Risk:** HIGH - Real exits won't execute in live mode\n\n**Current Flow:**\n```\nEXIT Signal → _handle_exit_live()\n    → calls _execute_exit_openalgo(position)\n    → returns MOCK DATA (no actual order placed!)\n    → portfolio state updated as if exit happened\n    → BUT NO ORDER PLACED WITH BROKER\n```\n\n**Current Mock Code (lines 1033-1043):**\n```python\ndef _execute_exit_openalgo(self, position: Position) -> Dict:\n    logger.info(f\"[OPENALGO] Executing exit: {position.position_id}\")\n    # Mock for testing\n    return {'status': 'success', 'order_details': {'order_id': f'EXIT_{position.position_id}'}}\n```\n\n**Fix Options:**\n1. Use self.order_executor.execute() for exits (like entries) - most consistent\n2. Use SyntheticFuturesExecutor for Bank Nifty (reverse the entry legs)\n3. Implement direct OpenAlgo API calls\n\n**Also Affects:** /emergency/close-all endpoint\n\n**Estimated Time:** 30-60 minutes",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [],
+        "updatedAt": "2025-12-07T16:25:33.378Z"
+      },
+      {
+        "id": "39",
+        "title": "CRITICAL: Fix Undefined Variables in Pyramid Announcement",
+        "description": "Fix undefined est_risk and live_equity variables in _handle_pyramid_live() that will cause crash on pyramid execution.",
+        "details": "**Location:** live/engine.py:788-789\n\n**Risk:** MEDIUM - Will cause crash on pyramid execution\n\n**Current Code (broken):**\n```python\nrisk_amount=est_risk,      # ❌ est_risk not defined in _handle_pyramid_live\nrisk_percent=(est_risk / live_equity * 100) if live_equity > 0 else 0  # ❌ live_equity not defined\n```\n\n**Fix:**\nAdd before the announcer call:\n```python\ninst_config = get_instrument_config(inst_type)\nest_risk = (signal.price - signal.stop) * original_lots * inst_config.point_value\nlive_equity = self.portfolio.closed_equity\n```\n\n**Note:** These variables ARE defined in _handle_base_entry_live(), just need to replicate for pyramids.\n\n**Estimated Time:** 10 minutes",
+        "testStrategy": "",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [],
+        "updatedAt": "2025-12-07T16:34:19.477Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2025-12-02T11:49:52.650Z",
-      "taskCount": 31,
-      "completedCount": 20,
+      "lastModified": "2025-12-07T16:56:02.552Z",
+      "taskCount": 38,
+      "completedCount": 25,
       "tags": [
         "master"
-      ],
-      "created": "2025-12-03T16:13:06.388Z",
-      "description": "Tasks for master context",
-      "updated": "2025-12-03T16:13:06.390Z"
+      ]
     }
   }
 }

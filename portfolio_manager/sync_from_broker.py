@@ -48,21 +48,21 @@ def map_position_to_signal(position):
     """Map broker position to PM signal format"""
     # Determine instrument from symbol
     symbol = position.get('tradingsymbol', position.get('symbol', ''))
-    
+
     if 'GOLD' in symbol.upper():
         instrument = 'GOLD_MINI'
     elif 'BANKNIFTY' in symbol.upper():
         instrument = 'BANK_NIFTY'
     else:
         instrument = symbol
-    
+
     # Get position details
     qty = abs(int(position.get('netqty', position.get('quantity', 0))))
     buy_price = float(position.get('averageprice', position.get('buyavgprice', 0)))
-    
+
     if qty == 0:
         return None
-    
+
     # Create signal
     signal = {
         "type": "BASE_ENTRY",
@@ -77,7 +77,7 @@ def map_position_to_signal(position):
         "roc": 0.9,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     }
-    
+
     return signal
 
 def inject_into_pm(signal):
@@ -96,54 +96,54 @@ def main():
     parser.add_argument('--show', action='store_true', help='Show broker positions')
     parser.add_argument('--inject', action='store_true', help='Inject positions into PM')
     args = parser.parse_args()
-    
+
     if not args.show and not args.inject:
         args.show = True  # Default to show
-    
+
     # Load API key
     api_key = load_api_key()
     if not api_key or api_key == "YOUR_API_KEY_HERE":
         print("❌ Please configure API key in openalgo_config.json")
         return
-    
+
     print("=" * 60)
     print("🔄 Syncing positions from broker via OpenAlgo")
     print("=" * 60)
     print()
-    
+
     # Fetch positions
     positions = get_broker_positions(api_key)
-    
+
     if not positions:
         print("📭 No open positions found in broker")
         return
-    
+
     print(f"📊 Found {len(positions)} position(s):")
     print()
-    
+
     for i, pos in enumerate(positions, 1):
         symbol = pos.get('tradingsymbol', pos.get('symbol', 'Unknown'))
         qty = pos.get('netqty', pos.get('quantity', 0))
         avg_price = pos.get('averageprice', pos.get('buyavgprice', 0))
         pnl = pos.get('pnl', pos.get('unrealised', 0))
-        
+
         print(f"  {i}. {symbol}")
         print(f"     Qty: {qty}")
         print(f"     Avg Price: ₹{avg_price:,.2f}")
         print(f"     P&L: ₹{pnl:,.2f}")
         print()
-    
+
     if args.show:
         print("-" * 60)
         print("Raw position data:")
         print(json.dumps(positions, indent=2))
-    
+
     if args.inject:
         print()
         print("=" * 60)
         print("💉 Injecting positions into Portfolio Manager")
         print("=" * 60)
-        
+
         # Check if PM is running
         try:
             health = requests.get(f"{PM_URL}/health", timeout=5)
@@ -153,7 +153,7 @@ def main():
             print("❌ Portfolio Manager is not running!")
             print("   Start it first: python portfolio_manager.py live ...")
             return
-        
+
         for pos in positions:
             signal = map_position_to_signal(pos)
             if signal:
@@ -165,12 +165,9 @@ def main():
                     print(f"    ✗ Failed: {result}")
             else:
                 print(f"  → Skipping zero-qty position")
-        
+
         print()
         print("✅ Sync complete!")
 
 if __name__ == "__main__":
     main()
-
-
-

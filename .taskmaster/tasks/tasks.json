@@ -716,6 +716,21 @@
         ],
         "priority": "low",
         "subtasks": []
+      },
+      {
+        "id": 34,
+        "title": "Implement Dashboard API Endpoints",
+        "description": "Create 5 REST API endpoints in portfolio_manager.py to serve data for the Lovable frontend dashboard, covering Equity, Risk, and Operations views.",
+        "details": "1. Integrate a new API blueprint or set of routes into the `portfolio_manager.py` Flask/FastAPI application.\n2. Implement `GET /api/equity`: Query the `trading_statistics` table (from Task 28) to return historical equity and drawdown time-series data for the Dashboard chart.\n3. Implement `GET /api/positions`: Serialize `PortfolioStateManager.open_positions` (from Task 27) to return a JSON list of active trades with current PnL and risk data.\n4. Implement `GET /api/risk`: Return aggregated risk metrics (total exposure, margin usage, daily PnL) derived from the `PortfolioStateManager`.\n5. Implement `GET /api/signals`: Query the `signal_log` table (from Task 25) to return the most recent processed signals for the Operations page.\n6. Implement `GET /api/status`: Return extended system metadata including Leader Election status (from Task 22), Crash Recovery status, and connectivity health.\n7. Ensure all endpoints return standardized JSON responses and handle CORS headers for the frontend.",
+        "testStrategy": "1. Use `pytest` with a Flask test client to invoke each endpoint.\n2. Mock the `PortfolioStateManager` and Database sessions to inject sample data (positions, stats, logs).\n3. Verify that the JSON response structure matches the schema expected by the Lovable frontend (e.g., correct date formats, numeric precision).\n4. Test empty states (no positions, no history) to ensure endpoints return valid empty structures instead of 500 errors.",
+        "status": "pending",
+        "dependencies": [
+          25,
+          28,
+          30
+        ],
+        "priority": "medium",
+        "subtasks": []
       }
     ],
     "metadata": {
@@ -728,7 +743,7 @@
       ],
       "created": "2025-12-03T18:06:09.300Z",
       "description": "Tasks for master context",
-      "updated": "2025-12-03T18:14:20.397Z"
+      "updated": "2025-12-07T12:54:48.356Z"
     }
   }
 }

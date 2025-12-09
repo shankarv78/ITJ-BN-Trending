@@ -1,0 +1,46 @@
+# Pre-commit hooks for Portfolio Manager
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: debug-statements
+        # Catches print() and pdb statements
+
+  # Python code formatting (optional - uncomment to enable)
+  # - repo: https://github.com/psf/black
+  #   rev: 24.1.1
+  #   hooks:
+  #     - id: black
+  #       language_version: python3.10
+
+  # Type checking with mypy
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy type checker
+        entry: bash -c 'source venv/bin/activate && mypy --explicit-package-bases'
+        language: system
+        types: [python]
+        files: ^(core|live|brokers)/
+        pass_filenames: false
+        # Only runs when Python files in core/, live/, or brokers/ change
+
+  # Clear Python bytecode cache (prevents stale code issues)
+  - repo: local
+    hooks:
+      - id: clear-bytecode
+        name: clear bytecode cache
+        entry: bash -c 'find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true'
+        language: system
+        pass_filenames: false
+        always_run: true
