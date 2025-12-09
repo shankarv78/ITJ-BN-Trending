@@ -29,6 +29,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -74,4 +75,4 @@ node_modules/
 
 # Task files
 # tasks.json
-# tasks/ 
+# tasks/
