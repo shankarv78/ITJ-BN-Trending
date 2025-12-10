@@ -42,7 +42,15 @@ ENV/
 
 #Secrets
 portfolio_manager/database_config.json
+portfolio_manager/db_config.json
 .redis_instance_id
+
+# Runtime files
+portfolio_manager/.openalgo.pid
+portfolio_manager/.tunnel.pid
+
+# Frontend (separate repository)
+frontend/
 
 # Configuration (if contains secrets)
 # database_config.json

@@ -15,8 +15,8 @@
     "fallback": {
       "provider": "anthropic",
       "modelId": "claude-sonnet-4-5",
-      "maxTokens": 64000,
-      "temperature": 0.2
+      "maxTokens": "64000",
+      "temperature": "0.2"
     }
   },
   "global": {
