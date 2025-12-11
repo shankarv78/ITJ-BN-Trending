@@ -604,6 +604,120 @@ class VoiceAnnouncer:
                 time.sleep(1)
 
     # =========================================================================
+    # VALIDATION CONFIRMATION (BLOCKING DIALOG)
+    # =========================================================================
+
+    def request_validation_confirmation(
+        self,
+        instrument: str,
+        signal_type: str,
+        rejection_reason: str,
+        details: str
+    ) -> bool:
+        """
+        Show blocking dialog for validation failure confirmation.
+
+        Voice announces the issue every 5 seconds until user responds.
+        Returns True if user wants to execute anyway, False to reject.
+
+        Args:
+            instrument: e.g., "GOLD_MINI"
+            signal_type: e.g., "BASE_ENTRY", "PYRAMID"
+            rejection_reason: e.g., "signal_timestamp_in_future"
+            details: Additional context about the rejection
+
+        Returns:
+            True = Execute anyway, False = Reject signal
+        """
+        if not IS_MACOS:
+            logger.warning("Confirmation dialog only available on macOS. Auto-rejecting.")
+            return False
+
+        # Format the reason for display
+        reason_display = rejection_reason.replace('_', ' ').title()
+
+        # Build the dialog message
+        dialog_message = (
+            f"⚠️ SIGNAL VALIDATION FAILED\\n\\n"
+            f"Instrument: {instrument}\\n"
+            f"Signal: {signal_type}\\n"
+            f"Reason: {reason_display}\\n\\n"
+            f"Details: {details}\\n\\n"
+            f"Do you want to execute anyway?"
+        )
+
+        # Voice message
+        voice_message = (
+            f"Attention! {instrument} {signal_type.replace('_', ' ')} signal validation failed. "
+            f"Reason: {reason_display}. {details}. "
+            f"Please confirm whether to execute or reject."
+        )
+
+        # Start repeating voice announcement in background
+        stop_voice = threading.Event()
+
+        def voice_repeat_loop():
+            while not stop_voice.is_set():
+                if not self.silent_mode:
+                    self._speak(voice_message, priority="critical", voice="Alex")
+                # Wait 5 seconds before repeating, but check stop flag frequently
+                for _ in range(10):  # 10 × 0.5s = 5s
+                    if stop_voice.is_set():
+                        break
+                    time.sleep(0.5)
+
+        voice_thread = threading.Thread(target=voice_repeat_loop, daemon=True)
+        voice_thread.start()
+
+        try:
+            # AppleScript for native macOS dialog with two buttons
+            script = f'''
+            display dialog "{dialog_message}" ¬
+                with title "Signal Validation Failed" ¬
+                buttons {{"Reject Signal", "Execute Anyway"}} ¬
+                default button "Reject Signal" ¬
+                cancel button "Reject Signal" ¬
+                with icon caution
+            '''
+
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+
+            # Stop voice announcements
+            stop_voice.set()
+            voice_thread.join(timeout=2)
+
+            if result.returncode == 0:
+                # User clicked "Execute Anyway"
+                output = result.stdout.strip()
+                if "Execute Anyway" in output:
+                    logger.info(f"User approved execution despite validation failure: {rejection_reason}")
+                    if not self.silent_mode:
+                        self._speak("Executing signal as requested.", priority="high", voice="Samantha")
+                    return True
+
+            # User clicked "Reject Signal" or dialog was cancelled
+            logger.info(f"User confirmed rejection: {rejection_reason}")
+            if not self.silent_mode:
+                self._speak("Signal rejected.", priority="high", voice="Samantha")
+            return False
+
+        except subprocess.TimeoutExpired:
+            stop_voice.set()
+            logger.warning(f"Confirmation dialog timed out for {instrument} {signal_type}")
+            if not self.silent_mode:
+                self._speak("Confirmation timed out. Signal rejected for safety.", priority="high", voice="Alex")
+            return False
+        except Exception as e:
+            stop_voice.set()
+            logger.error(f"Failed to show confirmation dialog: {e}")
+            return False
+
+    # =========================================================================
     # LIFECYCLE
     # =========================================================================
 

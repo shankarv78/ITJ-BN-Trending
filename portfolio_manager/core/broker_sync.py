@@ -426,12 +426,23 @@ class BrokerSyncManager:
         return None
 
     def _get_lot_size_from_symbol(self, symbol: str) -> int:
-        """Get lot size from symbol (Dec 2024 values)"""
+        """
+        Get lot size divisor from symbol for converting broker quantity to lots.
+
+        Note: MCX futures (Gold, Silver, etc.) return quantity as number of contracts/lots
+        directly, so divisor is 1. NSE/BFO options return quantity in units, so we divide
+        by the lot size to get number of lots.
+        """
         symbol_upper = symbol.upper()
 
-        if 'GOLD' in symbol_upper:
-            return 100  # Gold Mini lot size
-        elif 'BANKNIFTY' in symbol_upper:
+        # MCX futures - broker returns lot count directly, not units
+        if 'GOLDM' in symbol_upper and 'FUT' in symbol_upper:
+            return 1  # Gold Mini futures: qty is already in lots
+        if 'SILVERM' in symbol_upper and 'FUT' in symbol_upper:
+            return 1  # Silver Mini futures: qty is already in lots
+
+        # NSE/BFO options - broker returns units, divide by lot size
+        if 'BANKNIFTY' in symbol_upper:
             return 35  # Bank Nifty lot size
         elif 'SENSEX' in symbol_upper:
             return 10

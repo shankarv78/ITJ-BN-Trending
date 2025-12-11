@@ -628,6 +628,10 @@ def run_live(args):
     # Setup Flask webhook receiver
     app = Flask(__name__)
 
+    # Disable werkzeug request logging (too noisy from frontend polling)
+    import logging as std_logging
+    std_logging.getLogger('werkzeug').setLevel(std_logging.WARNING)
+
     # CORS: Allow Lovable frontend (both production and preview domains) and localhost
     CORS(app, origins=[
         "https://67e5f3ed-4aa2-4971-859d-cdf8c8cacc46.lovableproject.com",  # Lovable production
@@ -2954,5 +2958,3 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
-

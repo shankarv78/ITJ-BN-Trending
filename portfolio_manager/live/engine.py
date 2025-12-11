@@ -302,16 +302,36 @@ class LiveTradingEngine:
             if not condition_result.is_valid:
                 age_str = f"{condition_result.signal_age_seconds:.1f}s" if condition_result.signal_age_seconds is not None else "N/A"
                 logger.warning(
-                    f"[LIVE] Signal rejected at condition validation: {condition_result.reason} "
-                    f"(age: {age_str})"
+                    f"[LIVE] Signal validation failed: {condition_result.reason} "
+                    f"(age: {age_str}) - requesting user confirmation"
                 )
-                return {
-                    'status': 'rejected',
-                    'reason': 'validation_failed',
-                    'validation_stage': 'condition',
-                    'validation_reason': condition_result.reason,
-                    'signal_age_seconds': condition_result.signal_age_seconds
-                }
+
+                # Request user confirmation via dialog + voice
+                announcer = get_announcer()
+                execute_anyway = False
+
+                if announcer:
+                    details = f"Signal age: {age_str}"
+                    execute_anyway = announcer.request_validation_confirmation(
+                        instrument=signal.instrument,
+                        signal_type=signal.signal_type.value,
+                        rejection_reason=condition_result.reason,
+                        details=details
+                    )
+                else:
+                    logger.warning("[LIVE] No voice announcer available - auto-rejecting validation failure")
+
+                if not execute_anyway:
+                    logger.info(f"[LIVE] Signal rejected after user confirmation: {condition_result.reason}")
+                    return {
+                        'status': 'rejected',
+                        'reason': 'validation_failed',
+                        'validation_stage': 'condition',
+                        'validation_reason': condition_result.reason,
+                        'signal_age_seconds': condition_result.signal_age_seconds
+                    }
+                else:
+                    logger.info(f"[LIVE] User approved execution despite validation failure: {condition_result.reason}")
 
             # Log validation severity if not normal
             if condition_result.severity.value != "normal":
@@ -425,18 +445,41 @@ class LiveTradingEngine:
 
                 if not exec_result.is_valid:
                     logger.warning(
-                        f"[LIVE] Signal rejected at execution validation: {exec_result.reason} "
-                        f"(divergence: {exec_result.divergence_pct:.2%})"
+                        f"[LIVE] Execution validation failed: {exec_result.reason} "
+                        f"(divergence: {exec_result.divergence_pct:.2%}) - requesting user confirmation"
                     )
-                    self.stats['entries_blocked'] += 1
-                    return {
-                        'status': 'rejected',
-                        'reason': 'validation_failed',
-                        'validation_stage': 'execution',
-                        'validation_reason': exec_result.reason,
-                        'divergence_pct': exec_result.divergence_pct,
-                        'risk_increase_pct': exec_result.risk_increase_pct
-                    }
+
+                    # Request user confirmation via dialog + voice
+                    announcer = get_announcer()
+                    execute_anyway = False
+
+                    if announcer:
+                        details = (
+                            f"Price divergence: {exec_result.divergence_pct:.1%}. "
+                            f"Risk increase: {exec_result.risk_increase_pct:.1%}"
+                        )
+                        execute_anyway = announcer.request_validation_confirmation(
+                            instrument=signal.instrument,
+                            signal_type=signal.signal_type.value,
+                            rejection_reason=exec_result.reason,
+                            details=details
+                        )
+                    else:
+                        logger.warning("[LIVE] No voice announcer available - auto-rejecting validation failure")
+
+                    if not execute_anyway:
+                        self.stats['entries_blocked'] += 1
+                        logger.info(f"[LIVE] Entry rejected after user confirmation: {exec_result.reason}")
+                        return {
+                            'status': 'rejected',
+                            'reason': 'validation_failed',
+                            'validation_stage': 'execution',
+                            'validation_reason': exec_result.reason,
+                            'divergence_pct': exec_result.divergence_pct,
+                            'risk_increase_pct': exec_result.risk_increase_pct
+                        }
+                    else:
+                        logger.info(f"[LIVE] User approved execution despite validation failure: {exec_result.reason}")
             elif self.test_mode:
                 logger.info("🧪 [TEST MODE] Bypassing execution validation")
             else:
@@ -909,18 +952,41 @@ class LiveTradingEngine:
 
                 if not exec_result.is_valid:
                     logger.warning(
-                        f"[LIVE] Pyramid signal rejected at execution validation: {exec_result.reason} "
-                        f"(divergence: {exec_result.divergence_pct:.2%})"
+                        f"[LIVE] Pyramid execution validation failed: {exec_result.reason} "
+                        f"(divergence: {exec_result.divergence_pct:.2%}) - requesting user confirmation"
                     )
-                    self.stats['pyramids_blocked'] += 1
-                    return {
-                        'status': 'rejected',
-                        'reason': 'validation_failed',
-                        'validation_stage': 'execution',
-                        'validation_reason': exec_result.reason,
-                        'divergence_pct': exec_result.divergence_pct,
-                        'risk_increase_pct': exec_result.risk_increase_pct
-                    }
+
+                    # Request user confirmation via dialog + voice
+                    announcer = get_announcer()
+                    execute_anyway = False
+
+                    if announcer:
+                        details = (
+                            f"Price divergence: {exec_result.divergence_pct:.1%}. "
+                            f"Risk increase: {exec_result.risk_increase_pct:.1%}"
+                        )
+                        execute_anyway = announcer.request_validation_confirmation(
+                            instrument=signal.instrument,
+                            signal_type=signal.signal_type.value,
+                            rejection_reason=exec_result.reason,
+                            details=details
+                        )
+                    else:
+                        logger.warning("[LIVE] No voice announcer available - auto-rejecting validation failure")
+
+                    if not execute_anyway:
+                        self.stats['pyramids_blocked'] += 1
+                        logger.info(f"[LIVE] Pyramid rejected after user confirmation: {exec_result.reason}")
+                        return {
+                            'status': 'rejected',
+                            'reason': 'validation_failed',
+                            'validation_stage': 'execution',
+                            'validation_reason': exec_result.reason,
+                            'divergence_pct': exec_result.divergence_pct,
+                            'risk_increase_pct': exec_result.risk_increase_pct
+                        }
+                    else:
+                        logger.info(f"[LIVE] User approved pyramid despite validation failure: {exec_result.reason}")
 
                 # Adjust position size if risk increased
                 if exec_result.risk_increase_pct and exec_result.risk_increase_pct > 0:
