@@ -260,9 +260,17 @@ class LiveTradingEngine:
             return {'status': 'rejected', 'reason': 'not_leader'}
 
         # EOD Deduplication: Check if this signal was already executed at EOD
+        # This handles the case where:
+        # - EOD pyramid executed at 23:54:30 (30 sec before close)
+        # - Bar-close PYRAMID signal arrives at 23:55:00
+        # - We should skip the bar-close signal to avoid duplicate execution
         if self.eod_monitor and self.config.eod_enabled:
             fingerprint = f"{signal.instrument}:{signal.timestamp.isoformat()}"
-            if self.eod_monitor.was_executed_at_eod(signal.instrument, fingerprint):
+            if self.eod_monitor.was_executed_at_eod(
+                signal.instrument,
+                fingerprint,
+                signal_type=signal.signal_type  # Pass signal type for type-specific dedup
+            ):
                 logger.info(
                     f"[LIVE] Skipping signal - already executed at EOD: "
                     f"{signal.signal_type.value} {signal.instrument}"
@@ -335,9 +343,10 @@ class LiveTradingEngine:
 
             # Log validation severity if not normal
             if condition_result.severity.value != "normal":
+                age_str = f"{condition_result.signal_age_seconds:.1f}s" if condition_result.signal_age_seconds is not None else "N/A"
                 logger.info(
                     f"[LIVE] Signal condition validation passed with {condition_result.severity.value} severity "
-                    f"(age: {condition_result.signal_age_seconds:.1f}s)"
+                    f"(age: {age_str})"
                 )
 
         if signal.signal_type == SignalType.BASE_ENTRY:
@@ -909,7 +918,48 @@ class LiveTradingEngine:
             inst_type = InstrumentType.BANK_NIFTY
 
         inst_config = get_instrument_config(inst_type)
-        lots = signal.suggested_lots
+        sizer = self.sizers[inst_type]
+
+        # Calculate pyramid size using Tom Basso 3-constraint method
+        # (Don't trust signal.suggested_lots from TradingView - PM calculates sizing)
+        live_equity = self.portfolio.closed_equity
+        available_margin = live_equity * 0.6  # Use 60% of equity as margin
+
+        # Calculate unrealized P&L for profit constraint
+        unrealized_pnl = (signal.price - base_pos.entry_price) * base_pos.lots * inst_config.point_value
+
+        # Base risk = original risk at entry
+        base_risk = (base_pos.entry_price - base_pos.initial_stop) * base_pos.lots * inst_config.point_value
+
+        # Profit after covering base risk
+        profit_after_base_risk = max(0, unrealized_pnl - base_risk)
+
+        constraints = sizer.calculate_pyramid_size(
+            signal=signal,
+            equity=live_equity,
+            available_margin=available_margin,
+            base_position_size=base_pos.lots,
+            profit_after_base_risk=profit_after_base_risk
+        )
+
+        if constraints.final_lots == 0:
+            self.stats['pyramids_blocked'] += 1
+            logger.info(
+                f"[LIVE] Pyramid blocked: 0 lots (limited by {constraints.limiter}). "
+                f"Base lots={base_pos.lots}, P&L=₹{unrealized_pnl:,.0f}, "
+                f"Base risk=₹{base_risk:,.0f}, Excess profit=₹{profit_after_base_risk:,.0f}"
+            )
+            return {
+                'status': 'blocked',
+                'reason': f'Zero lots (limited by {constraints.limiter})'
+            }
+
+        lots = constraints.final_lots
+        logger.info(
+            f"[LIVE] Pyramid size calculated: {lots} lots (limited by {constraints.limiter}). "
+            f"Signal suggested {signal.suggested_lots} lots. "
+            f"Base={base_pos.lots}, P&L=₹{unrealized_pnl:,.0f}"
+        )
 
         # Step 2: Execution validation (uses broker API price)
         original_lots = lots
@@ -1274,6 +1324,74 @@ class LiveTradingEngine:
         if position_id not in self.portfolio.positions:
             return {'status': 'error', 'reason': 'Position not found'}
 
+        # Get position details for announcement
+        position = self.portfolio.positions[position_id]
+
+        # Voice announcement: Pre-trade (EXIT)
+        announcer = get_announcer()
+        if announcer:
+            announcer.announce_pre_trade(
+                instrument=signal.instrument,
+                position=signal.position,
+                signal_type="EXIT",
+                lots=position.lots,
+                price=signal.price,
+                stop=0,  # No stop for exit
+                risk_amount=0,
+                risk_percent=0
+            )
+
+        # Execute exit via OpenAlgo
+        execution_result = self._execute_exit_openalgo(position)
+
+        if execution_result['status'] == 'success':
+            # Close position using ACTUAL fill price, not signal price
+            actual_exit_price = execution_result['order_details'].get('exit_price', signal.price)
+            pnl = self.portfolio.close_position(position_id, actual_exit_price, signal.timestamp)
+
+            # Persist closed position to database
+            if self.db_manager:
+                closed_position = self.portfolio.positions.get(position_id)
+                if closed_position:
+                    # Set exit reason from signal (e.g., STOP_LOSS, EOD)
+                    closed_position.exit_reason = signal.reason or 'SIGNAL'
+                    self.db_manager.save_position(closed_position)  # Save with status='closed'
+                    logger.debug(f"Closed position saved to database")
+
+                # Update pyramiding state if base position was closed
+                if closed_position and closed_position.is_base_position:
+                    # Clear base position reference
+                    self.db_manager.save_pyramiding_state(
+                        closed_position.instrument,
+                        self.last_pyramid_price.get(closed_position.instrument, 0.0),
+                        None  # Clear base_position_id
+                    )
+                    if closed_position.instrument in self.base_positions:
+                        del self.base_positions[closed_position.instrument]
+
+            self.stats['exits_executed'] += 1
+
+            # Voice announcement: Post-trade (EXIT)
+            if announcer:
+                announcer.announce_trade_executed(
+                    instrument=signal.instrument,
+                    position=signal.position,
+                    signal_type="EXIT",
+                    lots=position.lots,
+                    price=signal.price,
+                    pnl=pnl
+                )
+
+            return {'status': 'executed', 'pnl': pnl}
+        else:
+            # Voice announcement: Error
+            if announcer:
+                announcer.announce_error(
+                    f"{signal.instrument} exit failed. {execution_result.get('reason', 'Unknown error')}",
+                    error_type="execution"
+                )
+            return execution_result
+
     def _handle_exit_all_live(self, signal: Signal) -> Dict:
         """Handle EXIT ALL - close all positions for an instrument"""
         # Find all open positions for this instrument
@@ -1347,74 +1465,6 @@ class LiveTradingEngine:
             'positions_closed': len(positions_to_close) - len(failed_exits),
             'failed': failed_exits
         }
-
-        # Get position details for announcement
-        position = self.portfolio.positions[position_id]
-
-        # Voice announcement: Pre-trade (EXIT)
-        announcer = get_announcer()
-        if announcer:
-            announcer.announce_pre_trade(
-                instrument=signal.instrument,
-                position=signal.position,
-                signal_type="EXIT",
-                lots=position.lots,
-                price=signal.price,
-                stop=0,  # No stop for exit
-                risk_amount=0,
-                risk_percent=0
-            )
-
-        # Execute exit via OpenAlgo
-        execution_result = self._execute_exit_openalgo(position)
-
-        if execution_result['status'] == 'success':
-            # Close position using ACTUAL fill price, not signal price
-            actual_exit_price = execution_result['order_details'].get('exit_price', signal.price)
-            pnl = self.portfolio.close_position(position_id, actual_exit_price, signal.timestamp)
-
-            # Persist closed position to database
-            if self.db_manager:
-                position = self.portfolio.positions.get(position_id)
-                if position:
-                    # Set exit reason from signal (e.g., STOP_LOSS, EOD)
-                    position.exit_reason = signal.reason or 'SIGNAL'
-                    self.db_manager.save_position(position)  # Save with status='closed'
-                    logger.debug(f"Closed position saved to database")
-
-                # Update pyramiding state if base position was closed
-                if position and position.is_base_position:
-                    # Clear base position reference
-                    self.db_manager.save_pyramiding_state(
-                        position.instrument,
-                        self.last_pyramid_price.get(position.instrument, 0.0),
-                        None  # Clear base_position_id
-                    )
-                    if position.instrument in self.base_positions:
-                        del self.base_positions[position.instrument]
-
-            self.stats['exits_executed'] += 1
-
-            # Voice announcement: Post-trade (EXIT)
-            if announcer:
-                announcer.announce_trade_executed(
-                    instrument=signal.instrument,
-                    position=signal.position,
-                    signal_type="EXIT",
-                    lots=position.lots,
-                    price=signal.price,
-                    pnl=pnl
-                )
-
-            return {'status': 'executed', 'pnl': pnl}
-        else:
-            # Voice announcement: Error
-            if announcer:
-                announcer.announce_error(
-                    f"{signal.instrument} exit failed. {execution_result.get('reason', 'Unknown error')}",
-                    error_type="execution"
-                )
-            return execution_result
 
     def _execute_exit_openalgo(self, position: Position) -> Dict:
         """

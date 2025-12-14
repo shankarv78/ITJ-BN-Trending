@@ -21,27 +21,13 @@ class ExpiryCalendar:
 
     Expiry Rules:
     - Gold Mini (MCX): 5th of each month. If 5th is weekend/holiday, previous trading day.
-    - Bank Nifty (NFO): Last trading day of month (varies, uses hardcoded dates for accuracy).
+    - Bank Nifty (NFO): Last Thursday of month. If Thursday is holiday, previous trading day.
     """
 
     # Default rollover days before expiry
     DEFAULT_ROLLOVER_DAYS = {
         'GOLD_MINI': 3,
         'BANK_NIFTY': 5
-    }
-
-    # Hardcoded Bank Nifty FUTURES expiry dates (NSE official)
-    # These are monthly expiry dates - updated periodically
-    BANKNIFTY_EXPIRY_DATES = {
-        # 2025 expiry dates (16 dates)
-        2025: [
-            date(2025, 12, 30),  # 30-DEC-2025
-        ],
-        # 2026 expiry dates (partial - will be updated in Jan 2026)
-        2026: [
-            date(2026, 1, 27),   # 27-JAN-2026
-            date(2026, 2, 24),   # 24-FEB-2026
-        ],
     }
 
     def __init__(self, holiday_calendar=None):
@@ -89,28 +75,22 @@ class ExpiryCalendar:
         """
         Get Bank Nifty MONTHLY expiry date.
 
-        Uses hardcoded official NSE expiry dates for accuracy.
-        Falls back to calculation for dates beyond known range.
+        Bank Nifty monthly options expire on the LAST TUESDAY of the month.
+        (Changed from last Thursday in 2024)
+        If the last Tuesday is a holiday, shift to next trading day.
 
         Args:
             reference_date: Reference date (default: today)
 
         Returns:
-            Monthly expiry date
+            Monthly expiry date (last Wednesday of month - NSE changed from Tuesday in 2024)
         """
         if reference_date is None:
             reference_date = date.today()
 
-        # Try to find from hardcoded dates first (most accurate)
-        expiry = self._find_next_banknifty_expiry(reference_date)
-        if expiry:
-            return expiry
-
-        # Fallback to calculation for dates beyond hardcoded range
-        logger.warning(f"[EXPIRY] No hardcoded Bank Nifty expiry for {reference_date}, using calculation")
         year, month = reference_date.year, reference_date.month
 
-        # Find last Wednesday of this month
+        # Find last Wednesday of this month (NSE changed from Tuesday to Wednesday in 2024)
         expiry = self._get_last_wednesday(year, month)
 
         # If we're past this month's expiry, get next month's
@@ -121,31 +101,10 @@ class ExpiryCalendar:
                 year += 1
             expiry = self._get_last_wednesday(year, month)
 
-        # Adjust for holidays
+        # Adjust for holidays - for Bank Nifty, shift FORWARD if holiday
         expiry = self._adjust_for_holidays_forward(expiry, "NSE")
 
         return expiry
-
-    def _find_next_banknifty_expiry(self, reference_date: date) -> Optional[date]:
-        """
-        Find next Bank Nifty expiry from hardcoded dates.
-
-        Returns the first expiry date that is >= reference_date.
-        Returns None if no suitable date found in hardcoded list.
-        """
-        # Collect all expiry dates from 2025 onwards
-        all_expiries = []
-        for year, dates in self.BANKNIFTY_EXPIRY_DATES.items():
-            all_expiries.extend(dates)
-
-        # Sort and find next expiry
-        all_expiries.sort()
-
-        for expiry in all_expiries:
-            if expiry >= reference_date:
-                return expiry
-
-        return None
 
     def _get_last_wednesday(self, year: int, month: int) -> date:
         """Get the last Wednesday of a given month (NSE changed from Tuesday in 2024)."""

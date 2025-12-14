@@ -253,6 +253,14 @@ is_eod_candle = hour(time) >= 23 and minute(time) >= 0
 is_eod_alert_window = hour(time) == 23 and minute(time) >= 25
 
 // ========================================
+// TIMESTAMP HANDLING FOR ALERTS
+// ========================================
+// IST offset in milliseconds (5 hours 30 minutes = 19800000 ms)
+// TradingView uses UTC internally; we manually convert to IST for timestamp
+// timenow is more accurate than time_close (1.4s vs 2.4s latency from server)
+ist_offset_ms = 5 * 60 * 60 * 1000 + 30 * 60 * 1000
+
+// ========================================
 // STRATEGY EXECUTION
 // ========================================
 // With process_orders_on_close=true:
@@ -415,7 +423,7 @@ if long_entry and strategy.position_size == 0
         // JSON Alert for BASE_ENTRY
         // Use mode-specific stop: Tom Basso uses ATR-based stop, others use SuperTrend
         float alert_stop = stop_loss_mode == "Tom Basso" ? initial_stop_price : supertrend
-        timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+        timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
         json_entry = '{"type":"BASE_ENTRY", "instrument":"SILVER_MINI", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(alert_stop) + ', "lots":' + str.tostring(final_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
         alert(json_entry, alert.freq_once_per_bar_close)
 
@@ -523,7 +531,7 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
         strategy.entry("Long_" + str.tostring(pyramid_count + 1), strategy.long, qty=pyramid_lots, comment="PYR" + str.tostring(pyramid_count) + "-" + str.tostring(pyramid_lots) + "L")
 
         // JSON Alert for PYRAMID
-        timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+        timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
         pyramid_stop = stop_loss_mode == "SuperTrend" ? supertrend : (stop_loss_mode == "Tom Basso" ? (not na(basso_stop_long1) ? basso_stop_long1 : supertrend) : supertrend)
         json_pyramid = '{"type":"PYRAMID", "instrument":"SILVER_MINI", "position":"Long_' + str.tostring(pyramid_count + 1) + '", "price":' + str.tostring(close) + ', "stop":' + str.tostring(pyramid_stop) + ', "lots":' + str.tostring(pyramid_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
         alert(json_pyramid, alert.freq_once_per_bar_close)
@@ -540,7 +548,7 @@ if strategy.position_size > 0
             // Capture position size before closing
             exit_lots = strategy.position_size
             // JSON Alert for SuperTrend Exit
-            timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+            timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
             json_exit = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(supertrend) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(exit_lots) + ', "reason":"SuperTrend", "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
             alert(json_exit, alert.freq_once_per_bar_close)
             strategy.close_all(comment="EXIT - Below ST")
@@ -670,7 +678,7 @@ if strategy.position_size > 0
             if close < basso_stop_long1 and barstate.isconfirmed
                 strategy.close("Long_1", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_1 Exit
-                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 json_exit_l1 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long1) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(initial_position_size) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l1, alert.freq_once_per_bar_close)
                 initial_entry_price := na
@@ -686,7 +694,7 @@ if strategy.position_size > 0
             if close < basso_stop_long2 and barstate.isconfirmed
                 strategy.close("Long_2", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_2 Exit
-                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr1_lots_exit = math.round(initial_position_size * pyramid_size_ratio)
                 json_exit_l2 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_2", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long2) + ', "entry_price":' + str.tostring(pyr1_entry_price) + ', "lots":' + str.tostring(pyr1_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l2, alert.freq_once_per_bar_close)
@@ -703,7 +711,7 @@ if strategy.position_size > 0
             if close < basso_stop_long3 and barstate.isconfirmed
                 strategy.close("Long_3", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_3 Exit
-                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr2_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 2))
                 json_exit_l3 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_3", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long3) + ', "entry_price":' + str.tostring(pyr2_entry_price) + ', "lots":' + str.tostring(pyr2_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l3, alert.freq_once_per_bar_close)
@@ -720,7 +728,7 @@ if strategy.position_size > 0
             if close < basso_stop_long4 and barstate.isconfirmed
                 strategy.close("Long_4", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_4 Exit
-                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr3_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 3))
                 json_exit_l4 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_4", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long4) + ', "entry_price":' + str.tostring(pyr3_entry_price) + ', "lots":' + str.tostring(pyr3_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l4, alert.freq_once_per_bar_close)
@@ -737,7 +745,7 @@ if strategy.position_size > 0
             if close < basso_stop_long5 and barstate.isconfirmed
                 strategy.close("Long_5", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_5 Exit
-                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr4_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 4))
                 json_exit_l5 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_5", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long5) + ', "entry_price":' + str.tostring(pyr4_entry_price) + ', "lots":' + str.tostring(pyr4_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l5, alert.freq_once_per_bar_close)
@@ -754,7 +762,7 @@ if strategy.position_size > 0
             if close < basso_stop_long6 and barstate.isconfirmed
                 strategy.close("Long_6", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_6 Exit
-                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+                timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr5_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 5))
                 json_exit_l6 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_6", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long6) + ', "entry_price":' + str.tostring(pyr5_entry_price) + ', "lots":' + str.tostring(pyr5_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l6, alert.freq_once_per_bar_close)
@@ -1152,7 +1160,7 @@ if enable_eod_monitoring and is_eod_alert_window
     json_position = '"position_status":{"in_position":' + str.tostring(strategy.position_size > 0) + ',"pyramid_count":' + str.tostring(pyramid_count) + '}'
 
     // Generate timestamp
-    timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+    timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
 
     // Complete EOD_MONITOR JSON
     eod_json = '{"type":"EOD_MONITOR","instrument":"SILVER_MINI","timestamp":"' + timestamp_str + '","price":' + str.tostring(close) + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'

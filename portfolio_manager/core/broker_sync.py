@@ -84,6 +84,11 @@ class BrokerSyncManager:
         self._last_sync: Optional[SyncResult] = None
         self._sync_lock = threading.Lock()
 
+        # Broker connectivity tracking
+        self._consecutive_failures: int = 0
+        self._last_failure_alert: Optional[datetime] = None
+        self._broker_down_alerted: bool = False  # Prevent repeated "broker down" alerts
+
         logger.info(f"[SYNC] BrokerSyncManager initialized (interval: {sync_interval_seconds}s)")
 
     def start_background_sync(self):
@@ -115,8 +120,36 @@ class BrokerSyncManager:
                 # Perform sync
                 result = self.sync_now()
 
-                if result.discrepancies:
-                    self._alert_discrepancies(result.discrepancies)
+                # Only alert discrepancies if sync was successful (broker reachable)
+                if result.success:
+                    self._consecutive_failures = 0
+                    self._broker_down_alerted = False  # Reset for next broker-down event
+
+                    if result.discrepancies:
+                        self._alert_discrepancies(result.discrepancies)
+                else:
+                    # Broker unreachable - track consecutive failures
+                    self._consecutive_failures += 1
+
+                    # Alert only once when broker goes down, not on every failed sync
+                    if not self._broker_down_alerted:
+                        self._broker_down_alerted = True
+                        logger.warning(
+                            f"[SYNC] Broker connectivity issue - sync failed "
+                            f"(will suppress alerts until connectivity restored)"
+                        )
+                        # One-time brief notification (not voice spam)
+                        if self.voice and self.voice.silent_mode:
+                            self.voice.show_transient_alert(
+                                "Broker Sync",
+                                f"Cannot reach broker: {result.error}",
+                                timeout_seconds=10
+                            )
+                    else:
+                        # Subsequent failures - just log at debug level
+                        logger.debug(
+                            f"[SYNC] Broker still unreachable (consecutive failures: {self._consecutive_failures})"
+                        )
 
             except Exception as e:
                 logger.error(f"[SYNC] Background sync error: {e}")
@@ -139,6 +172,7 @@ class BrokerSyncManager:
             broker_positions = self._fetch_broker_positions()
 
             if broker_positions is None:
+                logger.warning("[SYNC] Broker positions unavailable (fetch failed) - skipping discrepancy checks")
                 result = SyncResult(
                     success=False,
                     timestamp=datetime.now(),
@@ -507,13 +541,25 @@ class BrokerSyncManager:
         result = self.sync_now()
 
         if not result.success:
-            logger.error(f"[SYNC] Startup reconciliation FAILED: {result.error}")
+            # Log as warning, not error - broker might just not be connected yet
+            logger.warning(f"[SYNC] Startup reconciliation skipped: {result.error}")
+            self._broker_down_alerted = True  # Mark as alerted to prevent background sync spam
+
             if self.voice:
-                # This is critical - use announce_error which shows dialog in both modes
-                self.voice.announce_error(
-                    "Startup reconciliation failed. Could not verify broker positions.",
-                    error_type="sync"
-                )
+                # Show a non-blocking notification, not a critical error dialog
+                # User might not have broker connected at startup - that's OK
+                if self.voice.silent_mode:
+                    self.voice.show_transient_alert(
+                        "Startup Sync",
+                        f"Broker not reachable - position verification skipped.\n{result.error}",
+                        timeout_seconds=15
+                    )
+                else:
+                    self.voice._speak(
+                        "Broker not reachable. Position verification skipped.",
+                        priority="normal",
+                        voice="Samantha"
+                    )
         elif result.discrepancies:
             logger.warning(f"[SYNC] Startup reconciliation found {len(result.discrepancies)} discrepancies")
             self._alert_discrepancies(result.discrepancies)
@@ -549,6 +595,11 @@ class BrokerSyncManager:
         return {
             'sync_interval_seconds': self.sync_interval,
             'background_sync_running': self._sync_thread and self._sync_thread.is_alive(),
+            'broker_connectivity': {
+                'is_connected': self._consecutive_failures == 0,
+                'consecutive_failures': self._consecutive_failures,
+                'alert_suppressed': self._broker_down_alerted
+            },
             'last_sync': {
                 'timestamp': last_sync.timestamp.isoformat() if last_sync else None,
                 'success': last_sync.success if last_sync else None,

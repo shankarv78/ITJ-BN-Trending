@@ -906,7 +906,7 @@ var table infoTable = table.new(position.top_right, 3, 50, border_width=2, bgcol
 if smart_panel or show_all_info
     // Clear the table first to avoid stale data
     table.clear(infoTable, 0, 0, 2, 49)
-    
+
     // Determine what to show based on position status
     // Use entry price tracking for more accurate real-time position status
     // (strategy.position_size only updates at bar close)
@@ -1248,8 +1248,13 @@ plot(show_debug ? (long_entry ? 7 : 0) : na, "ALL CONDITIONS", color=color.new(c
 // ========================================
 // These alerts are formatted for the Stoxxo Bridge (stoxxo_bridge.py)
 
-// Helper to get ISO timestamp - use timenow for actual alert time (not candle time)
-timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+// IST offset in milliseconds (5 hours 30 minutes = 19800000 ms)
+// TradingView uses UTC internally; we manually convert to IST for timestamp
+ist_offset_ms = 5 * 60 * 60 * 1000 + 30 * 60 * 1000
+
+// Helper to get ISO timestamp - use timenow (real-time alert trigger) + IST offset
+// timenow is more accurate than time_close (1.4s vs 2.4s latency from server)
+timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
 
 // 1. BASE ENTRY ALERT
 if long_entry and strategy.position_size == 0
@@ -1257,7 +1262,7 @@ if long_entry and strategy.position_size == 0
     // Note: 'final_lots' is calculated in the entry scope, but we need it here.
     // Since v5 uses local scope for entry logic, we need to replicate the calculation or move variables to global scope.
     // To minimize code changes, we replicate the calculation here.
-    
+
     alert_risk_amount = current_equity * (risk_percent / 100)
     alert_risk_per_point = close - supertrend
     alert_risk_per_lot = alert_risk_per_point * lot_size
@@ -1265,7 +1270,7 @@ if long_entry and strategy.position_size == 0
     alert_risk_based_lots_floored = math.floor(alert_risk_based_lots)
     alert_margin_based_lots = available_margin_lakhs > 0 ? math.floor(available_margin_lakhs / margin_per_lot) : 0
     alert_final_lots = math.max(0, math.min(alert_risk_based_lots_floored, alert_margin_based_lots))
-    
+
     if alert_final_lots >= 1
         // Use mode-specific stop: Tom Basso uses ATR-based stop, others use SuperTrend
         float alert_stop = stop_loss_mode == "Tom Basso" ? (close - (basso_initial_atr_mult * atr_basso)) : supertrend
@@ -1280,27 +1285,27 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
     // v7.0: Use same gate logic as strategy execution (respects use_1r_gate toggle)
     alert_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_points) : (accumulated_profit > base_risk)
     alert_roc_ok = use_roc_for_pyramids ? roc > roc_threshold : true
-    
+
     alert_profit_after_risk = accumulated_profit - base_risk
-    
+
     // Lot A
     alert_margin_used = strategy.position_size * margin_per_lot
     alert_free_margin = available_margin_lakhs - alert_margin_used
     alert_lot_a = alert_free_margin > 0 ? math.floor(alert_free_margin / margin_per_lot) : 0
-    
+
     // Lot B
     alert_lot_b = math.floor(initial_position_size * 0.5)
-    
+
     // Lot C
     alert_risk_budget = alert_profit_after_risk * 0.5
     alert_pyr_stop = stop_loss_mode == 'SuperTrend' ? supertrend : stop_loss_mode == 'Tom Basso' ? not na(basso_stop_long1) ? basso_stop_long1 : supertrend : supertrend
     alert_pyr_risk_lot = (close - alert_pyr_stop) * lot_size
     alert_lot_c = alert_pyr_risk_lot > 0 ? math.floor(alert_risk_budget / alert_pyr_risk_lot) : 0
-    
+
     alert_pyr_lots = math.max(0, math.min(alert_lot_a, math.min(alert_lot_b, alert_lot_c)))
-    
+
     alert_trigger = alert_gate_open and alert_atr_moves >= atr_pyramid_threshold and alert_roc_ok and alert_pyr_lots >= 1
-    
+
     if alert_trigger
         // Note: pyramid_count hasn't been incremented yet, so use +2 to get correct position number
         // pyramid_count=0 → Long_2, pyramid_count=1 → Long_3, etc.
@@ -1380,8 +1385,8 @@ if enable_eod_monitoring and is_eod_alert_window
     // Python uses its own position tracking with database state
     json_position = '"position_status":{"in_position":' + str.tostring(strategy.position_size > 0) + ',"pyramid_count":' + str.tostring(pyramid_count) + '}'
 
-    // Generate timestamp - use timenow for actual alert time (not candle time)
-    timestamp_str := str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}Z", timenow)
+    // Generate timestamp - use timenow (real-time) + IST offset for accuracy
+    timestamp_str := str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
 
     // Complete EOD_MONITOR JSON
     eod_json = '{"type":"EOD_MONITOR","instrument":"BANK_NIFTY","timestamp":"' + timestamp_str + '","price":' + str.tostring(close) + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'

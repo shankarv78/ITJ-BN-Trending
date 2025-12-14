@@ -139,7 +139,8 @@ class OpenAlgoClient:
             return positions
         except Exception as e:
             logger.error(f"Failed to get positions: {e}")
-            return []
+            # Return None to signal upstream that broker fetch failed (avoid false discrepancies)
+            return None
 
     def get_funds(self) -> Dict:
         """

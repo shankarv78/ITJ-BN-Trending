@@ -117,10 +117,11 @@ else
     # Get API key from config
     API_KEY=$(python3 -c "import json; print(json.load(open('openalgo_config.json'))['openalgo_api_key'])")
 
-    # Start PM
+    # Start PM (MUST include --db-config for persistence!)
     nohup python3 portfolio_manager.py live \
         --broker "$BROKER" \
         --api-key "$API_KEY" \
+        --db-config db_config.json \
         --capital $EQUITY \
         > pm.log 2>&1 &
 

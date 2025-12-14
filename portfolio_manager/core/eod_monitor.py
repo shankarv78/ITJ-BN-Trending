@@ -400,38 +400,73 @@ class EODMonitor:
             state.order_fill_price = fill_price
             logger.info(f"[EOD] Order filled for {instrument} @ {fill_price:.2f}")
 
-    def was_executed_at_eod(self, instrument: str, fingerprint: str) -> bool:
+    def was_executed_at_eod(
+        self,
+        instrument: str,
+        fingerprint: str,
+        signal_type: Optional[SignalType] = None,
+        grace_period_minutes: int = 30
+    ) -> bool:
         """
         Check if a signal was already executed at EOD.
 
         Used for deduplication when regular bar-close signal arrives.
 
+        Timeline for MCX Gold Mini (winter):
+        - EOD execution: ~23:54:30 (30 sec before 23:55 close)
+        - Bar-close signal: 23:55:00 (when candle closes)
+        - Grace period ensures bar-close signal within 30 mins of EOD is blocked
+
         Args:
             instrument: Instrument to check
             fingerprint: Signal fingerprint to check
+            signal_type: Type of signal being checked (for type-specific dedup)
+            grace_period_minutes: Minutes after EOD execution to still consider as duplicate
 
         Returns:
             True if this signal (or equivalent) was executed at EOD
         """
         with self._lock:
-            today = self._get_today_str()
-
             if instrument not in self._states:
                 return False
 
             state = self._states[instrument]
 
-            # Check if state is for today
-            if state.date != today:
-                return False
-
             # Check if execution completed
             if not state.execution_completed:
                 return False
 
-            # Execution was completed today - the regular signal should be skipped
+            # Check if within grace period
+            # EOD execution at 23:54:30 should block bar-close at 23:55:00
+            if state.order_placed_at:
+                minutes_since_execution = (datetime.now() - state.order_placed_at).total_seconds() / 60
+                if minutes_since_execution > grace_period_minutes:
+                    logger.debug(
+                        f"[EOD] EOD execution too old ({minutes_since_execution:.1f}m > {grace_period_minutes}m), "
+                        f"not blocking signal for {instrument}"
+                    )
+                    return False
+            else:
+                # No order_placed_at, fall back to same-day check
+                today = self._get_today_str()
+                if state.date != today:
+                    return False
+
+            # Check signal type match (if provided)
+            # Only deduplicate same signal type (e.g., PYRAMID at EOD blocks bar-close PYRAMID)
+            if signal_type and state.executed_signal_type:
+                if signal_type != state.executed_signal_type:
+                    logger.debug(
+                        f"[EOD] Signal type mismatch: EOD executed {state.executed_signal_type.value}, "
+                        f"incoming is {signal_type.value} - not blocking"
+                    )
+                    return False
+
+            # Execution was completed recently - the regular signal should be skipped
             logger.info(
-                f"[EOD] Signal {fingerprint} already executed at EOD for {instrument}"
+                f"[EOD] Blocking duplicate signal for {instrument}: "
+                f"EOD executed {state.executed_signal_type.value if state.executed_signal_type else 'unknown'} "
+                f"at {state.order_placed_at}, incoming fingerprint: {fingerprint}"
             )
             return True
 

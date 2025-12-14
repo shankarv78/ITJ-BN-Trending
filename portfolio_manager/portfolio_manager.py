@@ -1130,17 +1130,22 @@ def run_live(args):
 
                 signals_data = []
                 for row in rows:
+                    # Extract payload data safely
+                    payload = row['payload'] if row['payload'] else {}
+
                     signal = {
                         'id': row['id'],
                         'instrument': row['instrument'],
-                        'signalType': row['signal_type'],
+                        'signal_type': row['signal_type'],
                         'position': row['position'],
-                        'signalTimestamp': row['signal_timestamp'].isoformat() if row['signal_timestamp'] else None,
+                        # Use 'timestamp' to match frontend SignalRecord interface
+                        'timestamp': row['signal_timestamp'].isoformat() if row['signal_timestamp'] else None,
                         'status': row['processing_status'],
                         'processedAt': row['processed_at'].isoformat() if row['processed_at'] else None,
-                        'price': row['payload'].get('price') if row['payload'] else None,
-                        'stop': row['payload'].get('stop') if row['payload'] else None,
-                        'suggestedLots': row['payload'].get('suggested_lots') if row['payload'] else None
+                        'price': payload.get('price', 0),
+                        'stop': payload.get('stop', 0),
+                        # Try 'lots' first, then 'suggested_lots' as fallback
+                        'lots': payload.get('lots') or payload.get('suggested_lots', 0)
                     }
                     signals_data.append(signal)
 
@@ -1842,6 +1847,60 @@ def run_live(args):
             'message': f'Test announcement ({test_type}) triggered'
         }), 200
 
+    @app.route('/voice/silent-mode', methods=['POST'])
+    def toggle_silent_mode():
+        """
+        Toggle or set silent mode for voice announcements.
+
+        Request body:
+        - enabled: bool (optional) - If provided, sets silent mode to this value.
+                   If not provided, toggles current state.
+
+        Returns:
+        - silentMode: Current state after change
+        - message: Description of action taken
+        """
+        if not voice_announcer:
+            return jsonify({
+                'success': False,
+                'message': 'Voice announcer not initialized'
+            }), 400
+
+        data = request.json or {}
+
+        current_state = voice_announcer.silent_mode
+        logger.info(f"Silent mode toggle: current={current_state}, request={data}")
+
+        if 'enabled' in data:
+            # Set to specific value
+            new_state = bool(data['enabled'])
+        else:
+            # Toggle current state
+            new_state = not voice_announcer.silent_mode
+
+        logger.info(f"Silent mode toggle: new_state={new_state}")
+
+        # Announce the change
+        if new_state:
+            # Enabling silent mode - announce first, then go silent
+            voice_announcer._speak("Silent mode enabled. Going quiet now.")
+            voice_announcer.silent_mode = True
+            voice_announcer.enabled = False
+        else:
+            # Disabling silent mode - enable first, then announce
+            voice_announcer.silent_mode = False
+            voice_announcer.enabled = True  # Re-enable TTS
+            voice_announcer._speak("Voice announcements activated.")
+
+        action = 'enabled' if new_state else 'disabled'
+        logger.info(f"Silent mode {action} via API")
+
+        return jsonify({
+            'success': True,
+            'silentMode': new_state,
+            'message': f'Silent mode {action}'
+        }), 200
+
     # =========================================================================
     # HOLIDAY CALENDAR ENDPOINTS
     # =========================================================================
@@ -2344,11 +2403,20 @@ def run_live(args):
                 if quantity == 0:
                     continue  # Skip zero positions
 
-                # Determine instrument type
-                # Lot sizes as of Dec 2024:
-                # NIFTY: 75, BANKNIFTY: 35, SENSEX: 10, FINNIFTY: 25, MIDCPNIFTY: 50, GOLD_MINI: 100
+                # Determine instrument type and lot size divisor
+                # NOTE: MCX futures return quantity as lot count directly (divisor = 1)
+                #       NSE/BFO options return quantity in units (divide by lot size)
                 symbol_upper = symbol.upper()
-                if 'GOLD' in symbol_upper or 'GOLDM' in symbol_upper:
+                if 'GOLDM' in symbol_upper and 'FUT' in symbol_upper:
+                    # MCX Gold Mini futures - broker returns lots directly
+                    instrument = 'GOLD_MINI'
+                    lot_size = 1
+                elif 'SILVERM' in symbol_upper and 'FUT' in symbol_upper:
+                    # MCX Silver Mini futures - broker returns lots directly
+                    instrument = 'SILVER_MINI'
+                    lot_size = 1
+                elif 'GOLD' in symbol_upper or 'GOLDM' in symbol_upper:
+                    # Gold options or other gold instruments
                     instrument = 'GOLD_MINI'
                     lot_size = 100
                 elif 'BANKNIFTY' in symbol_upper or 'NIFTYBANK' in symbol_upper:
