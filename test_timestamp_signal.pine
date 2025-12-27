@@ -1,0 +1,56 @@
+// @version=6
+// Test Signal Generator - Timestamp Comparison
+// Purpose: Test whether time_close vs timenow gives correct bar close time
+// Apply to 1-minute chart for quick testing
+
+indicator("Test Timestamp Signal", overlay=true)
+
+// Settings
+webhook_url = input.string("", "Webhook URL", tooltip="Your test webhook URL")
+send_on_every_bar = input.bool(true, "Send on Every Bar Close")
+
+// Generate timestamps using different methods
+var string timestamp_timenow = ""
+var string timestamp_time_close = ""
+var string timestamp_time = ""
+
+// IST offset in milliseconds (5 hours 30 minutes = 19800000 ms)
+ist_offset_ms = 5 * 60 * 60 * 1000 + 30 * 60 * 1000
+
+// Method 1: timenow (current real-time) - manually offset to IST
+timestamp_timenow := str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
+
+// Method 2: time_close (bar close time) - manually offset to IST
+timestamp_time_close := str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", time_close + ist_offset_ms)
+
+// Method 3: time (bar open time) - manually offset to IST
+timestamp_time := str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", time + ist_offset_ms)
+
+// Display on chart for visual verification
+var table info_table = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 70))
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Method", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 0, "Timestamp", text_color=color.white, text_size=size.small)
+
+    table.cell(info_table, 0, 1, "timenow", text_color=color.yellow, text_size=size.small)
+    table.cell(info_table, 1, 1, timestamp_timenow, text_color=color.yellow, text_size=size.small)
+
+    table.cell(info_table, 0, 2, "time_close", text_color=color.lime, text_size=size.small)
+    table.cell(info_table, 1, 2, timestamp_time_close, text_color=color.lime, text_size=size.small)
+
+    table.cell(info_table, 0, 3, "time (open)", text_color=color.red, text_size=size.small)
+    table.cell(info_table, 1, 3, timestamp_time, text_color=color.red, text_size=size.small)
+
+    table.cell(info_table, 0, 4, "Close Price", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 4, str.tostring(close), text_color=color.white, text_size=size.small)
+
+// Send test signal on every bar close
+if send_on_every_bar and barstate.isconfirmed
+    // JSON with ALL THREE timestamp methods for comparison
+    json_signal = '{"type":"TIMESTAMP_TEST","instrument":"TEST","price":' + str.tostring(close) + ',"timenow":"' + timestamp_timenow + '","time_close":"' + timestamp_time_close + '","time_open":"' + timestamp_time + '","bar_index":' + str.tostring(bar_index) + '}'
+
+    alert(json_signal, alert.freq_once_per_bar_close)
+
+// Plot for visual reference
+plot(close, "Close", color=color.blue, linewidth=2)

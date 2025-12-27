@@ -1,0 +1,191 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Gold Mini EOD Monitor v1.0
+
+//@version=6
+indicator("Gold Mini EOD Monitor", overlay=true)
+
+// ========================================
+// PURPOSE
+// ========================================
+// Standalone indicator for EOD (End of Day) monitoring alerts.
+// Fires every tick during the EOD window (last 15 minutes before MCX close).
+// Sends raw condition data to Portfolio Manager for pre-close execution decisions.
+//
+// WHY SEPARATE FROM STRATEGY:
+// - Strategies with process_orders_on_close=true only execute at bar close
+// - EOD monitoring needs to fire EVERY TICK during the window
+// - Indicators fire on every tick by default
+// - Cleaner alert management (separate from entry/exit/pyramid alerts)
+
+// ========================================
+// INPUTS - Must match strategy settings exactly
+// ========================================
+group_indicators = "Indicator Settings"
+rsi_period = input.int(6, "RSI Period", group=group_indicators)
+rsi_threshold = input.float(70.0, "RSI Threshold", group=group_indicators)
+ema_period = input.int(200, "EMA Period", group=group_indicators)
+dc_period = input.int(20, "Donchian Period", group=group_indicators)
+adx_period = input.int(30, "ADX Period", group=group_indicators)
+adx_threshold = input.float(25.0, "ADX Threshold", group=group_indicators)
+er_period = input.int(10, "Efficiency Ratio Period", group=group_indicators)
+er_threshold = input.float(0.3, "Efficiency Ratio Threshold", group=group_indicators)
+er_directional = input.bool(true, "ER Directional Mode", group=group_indicators)
+st_period = input.int(10, "SuperTrend Period", group=group_indicators)
+st_multiplier = input.float(1.5, "SuperTrend Multiplier", group=group_indicators)
+atr_period = input.int(14, "ATR Period", group=group_indicators)
+doji_threshold = input.float(0.1, "Doji Threshold", group=group_indicators, tooltip="Body/Range ratio below this = Doji")
+
+group_eod = "EOD Settings"
+enable_eod_monitoring = input.bool(true, "Enable EOD Monitoring", group=group_eod)
+eod_hour = input.int(23, "EOD Hour", minval=0, maxval=23, group=group_eod)
+eod_minute_start = input.int(40, "EOD Window Start (minute)", minval=0, maxval=59, group=group_eod, tooltip="Winter: 40 (MCX closes 23:55)\nSummer: 15 (MCX closes 23:30)")
+show_eod_window = input.bool(true, "Show EOD Window on Chart", group=group_eod)
+
+// ========================================
+// INDICATOR CALCULATIONS
+// ========================================
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// EMA
+ema = ta.ema(close, ema_period)
+
+// Donchian Channel (Upper band only for entry condition)
+// Use [1] offset to check against PREVIOUS period's high, not including current bar
+dc_upper = ta.highest(high[1], dc_period)
+dc_lower = ta.lowest(low[1], dc_period)
+
+// ADX Calculation
+[diPlus, diMinus, adx] = ta.dmi(adx_period, adx_period)
+
+// Efficiency Ratio (Using exact code from strategy)
+ER(src, p, dir) =>
+    a = dir ? src - src[p] : math.abs(src - src[p])
+    b = 0.0
+    for i = 0 to p-1
+        b := b + math.abs(src[i] - src[i+1])
+    result = b != 0 ? a / b : 0
+    result
+
+er = ER(close, er_period, er_directional)
+
+// SuperTrend
+[supertrend, direction] = ta.supertrend(st_multiplier, st_period)
+
+// ATR
+atr_value = ta.atr(atr_period)
+
+// Doji Detection
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) <= doji_threshold : false
+
+// ========================================
+// ENTRY/EXIT CONDITIONS
+// ========================================
+
+// Entry Conditions (ALL must be true)
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+not_doji = not is_doji
+
+// Combined entry condition
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and not_doji
+
+// Exit condition
+long_exit = close < supertrend
+
+// ========================================
+// EOD WINDOW DETECTION
+// ========================================
+
+// EOD Alert Window: fires every tick during the window
+is_eod_alert_window = hour(time) == eod_hour and minute(time) >= eod_minute_start
+
+// ========================================
+// EOD ALERT
+// ========================================
+
+// Only fire EOD alert when:
+// 1. EOD monitoring is enabled
+// 2. We're in the EOD window (last 15 mins before close)
+// 3. Entry conditions are TRUE (7/7 conditions met)
+if enable_eod_monitoring and is_eod_alert_window and long_entry
+    // Build conditions JSON
+    json_conditions = '"conditions":{"rsi_condition":' + str.tostring(rsi_condition) + ',"ema_condition":' + str.tostring(ema_condition) + ',"dc_condition":' + str.tostring(dc_condition) + ',"adx_condition":' + str.tostring(adx_condition) + ',"er_condition":' + str.tostring(er_condition) + ',"st_condition":' + str.tostring(st_condition) + ',"not_doji":' + str.tostring(not_doji) + ',"long_entry":' + str.tostring(long_entry) + ',"long_exit":' + str.tostring(long_exit) + '}'
+
+    // Build indicators JSON
+    json_indicators = '"indicators":{"rsi":' + str.tostring(rsi) + ',"ema":' + str.tostring(ema) + ',"dc_upper":' + str.tostring(dc_upper) + ',"adx":' + str.tostring(adx) + ',"er":' + str.tostring(er) + ',"supertrend":' + str.tostring(supertrend) + ',"atr":' + str.tostring(atr_value) + '}'
+
+    // Position status - indicator doesn't know strategy position, Python tracks this
+    json_position = '"position_status":{"in_position":false,"pyramid_count":0}'
+
+    // Generate timestamp (time_close = bar close time for accurate signal timing)
+    timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", time_close)
+
+    // Complete EOD_MONITOR JSON
+    eod_json = '{"type":"EOD_MONITOR","instrument":"GOLD_MINI","timestamp":"' + timestamp_str + '","price":' + str.tostring(close) + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'
+
+    // Fire on EVERY TICK during EOD window
+    // Python ignores signals once execution has started
+    alert(eod_json, alert.freq_all)
+
+// ========================================
+// VISUAL INDICATORS
+// ========================================
+
+// Show SuperTrend
+plot(supertrend, "SuperTrend", color=direction < 0 ? color.green : color.red, linewidth=2)
+
+// Show EMA
+plot(ema, "EMA 200", color=color.blue, linewidth=1)
+
+// Highlight EOD window
+bgcolor(show_eod_window and is_eod_alert_window ? color.new(color.orange, 85) : na, title="EOD Window")
+
+// Show entry signal markers
+plotshape(long_entry, title="Entry Signal", location=location.belowbar, style=shape.triangleup, size=size.small, color=color.green)
+plotshape(long_exit, title="Exit Signal", location=location.abovebar, style=shape.triangledown, size=size.small, color=color.red)
+
+// ========================================
+// INFO TABLE
+// ========================================
+
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+
+// Will alert fire?
+will_alert = enable_eod_monitoring and is_eod_alert_window and long_entry
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "EOD Monitor", bgcolor=color.new(color.orange, 70), text_color=color.white)
+    table.cell(infoTable, 1, 0, enable_eod_monitoring ? "ACTIVE" : "DISABLED", bgcolor=enable_eod_monitoring ? color.new(color.green, 70) : color.new(color.red, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 1, "EOD Window", text_color=color.white)
+    table.cell(infoTable, 1, 1, is_eod_alert_window ? "IN WINDOW" : "Outside", bgcolor=is_eod_alert_window ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+
+    // Condition breakdown
+    conditions_met = (rsi_condition ? 1 : 0) + (ema_condition ? 1 : 0) + (dc_condition ? 1 : 0) + (adx_condition ? 1 : 0) + (er_condition ? 1 : 0) + (st_condition ? 1 : 0) + (not_doji ? 1 : 0)
+    table.cell(infoTable, 0, 2, "Conditions", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(conditions_met) + "/7", bgcolor=conditions_met == 7 ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 3, "Entry Signal", text_color=color.white)
+    table.cell(infoTable, 1, 3, long_entry ? "YES (7/7)" : "No", bgcolor=long_entry ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+
+    // Alert status - most important
+    table.cell(infoTable, 0, 4, "ALERT STATUS", text_color=color.white)
+    alert_status = will_alert ? "FIRING" : (is_eod_alert_window ? "Waiting (no entry)" : "Not in window")
+    table.cell(infoTable, 1, 4, alert_status, bgcolor=will_alert ? color.new(color.green, 50) : color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 5, "Price", text_color=color.white)
+    table.cell(infoTable, 1, 5, str.tostring(close, "#.##"), text_color=color.white)
+
+    table.cell(infoTable, 0, 6, "SuperTrend", text_color=color.white)
+    table.cell(infoTable, 1, 6, str.tostring(supertrend, "#.##"), text_color=color.white)
+
+    table.cell(infoTable, 0, 7, "Window Start", text_color=color.white)
+    table.cell(infoTable, 1, 7, str.tostring(eod_hour) + ":" + str.tostring(eod_minute_start), text_color=color.white)

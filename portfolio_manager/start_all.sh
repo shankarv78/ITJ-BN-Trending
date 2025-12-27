@@ -12,7 +12,10 @@ OPENALGO_DIR="$HOME/openalgo"
 OPENALGO_PORT=5000
 OPENALGO_URL="http://127.0.0.1:$OPENALGO_PORT"
 PM_PORT=5002
+FRONTEND_PORT=8080
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+FRONTEND_DIR="$(dirname "$SCRIPT_DIR")/frontend"
+LOG_DIR="$SCRIPT_DIR/logs"
 TUNNEL_NAME="portfolio-manager"
 CLOUDFLARED_CONFIG="$HOME/.cloudflared/config.yml"
 MONITOR_LABEL="com.itj.pipeline-monitor"
@@ -64,7 +67,7 @@ parse_flags "$@"
 echo ""
 echo "============================================================"
 echo "  TOM BASSO PORTFOLIO MANAGER - UNIFIED STARTUP"
-echo "  OpenAlgo + Cloudflare Tunnel + Portfolio Manager"
+echo "  OpenAlgo + Tunnel + Portfolio Manager + Frontend"
 if [ "$TEST_MODE" = true ]; then
     echo -e "  ${YELLOW}⚠️  TEST MODE ENABLED - 1 LOT ORDERS ONLY${NC}"
 fi
@@ -102,6 +105,92 @@ check_dependencies() {
         log_error "openalgo_config.json not found"
         log_info "Please copy openalgo_config.json.example and configure it"
         exit 1
+    fi
+
+    # Check if PostgreSQL is running (required for position persistence)
+    if [ -f "$SCRIPT_DIR/db_config.json" ]; then
+        log_info "Checking PostgreSQL connection..."
+        if command -v pg_isready &> /dev/null; then
+            if pg_isready -q 2>/dev/null; then
+                log_success "PostgreSQL is running"
+            else
+                log_warn "PostgreSQL is NOT running - attempting to start..."
+
+                # Try to start PostgreSQL automatically
+                POSTGRES_STARTED=false
+
+                # First, check for stale lock file (common after crash/unclean shutdown)
+                for PG_DATA in /opt/homebrew/var/postgresql@14 /opt/homebrew/var/postgres /usr/local/var/postgres; do
+                    if [ -f "$PG_DATA/postmaster.pid" ]; then
+                        STALE_PID=$(head -1 "$PG_DATA/postmaster.pid" 2>/dev/null)
+                        if [ -n "$STALE_PID" ] && ! ps -p "$STALE_PID" > /dev/null 2>&1; then
+                            log_warn "Found stale PostgreSQL lock file (PID $STALE_PID is dead) - removing..."
+                            rm -f "$PG_DATA/postmaster.pid" 2>/dev/null
+                            log_info "Stale lock file removed"
+                        fi
+                    fi
+                done
+
+                # Method 1: Try brew services (most common on macOS)
+                if command -v brew &> /dev/null; then
+                    # Find installed PostgreSQL version
+                    PG_VERSION=$(brew list 2>/dev/null | grep -E "^postgresql@[0-9]+" | head -1)
+                    if [ -n "$PG_VERSION" ]; then
+                        log_info "Starting PostgreSQL via brew services ($PG_VERSION)..."
+                        if brew services start "$PG_VERSION" 2>/dev/null; then
+                            sleep 2  # Give it time to start
+                            if pg_isready -q 2>/dev/null; then
+                                log_success "PostgreSQL started successfully"
+                                POSTGRES_STARTED=true
+                            fi
+                        fi
+                    fi
+                fi
+
+                # Method 2: Try pg_ctl if brew didn't work
+                if [ "$POSTGRES_STARTED" = false ] && command -v pg_ctl &> /dev/null; then
+                    # Find data directory
+                    for PG_DATA in /opt/homebrew/var/postgresql@14 /opt/homebrew/var/postgres /usr/local/var/postgres; do
+                        if [ -d "$PG_DATA" ]; then
+                            log_info "Starting PostgreSQL via pg_ctl ($PG_DATA)..."
+                            if pg_ctl -D "$PG_DATA" start -l "$PG_DATA/server.log" 2>/dev/null; then
+                                sleep 2
+                                if pg_isready -q 2>/dev/null; then
+                                    log_success "PostgreSQL started successfully"
+                                    POSTGRES_STARTED=true
+                                    break
+                                fi
+                            fi
+                        fi
+                    done
+                fi
+
+                # If still not started, ask user
+                if [ "$POSTGRES_STARTED" = false ]; then
+                    log_error "Could not start PostgreSQL automatically"
+                    echo ""
+                    echo -e "  ${YELLOW}⚠️  Database persistence will be disabled.${NC}"
+                    echo -e "  ${YELLOW}   Positions will NOT be saved across restarts.${NC}"
+                    echo ""
+                    echo -e "  To start PostgreSQL manually:"
+                    echo -e "    ${BLUE}brew services start postgresql@14${NC}"
+                    echo -e "  Or:"
+                    echo -e "    ${BLUE}pg_ctl -D /opt/homebrew/var/postgresql@14 start${NC}"
+                    echo ""
+                    read -p "Continue without database? (y/N): " -n 1 -r
+                    echo ""
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                        log_info "Exiting. Start PostgreSQL first, then retry."
+                        exit 1
+                    fi
+                    log_warn "Continuing without database persistence..."
+                fi
+            fi
+        else
+            log_warn "pg_isready not found - cannot check PostgreSQL status"
+        fi
+    else
+        log_warn "No db_config.json found - database persistence disabled"
     fi
 
     log_success "All dependencies found"
@@ -253,6 +342,94 @@ stop_tunnel() {
 }
 
 # -----------------------------------------------------------------------------
+# Start Frontend
+# -----------------------------------------------------------------------------
+
+is_frontend_running() {
+    lsof -ti:$FRONTEND_PORT > /dev/null 2>&1
+}
+
+start_frontend() {
+    log_info "Checking Frontend status..."
+
+    if is_frontend_running; then
+        log_success "Frontend already running at http://localhost:$FRONTEND_PORT"
+        return 0
+    fi
+
+    if [ ! -d "$FRONTEND_DIR" ]; then
+        log_warn "Frontend directory not found at $FRONTEND_DIR - skipping"
+        return 1
+    fi
+
+    if [ ! -f "$FRONTEND_DIR/package.json" ]; then
+        log_warn "No package.json found in frontend directory - skipping"
+        return 1
+    fi
+
+    log_info "Starting Frontend..."
+
+    # Create logs directory if it doesn't exist
+    mkdir -p "$LOG_DIR"
+
+    cd "$FRONTEND_DIR"
+
+    # Check if node_modules exists
+    if [ ! -d "node_modules" ]; then
+        log_info "Installing frontend dependencies..."
+        npm install >> "$LOG_DIR/frontend.log" 2>&1
+    fi
+
+    # Start frontend in background
+    nohup npm run dev > "$LOG_DIR/frontend.log" 2>&1 &
+    FRONTEND_PID=$!
+    echo $FRONTEND_PID > "$SCRIPT_DIR/.frontend.pid"
+
+    # Wait for frontend to be ready
+    log_info "Waiting for Frontend to be ready..."
+
+    MAX_RETRIES=30
+    RETRY_COUNT=0
+
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        if is_frontend_running; then
+            log_success "Frontend is ready at http://localhost:$FRONTEND_PORT"
+            echo ""
+            echo -e "  ${GREEN}🖥️  Frontend URL: http://localhost:$FRONTEND_PORT${NC}"
+            echo -e "  ${BLUE}📝 Frontend logs: $LOG_DIR/frontend.log${NC}"
+            echo ""
+            return 0
+        fi
+        sleep 1
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo -n "."
+    done
+
+    echo ""
+    log_error "Frontend failed to start after ${MAX_RETRIES}s"
+    log_info "Check logs at: $LOG_DIR/frontend.log"
+    return 1
+}
+
+stop_frontend() {
+    if [ -f "$SCRIPT_DIR/.frontend.pid" ]; then
+        FRONTEND_PID=$(cat "$SCRIPT_DIR/.frontend.pid")
+        if ps -p $FRONTEND_PID > /dev/null 2>&1; then
+            log_info "Stopping Frontend (PID $FRONTEND_PID)..."
+            kill $FRONTEND_PID 2>/dev/null || true
+            rm "$SCRIPT_DIR/.frontend.pid"
+            log_success "Frontend stopped"
+        fi
+    fi
+
+    # Also try to kill by port
+    FRONTEND_PID=$(lsof -ti:$FRONTEND_PORT 2>/dev/null || true)
+    if [ ! -z "$FRONTEND_PID" ]; then
+        kill $FRONTEND_PID 2>/dev/null || true
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Start Portfolio Manager
 # -----------------------------------------------------------------------------
 
@@ -260,6 +437,9 @@ start_portfolio_manager() {
     log_info "Starting Portfolio Manager..."
 
     cd "$SCRIPT_DIR"
+
+    # Create logs directory if it doesn't exist
+    mkdir -p "$LOG_DIR"
 
     # Extract config values
     API_KEY=$(python3 -c "import json; print(json.load(open('openalgo_config.json'))['openalgo_api_key'])")
@@ -315,7 +495,40 @@ start_portfolio_manager() {
 
     # Start Portfolio Manager (filter out handled flags from passed args)
     FILTERED_ARGS=$(filter_handled_args "$@")
-    python3 portfolio_manager.py live $PM_ARGS $FILTERED_ARGS
+
+    # Run PM in background with logging
+    PM_LOG="$LOG_DIR/portfolio_manager.log"
+    log_info "Logging PM output to: $PM_LOG"
+
+    nohup python3 portfolio_manager.py live $PM_ARGS $FILTERED_ARGS >> "$PM_LOG" 2>&1 &
+    PM_PID=$!
+    echo $PM_PID > "$SCRIPT_DIR/.pm.pid"
+
+    # Wait for PM to be ready
+    log_info "Waiting for Portfolio Manager to be ready..."
+
+    MAX_RETRIES=30
+    RETRY_COUNT=0
+
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        if lsof -ti:$PM_PORT > /dev/null 2>&1; then
+            log_success "Portfolio Manager is ready at http://127.0.0.1:$PM_PORT"
+            echo ""
+            echo -e "  ${GREEN}📊 PM Dashboard: http://127.0.0.1:$PM_PORT/dashboard${NC}"
+            echo -e "  ${BLUE}📝 PM logs: $PM_LOG${NC}"
+            echo -e "  ${BLUE}📝 Tail logs: tail -f $PM_LOG${NC}"
+            echo ""
+            return 0
+        fi
+        sleep 1
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo -n "."
+    done
+
+    echo ""
+    log_error "Portfolio Manager failed to start after ${MAX_RETRIES}s"
+    log_info "Check logs at: $PM_LOG"
+    exit 1
 }
 
 # -----------------------------------------------------------------------------
@@ -325,7 +538,36 @@ start_portfolio_manager() {
 stop_all() {
     log_info "Stopping all services..."
 
-    # Stop Portfolio Manager (if running in foreground, Ctrl+C will handle it)
+    # Stop Frontend
+    stop_frontend
+
+    # Stop Pipeline Monitor daemon
+    if [ -f "$MONITOR_PID_FILE" ]; then
+        MONITOR_PID=$(cat "$MONITOR_PID_FILE")
+        if ps -p $MONITOR_PID > /dev/null 2>&1; then
+            log_info "Stopping Pipeline Monitor (PID $MONITOR_PID)..."
+            kill $MONITOR_PID 2>/dev/null || true
+            rm "$MONITOR_PID_FILE"
+            log_success "Pipeline Monitor stopped"
+        fi
+    fi
+    # Also try via launchctl
+    if launchctl list 2>/dev/null | grep -q "$MONITOR_LABEL"; then
+        log_info "Unloading Pipeline Monitor from launchctl..."
+        launchctl unload "$HOME/Library/LaunchAgents/com.itj.pipeline-monitor.plist" 2>/dev/null || true
+    fi
+
+    # Stop Portfolio Manager
+    if [ -f "$SCRIPT_DIR/.pm.pid" ]; then
+        PM_PID=$(cat "$SCRIPT_DIR/.pm.pid")
+        if ps -p $PM_PID > /dev/null 2>&1; then
+            log_info "Stopping Portfolio Manager (PID $PM_PID)..."
+            kill $PM_PID 2>/dev/null || true
+            rm "$SCRIPT_DIR/.pm.pid"
+            log_success "Portfolio Manager stopped"
+        fi
+    fi
+    # Also try to kill by port
     PM_PID=$(lsof -ti:$PM_PORT 2>/dev/null || true)
     if [ ! -z "$PM_PID" ]; then
         log_info "Stopping Portfolio Manager on port $PM_PORT..."
@@ -374,6 +616,17 @@ show_status() {
         log_warn "OpenAlgo: NOT RUNNING"
     fi
 
+    # PostgreSQL status
+    if command -v pg_isready &> /dev/null; then
+        if pg_isready -q 2>/dev/null; then
+            log_success "PostgreSQL: RUNNING on port 5432"
+        else
+            log_warn "PostgreSQL: NOT RUNNING (positions not persisted!)"
+        fi
+    else
+        log_warn "PostgreSQL: UNKNOWN (pg_isready not found)"
+    fi
+
     # Portfolio Manager status
     PM_PID=$(lsof -ti:$PM_PORT 2>/dev/null || true)
     if [ ! -z "$PM_PID" ]; then
@@ -386,6 +639,13 @@ show_status() {
         fi
     else
         log_warn "Portfolio Manager: NOT RUNNING"
+    fi
+
+    # Frontend status
+    if is_frontend_running; then
+        log_success "Frontend: RUNNING at http://localhost:$FRONTEND_PORT"
+    else
+        log_warn "Frontend: NOT RUNNING"
     fi
 
     # Cloudflare Tunnel status
@@ -411,6 +671,15 @@ show_status() {
         log_warn "Pipeline Monitor: NOT RUNNING"
     fi
 
+    # Log file locations
+    echo ""
+    echo "============================================================"
+    echo "  LOG FILES"
+    echo "============================================================"
+    echo ""
+    echo -e "  ${BLUE}PM Logs:       $LOG_DIR/portfolio_manager.log${NC}"
+    echo -e "  ${BLUE}Frontend Logs: $LOG_DIR/frontend.log${NC}"
+    echo -e "  ${BLUE}OpenAlgo Logs: $OPENALGO_DIR/log/openalgo.log${NC}"
     echo ""
 }
 
@@ -442,18 +711,41 @@ check_monitor_daemon() {
         log_success "Pipeline Monitor daemon is running"
         return 0
     else
-        log_warn "Pipeline Monitor daemon is NOT running!"
-        echo ""
-        echo -e "  ${YELLOW}⚠️  The pipeline monitor daemon should be running to alert you${NC}"
-        echo -e "  ${YELLOW}   if the trading pipeline goes down during market hours.${NC}"
-        echo ""
-        echo -e "  To start it manually:"
-        echo -e "    ${BLUE}launchctl load ~/Library/LaunchAgents/com.itj.pipeline-monitor.plist${NC}"
-        echo ""
-        echo -e "  Or install it as a startup service:"
-        echo -e "    ${BLUE}./install_monitor_service.sh${NC}"
-        echo ""
-        return 1
+        log_warn "Pipeline Monitor daemon is NOT running - attempting to start..."
+
+        # Try to start via launchctl first (if plist exists)
+        PLIST_PATH="$HOME/Library/LaunchAgents/com.itj.pipeline-monitor.plist"
+        if [ -f "$PLIST_PATH" ]; then
+            log_info "Loading monitor daemon via launchctl..."
+            launchctl load "$PLIST_PATH" 2>/dev/null
+            sleep 2
+            if is_monitor_running; then
+                log_success "Pipeline Monitor daemon started successfully"
+                return 0
+            fi
+        fi
+
+        # Fallback: Start monitor directly in background
+        log_info "Starting Pipeline Monitor in background..."
+        MONITOR_LOG="$LOG_DIR/pipeline_monitor.log"
+        nohup python3 "$SCRIPT_DIR/monitor_pipeline.py" --daemon >> "$MONITOR_LOG" 2>&1 &
+        MONITOR_PID=$!
+        echo $MONITOR_PID > "$MONITOR_PID_FILE"
+        sleep 2
+
+        if ps -p $MONITOR_PID > /dev/null 2>&1; then
+            log_success "Pipeline Monitor started (PID: $MONITOR_PID)"
+            return 0
+        else
+            log_warn "Failed to start Pipeline Monitor daemon"
+            echo ""
+            echo -e "  ${YELLOW}⚠️  The pipeline monitor daemon could not be started.${NC}"
+            echo -e "  ${YELLOW}   You can try starting it manually:${NC}"
+            echo ""
+            echo -e "    ${BLUE}python3 monitor_pipeline.py --daemon${NC}"
+            echo ""
+            return 1
+        fi
     fi
 }
 
@@ -479,8 +771,21 @@ case "${1:-start}" in
     start)
         check_dependencies
         start_openalgo
-        start_tunnel  # Start tunnel in background before PM (PM runs in foreground)
+        start_tunnel  # Start tunnel in background before PM
         start_portfolio_manager "${@:2}"
+        start_frontend
+        echo ""
+        echo "============================================================"
+        echo -e "  ${GREEN}✅ ALL SERVICES STARTED${NC}"
+        echo "============================================================"
+        echo ""
+        echo -e "  ${GREEN}🖥️  Frontend:  http://localhost:$FRONTEND_PORT${NC}"
+        echo -e "  ${GREEN}📊 PM API:    http://127.0.0.1:$PM_PORT${NC}"
+        echo -e "  ${GREEN}🔌 OpenAlgo:  $OPENALGO_URL${NC}"
+        echo ""
+        echo -e "  ${BLUE}📝 View PM logs:       tail -f $LOG_DIR/portfolio_manager.log${NC}"
+        echo -e "  ${BLUE}📝 View Frontend logs: tail -f $LOG_DIR/frontend.log${NC}"
+        echo ""
         ;;
     stop)
         stop_all
@@ -495,6 +800,9 @@ case "${1:-start}" in
         start_openalgo
         start_tunnel
         start_portfolio_manager "${@:2}"
+        start_frontend
+        echo ""
+        log_success "All services restarted"
         ;;
     openalgo)
         # Start only OpenAlgo (useful for debugging)
@@ -506,6 +814,10 @@ case "${1:-start}" in
         # Start only Cloudflare Tunnel
         start_tunnel
         ;;
+    frontend)
+        # Start only Frontend
+        start_frontend
+        ;;
     pm)
         # Start only Portfolio Manager (assumes OpenAlgo is running)
         if ! is_openalgo_running; then
@@ -515,27 +827,42 @@ case "${1:-start}" in
         start_tunnel  # Also start tunnel when starting PM
         start_portfolio_manager "${@:2}"
         ;;
+    logs)
+        # Tail all logs
+        echo "Tailing logs from: $LOG_DIR"
+        echo "Press Ctrl+C to stop"
+        echo ""
+        tail -f "$LOG_DIR/portfolio_manager.log" "$LOG_DIR/frontend.log" 2>/dev/null || tail -f "$LOG_DIR/portfolio_manager.log" 2>/dev/null || echo "No log files found yet"
+        ;;
     *)
-        echo "Usage: $0 {start|stop|status|restart|openalgo|tunnel|pm} [--test-mode] [--silent]"
+        echo "Usage: $0 {start|stop|status|restart|openalgo|tunnel|frontend|pm|logs} [--test-mode] [--silent]"
         echo ""
         echo "Commands:"
-        echo "  start    - Start OpenAlgo, Cloudflare Tunnel, and Portfolio Manager"
+        echo "  start    - Start OpenAlgo, Tunnel, Portfolio Manager, and Frontend"
         echo "  stop     - Stop all services"
         echo "  status   - Show status of all services"
         echo "  restart  - Restart all services"
         echo "  openalgo - Start only OpenAlgo"
         echo "  tunnel   - Start only Cloudflare Tunnel"
+        echo "  frontend - Start only Frontend"
         echo "  pm       - Start Portfolio Manager + Tunnel (OpenAlgo must be running)"
+        echo "  logs     - Tail all log files"
         echo ""
         echo "Options:"
         echo "  --test-mode  Enable test mode (1 lot orders only, logged calculated lots)"
         echo "  --silent     Disable voice announcements (use visual alerts instead)"
         echo ""
         echo "Examples:"
-        echo "  $0 start              # Normal startup"
+        echo "  $0 start              # Normal startup (all services)"
         echo "  $0 start --test-mode  # Start in test mode"
         echo "  $0 start --silent     # Start in silent mode (no voice)"
         echo "  $0 pm --test-mode --silent  # PM with both modes"
+        echo "  $0 logs               # View all logs in real-time"
+        echo ""
+        echo "Log files:"
+        echo "  PM:       $LOG_DIR/portfolio_manager.log"
+        echo "  Frontend: $LOG_DIR/frontend.log"
+        echo "  OpenAlgo: $OPENALGO_DIR/log/openalgo.log"
         echo ""
         exit 1
         ;;

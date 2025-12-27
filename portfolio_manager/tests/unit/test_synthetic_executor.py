@@ -99,7 +99,7 @@ def mock_symbol_mapper():
         )
 
     mapper.translate = Mock(side_effect=translate)
-    mapper.get_lot_size = Mock(return_value=35)
+    mapper.get_lot_size = Mock(return_value=30)
 
     return mapper
 
@@ -463,9 +463,9 @@ class TestEdgeCases:
 
     def test_quantity_calculation(self, executor, mock_symbol_mapper):
         """Quantity = lots * lot_size"""
-        mock_symbol_mapper.get_lot_size.return_value = 35
+        mock_symbol_mapper.get_lot_size.return_value = 30
 
-        # 2 lots = 70 quantity
+        # 2 lots = 60 quantity
         result = executor.execute_entry(
             instrument="BANK_NIFTY",
             lots=2,
@@ -475,8 +475,8 @@ class TestEdgeCases:
         # Verify place_order was called with correct quantity
         calls = executor.openalgo.place_order.call_args_list
         if calls:
-            # Check that quantity=70 was passed
-            assert any(call.kwargs.get('quantity') == 70 for call in calls)
+            # Check that quantity=60 was passed (2 lots × 30)
+            assert any(call.kwargs.get('quantity') == 60 for call in calls)
 
 
 # =============================================================================
@@ -514,6 +514,221 @@ class TestLegExecutionResult:
         assert result.success == False
         assert result.error == "insufficient_margin"
         assert result.order_id is None
+
+
+# =============================================================================
+# SYNTHETIC PRICE CALCULATION TESTS (Task 35.10)
+# =============================================================================
+
+class TestSyntheticPriceCalculation:
+    """
+    Test the synthetic futures price calculation formula.
+
+    Formula: Synthetic Entry Price = Strike + CE_Premium - PE_Premium
+
+    This tests the get_synthetic_price() method and to_execution_result() method
+    of SyntheticExecutionResult.
+    """
+
+    def test_synthetic_price_basic_calculation(self):
+        """Test basic synthetic price: Strike + CE - PE"""
+        # Strike = 50000, CE = 350, PE = 320
+        # Expected: 50000 + 350 - 320 = 50030
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=320.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=350.0, leg_type="CE"),
+            strike=50000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price == 50030.0
+        assert synthetic_price != (320 + 350) / 2  # Not the incorrect average!
+
+    def test_synthetic_price_ce_higher_than_pe(self):
+        """Test when CE premium is higher than PE (typical ATM scenario)"""
+        # Strike = 52000, CE = 400, PE = 380
+        # Expected: 52000 + 400 - 380 = 52020
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=380.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=400.0, leg_type="CE"),
+            strike=52000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price == 52020.0
+
+    def test_synthetic_price_pe_higher_than_ce(self):
+        """Test when PE premium is higher than CE (bearish skew)"""
+        # Strike = 50000, CE = 300, PE = 350
+        # Expected: 50000 + 300 - 350 = 49950
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=350.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=300.0, leg_type="CE"),
+            strike=50000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price == 49950.0
+
+    def test_synthetic_price_equal_premiums(self):
+        """Test when CE and PE premiums are equal"""
+        # Strike = 51000, CE = 350, PE = 350
+        # Expected: 51000 + 350 - 350 = 51000
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=350.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=350.0, leg_type="CE"),
+            strike=51000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price == 51000.0
+
+    def test_synthetic_price_no_strike_returns_none(self):
+        """Test that None is returned when strike is not set"""
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=320.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=350.0, leg_type="CE"),
+            strike=None  # No strike
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price is None
+
+    def test_synthetic_price_no_pe_result_returns_none(self):
+        """Test that None is returned when PE result is missing"""
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=None,
+            ce_result=LegExecutionResult(success=True, fill_price=350.0, leg_type="CE"),
+            strike=50000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price is None
+
+    def test_synthetic_price_no_ce_result_returns_none(self):
+        """Test that None is returned when CE result is missing"""
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=320.0, leg_type="PE"),
+            ce_result=None,
+            strike=50000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price is None
+
+    def test_to_execution_result_uses_synthetic_price(self):
+        """Test that to_execution_result uses correct synthetic price"""
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=320.0, order_id="PE001", leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=350.0, order_id="CE001", leg_type="CE"),
+            strike=50000
+        )
+
+        exec_result = result.to_execution_result(lots=2, signal_price=50100.0)
+
+        # Should use synthetic price (50030), not average (335) or signal price (50100)
+        assert exec_result.execution_price == 50030.0
+        assert exec_result.status == ExecutionStatus.EXECUTED
+        assert exec_result.lots_filled == 2
+        assert "strike=50000" in exec_result.notes
+
+    def test_to_execution_result_fallback_to_signal_price(self):
+        """Test that to_execution_result falls back to signal price when strike missing"""
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=320.0, order_id="PE001", leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=350.0, order_id="CE001", leg_type="CE"),
+            strike=None  # No strike
+        )
+
+        exec_result = result.to_execution_result(lots=2, signal_price=50100.0)
+
+        # Should fall back to signal price
+        assert exec_result.execution_price == 50100.0
+
+    def test_synthetic_price_large_premium_difference(self):
+        """Test with large premium difference (volatile market)"""
+        # Strike = 55000, CE = 800, PE = 200
+        # Expected: 55000 + 800 - 200 = 55600
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=200.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=800.0, leg_type="CE"),
+            strike=55000
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price == 55600.0
+
+    def test_synthetic_price_with_realistic_bank_nifty_values(self):
+        """Test with realistic Bank Nifty values (Dec 2025)"""
+        # Bank Nifty at 52,500
+        # Strike = 52500, CE = 425, PE = 395
+        # Expected: 52500 + 425 - 395 = 52530
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            pe_result=LegExecutionResult(success=True, fill_price=395.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=425.0, leg_type="CE"),
+            strike=52500
+        )
+
+        synthetic_price = result.get_synthetic_price()
+        assert synthetic_price == 52530.0
+
+        # Verify it's close to the underlying (within typical spread)
+        assert abs(synthetic_price - 52500) < 100
+
+    def test_synthetic_price_formula_explicit_verification(self):
+        """
+        Explicit formula verification test as recommended by code review.
+
+        Formula: Synthetic Price = Strike + CE - PE
+        Test case: Strike=50000, CE=150, PE=200
+        Expected: 50000 + 150 - 200 = 49950
+        """
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            strike=50000,
+            pe_result=LegExecutionResult(success=True, fill_price=200.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=150.0, leg_type="CE")
+        )
+
+        synthetic_price = result.get_synthetic_price()
+
+        # Verify exact formula: 50000 + 150 - 200 = 49950
+        assert synthetic_price == 49950.0
+
+        # Also verify NOT the incorrect average formula
+        incorrect_avg = (200.0 + 150.0) / 2
+        assert synthetic_price != incorrect_avg
+
+    def test_synthetic_price_negative_returns_none(self):
+        """
+        Test that negative synthetic price (edge case) returns None.
+
+        This could happen with extreme mispricing or data errors.
+        """
+        # Extreme case: PE so high that Strike + CE - PE becomes negative
+        # Strike = 1000, CE = 10, PE = 2000 → 1000 + 10 - 2000 = -990
+        result = SyntheticExecutionResult(
+            status=ExecutionStatus.EXECUTED,
+            strike=1000,
+            pe_result=LegExecutionResult(success=True, fill_price=2000.0, leg_type="PE"),
+            ce_result=LegExecutionResult(success=True, fill_price=10.0, leg_type="CE")
+        )
+
+        synthetic_price = result.get_synthetic_price()
+
+        # Should return None for invalid negative price
+        assert synthetic_price is None
 
 
 if __name__ == "__main__":

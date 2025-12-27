@@ -2,6 +2,37 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+## 🚀 Quick Session Start
+
+**Last Updated:** December 2024
+
+### Current State
+- ✅ Portfolio Manager: Production ready with live trading
+- ✅ Frontend: React dashboard at `localhost:8080`
+- ✅ HA System: PostgreSQL + Redis for persistence
+- ⚠️ Daily: Must login to Zerodha via OpenAlgo before market opens
+
+### Start Everything
+```bash
+cd ~/claude-code/ITJ-BN-Trending/portfolio_manager
+./start_all.sh start              # Starts: PostgreSQL → OpenAlgo → Tunnel → PM → Frontend
+./start_all.sh status             # Check all services
+./start_all.sh logs               # Tail all logs
+```
+
+### Recent Session Notes
+<!-- Update this section after each session -->
+- Fixed: start_all.sh now auto-starts PostgreSQL and clears stale lock files
+- Fixed: Frontend port is 8080 (not 5173)
+- Fixed: OpenAlgo auth cache issue (restart OpenAlgo after Zerodha login)
+
+### Active Issues / TODOs
+- None currently
+
+---
+
 ## Repository Overview
 
 A multi-component trading system for Bank Nifty and Gold Mini trend following:

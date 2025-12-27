@@ -214,6 +214,12 @@ class SignalValidator:
         """
         Validate 1R movement for PYRAMID signals.
 
+        1R = Initial Risk = Entry Price - Initial Stop (from base position)
+
+        This aligns with Pine Script's pyramid gate logic:
+        - pyramid_gate_open = price_move_from_entry > initial_risk_points
+        - where initial_risk_points = initial_entry_price - initial_stop_price
+
         Args:
             signal: PYRAMID signal
             portfolio_state: Current portfolio state
@@ -235,12 +241,21 @@ class SignalValidator:
         if base_position is None:
             return False, "no_base_position_found"
 
-        # Calculate price movement
-        price_move = signal.price - base_position.entry_price
-        atr_threshold = signal.atr * 1.5  # 1.5 ATR threshold
+        # Calculate actual 1R (initial risk) = entry_price - initial_stop
+        # This matches Pine Script: initial_risk_points = initial_entry_price - initial_stop_price
+        initial_risk = base_position.entry_price - base_position.initial_stop
 
-        if price_move < atr_threshold:
-            return False, f"insufficient_1r_movement_{price_move:.2f}_vs_{atr_threshold:.2f}"
+        if initial_risk <= 0:
+            return False, f"invalid_initial_risk_{initial_risk:.2f}"
+
+        # Calculate price movement from entry
+        price_move = signal.price - base_position.entry_price
+
+        # 1R Gate: Price must move MORE than 1R (initial risk)
+        # This matches Pine Script: price_move_from_entry > initial_risk_points
+        if price_move <= initial_risk:
+            price_move_r = price_move / initial_risk if initial_risk > 0 else 0
+            return False, f"1r_gate_not_passed_move_{price_move:.2f}_1R_{initial_risk:.2f}_ratio_{price_move_r:.2f}R"
 
         return True, None
 
@@ -276,7 +291,14 @@ class SignalValidator:
         total_pnl = 0.0
 
         # Determine point value based on instrument
-        point_value = 35.0 if signal.instrument == "BANK_NIFTY" else 10.0
+        if signal.instrument == "BANK_NIFTY":
+            point_value = 30.0  # Dec 2025 onwards
+        elif signal.instrument == "COPPER":
+            point_value = 2500.0
+        elif signal.instrument == "SILVER_MINI":
+            point_value = 5.0  # Rs 5 per Rs 1/kg move (5kg contract)
+        else:  # GOLD_MINI
+            point_value = 10.0
 
         for pos in instrument_positions:
             pnl = pos.calculate_pnl(signal.price, point_value)

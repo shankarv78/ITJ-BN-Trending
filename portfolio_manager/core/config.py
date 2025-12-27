@@ -10,10 +10,10 @@ INSTRUMENT_CONFIGS = {
     InstrumentType.BANK_NIFTY: InstrumentConfig(
         name="Bank Nifty",
         instrument_type=InstrumentType.BANK_NIFTY,
-        lot_size=35,  # Current lot size (Apr-Dec 2025)
-        point_value=35.0,  # Rs 35 per point per LOT (35 units × ₹1/point/unit)
+        lot_size=30,  # Current lot size (Dec 2025 onwards)
+        point_value=30.0,  # Rs 30 per point per LOT (30 units × ₹1/point/unit)
         margin_per_lot=270000.0,  # Rs 2.7L per lot
-        initial_risk_percent=0.5,
+        initial_risk_percent=1.0,  # 1% risk per trade (matching PM strategy)
         ongoing_risk_percent=1.0,
         initial_vol_percent=0.5,
         ongoing_vol_percent=0.7,
@@ -27,13 +27,41 @@ INSTRUMENT_CONFIGS = {
         lot_size=100,  # 100 grams per contract
         point_value=10.0,  # Rs 10 per point per LOT (quoted per 10g, contract is 100g)
         margin_per_lot=105000.0,  # Rs 1.05L per lot (conservative margin cushion)
-        initial_risk_percent=0.5,
+        initial_risk_percent=1.0,  # 1% risk per trade (matching PM strategy)
         ongoing_risk_percent=1.0,
         initial_vol_percent=0.2,
         ongoing_vol_percent=0.3,
         initial_atr_mult=1.0,
         trailing_atr_mult=2.0,
         max_pyramids=3
+    ),
+    InstrumentType.COPPER: InstrumentConfig(
+        name="Copper",
+        instrument_type=InstrumentType.COPPER,
+        lot_size=2500,  # 2,500 kg per contract (2.5 metric tonnes)
+        point_value=2500.0,  # Rs 2500 per Re 1 move (2500kg × Re 1/kg)
+        margin_per_lot=300000.0,  # Rs 3L per lot (MCX Copper margin)
+        initial_risk_percent=1.0,  # 1% risk per trade (matching PM strategy)
+        ongoing_risk_percent=1.0,  # Ongoing position risk
+        initial_vol_percent=0.2,  # Initial volatility exposure
+        ongoing_vol_percent=0.3,  # Ongoing volatility exposure
+        initial_atr_mult=3.0,  # Copper-optimized: 3× ATR initial stop
+        trailing_atr_mult=5.0,  # Copper-optimized: 5× ATR trailing stop
+        max_pyramids=3  # Max pyramid levels (user setting)
+    ),
+    InstrumentType.SILVER_MINI: InstrumentConfig(
+        name="Silver Mini",
+        instrument_type=InstrumentType.SILVER_MINI,
+        lot_size=5,  # 5 kg per contract (MCX Silver Mini)
+        point_value=5.0,  # Rs 5 per Re 1/kg move (5kg × Re 1)
+        margin_per_lot=200000.0,  # Rs 2L per lot (MCX Silver Mini margin)
+        initial_risk_percent=1.0,  # 1% risk per trade (matching PM strategy)
+        ongoing_risk_percent=1.0,  # Ongoing position risk
+        initial_vol_percent=0.2,  # Initial volatility exposure
+        ongoing_vol_percent=0.3,  # Ongoing volatility exposure
+        initial_atr_mult=2.0,  # Silver Mini: 2× ATR initial stop (from Pine Script)
+        trailing_atr_mult=3.0,  # Silver Mini: 3× ATR trailing stop (from Pine Script)
+        max_pyramids=5  # Max pyramid levels (from Pine Script)
     )
 }
 
@@ -67,6 +95,8 @@ class PortfolioConfig:
         self.enable_auto_rollover = True
         self.banknifty_rollover_days = 7  # Days before expiry to roll Bank Nifty
         self.gold_mini_rollover_days = 8  # Days before expiry to roll Gold Mini (tender period)
+        self.copper_rollover_days = 8  # Days before expiry to roll Copper (tender period)
+        self.silver_mini_rollover_days = 8  # Days before expiry to roll Silver Mini (tender period)
 
         # Rollover execution settings (tight limit orders)
         self.rollover_initial_buffer_pct = 0.25  # Start at LTP ± 0.25%
@@ -83,20 +113,20 @@ class PortfolioConfig:
         self.nse_market_end = "15:30"    # NSE closes
         self.mcx_market_start = "09:00"  # MCX opens
         self.mcx_market_end = "23:55"    # MCX closes (winter), 23:30 in summer (US DST)
-        
+
         # Bank Nifty futures symbol for rollover (configurable by broker)
         self.banknifty_futures_symbol = "BANKNIFTY-I"  # Near month futures symbol
-        
+
         # Signal validation settings
         self.signal_validation_config: Optional[SignalValidationConfig] = None
         """Signal validation configuration (uses defaults if None)"""
-        
+
         self.execution_strategy: str = "progressive"
         """Execution strategy: 'simple_limit' or 'progressive'"""
-        
+
         self.signal_validation_enabled: bool = True
         """Enable signal validation (can be disabled via feature flag)"""
-        
+
         self.partial_fill_strategy: str = "cancel"
         """Partial fill strategy: 'cancel', 'wait', or 'reattempt' (default: 'cancel')"""
 
@@ -154,7 +184,9 @@ class PortfolioConfig:
         # Summer (Mar-Nov): 23:30, Winter (Nov-Mar): 23:55
         self.market_close_times: Dict[str, str] = {
             "BANK_NIFTY": "15:30",  # NSE closes at 3:30 PM IST (fixed)
-            "GOLD_MINI": "23:30"    # MCX summer timing (will be overridden dynamically)
+            "GOLD_MINI": "23:30",   # MCX summer timing (will be overridden dynamically)
+            "COPPER": "23:30",      # MCX summer timing (will be overridden dynamically)
+            "SILVER_MINI": "23:30"  # MCX summer timing (will be overridden dynamically)
         }
         """Market close times for each instrument (HH:MM format, IST)"""
 
@@ -168,7 +200,9 @@ class PortfolioConfig:
         # EOD execution for each instrument (can be selectively disabled)
         self.eod_instruments_enabled: Dict[str, bool] = {
             "BANK_NIFTY": True,
-            "GOLD_MINI": True
+            "GOLD_MINI": True,
+            "COPPER": True,
+            "SILVER_MINI": True
         }
         """Enable/disable EOD execution per instrument"""
 
@@ -213,24 +247,25 @@ class PortfolioConfig:
         Handles MCX seasonal timing automatically.
 
         Args:
-            instrument: Instrument name (e.g., "GOLD_MINI", "BANK_NIFTY")
+            instrument: Instrument name (e.g., "GOLD_MINI", "BANK_NIFTY", "COPPER")
             check_date: Date to check (default: today)
 
         Returns:
             Close time string in HH:MM format
         """
-        if instrument == "GOLD_MINI":
+        # MCX instruments (Gold Mini, Copper, Silver Mini) use dynamic DST-based timing
+        if instrument in ("GOLD_MINI", "COPPER", "SILVER_MINI"):
             return self.get_mcx_close_time(check_date)
         return self.market_close_times.get(instrument, "15:30")
 
     def get_equity(self, closed_equity: float, unrealized_pnl: float) -> float:
         """
         Calculate equity based on configured mode
-        
+
         Args:
             closed_equity: Realized equity (cash + closed P&L)
             unrealized_pnl: Sum of unrealized P&L from open positions
-            
+
         Returns:
             Equity value based on mode
         """
@@ -244,4 +279,3 @@ class PortfolioConfig:
 def get_instrument_config(instrument: InstrumentType) -> InstrumentConfig:
     """Get configuration for instrument"""
     return INSTRUMENT_CONFIGS[instrument]
-

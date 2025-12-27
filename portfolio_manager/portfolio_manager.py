@@ -1017,6 +1017,158 @@ def run_live(args):
                 'error': str(e)
             }), 503
 
+    # ===== CAPITAL MANAGEMENT ENDPOINTS =====
+
+    @app.route('/capital/inject', methods=['POST'])
+    def capital_inject():
+        """
+        Inject capital (deposit) or withdraw from portfolio
+
+        Request body:
+        {
+            "type": "DEPOSIT" or "WITHDRAW",
+            "amount": 500000,
+            "notes": "Optional notes"
+        }
+
+        Returns:
+        {
+            "status": "success",
+            "transaction": { ... transaction details ... }
+        }
+        """
+        if not db_manager:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database persistence not configured'
+            }), 400
+
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Request body required'
+                }), 400
+
+            transaction_type = data.get('type')
+            amount = data.get('amount')
+            notes = data.get('notes')
+
+            if not transaction_type:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'type is required (DEPOSIT or WITHDRAW)'
+                }), 400
+
+            if not amount or amount <= 0:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'amount must be a positive number'
+                }), 400
+
+            # Execute the capital transaction
+            result = db_manager.inject_capital(
+                transaction_type=transaction_type.upper(),
+                amount=float(amount),
+                notes=notes,
+                created_by='API'
+            )
+
+            # Reload equity in PortfolioStateManager
+            engine.portfolio.reload_equity_from_db()
+
+            return jsonify({
+                'status': 'success',
+                'transaction': result,
+                'message': f"Successfully processed {transaction_type} of ₹{amount:,.2f}"
+            }), 200
+
+        except ValueError as e:
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 400
+        except RuntimeError as e:
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 400
+        except Exception as e:
+            logger.error(f"Capital injection failed: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': f'Internal error: {str(e)}'
+            }), 500
+
+    @app.route('/capital/transactions', methods=['GET'])
+    def capital_transactions():
+        """
+        Get capital transaction history
+
+        Query params:
+        - limit: Maximum number of transactions (default 50)
+        - type: Filter by DEPOSIT or WITHDRAW
+        """
+        if not db_manager:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database persistence not configured'
+            }), 400
+
+        try:
+            limit = request.args.get('limit', 50, type=int)
+            transaction_type = request.args.get('type')
+
+            transactions = db_manager.get_capital_transactions(
+                limit=limit,
+                transaction_type=transaction_type.upper() if transaction_type else None
+            )
+
+            # Convert Decimal to float for JSON serialization
+            for tx in transactions:
+                tx['amount'] = float(tx['amount'])
+                tx['equity_before'] = float(tx['equity_before'])
+                tx['equity_after'] = float(tx['equity_after'])
+                if tx.get('created_at'):
+                    tx['created_at'] = tx['created_at'].isoformat()
+
+            return jsonify({
+                'status': 'success',
+                'transactions': transactions,
+                'count': len(transactions)
+            }), 200
+
+        except Exception as e:
+            logger.error(f"Failed to get capital transactions: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 500
+
+    @app.route('/capital/summary', methods=['GET'])
+    def capital_summary():
+        """Get summary of all capital transactions"""
+        if not db_manager:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database persistence not configured'
+            }), 400
+
+        try:
+            summary = db_manager.get_capital_summary()
+            return jsonify({
+                'status': 'success',
+                'summary': summary
+            }), 200
+
+        except Exception as e:
+            logger.error(f"Failed to get capital summary: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 500
+
     @app.route('/status', methods=['GET'])
     def status():
         """Get current portfolio status with full details (cached for 2 seconds)"""
@@ -1633,7 +1785,7 @@ def run_live(args):
 
     @app.route('/health', methods=['GET'])
     def health():
-        """Health check endpoint"""
+        """Health check endpoint with real service statuses"""
         # Check if trading is paused
         trading_paused = False
         pause_reason = None
@@ -1645,10 +1797,80 @@ def run_live(args):
         if voice_announcer:
             voice_status = 'silent_mode' if voice_announcer.silent_mode else 'enabled'
 
+        # === REAL SERVICE STATUS CHECKS ===
+
+        # 1. Database status
+        database_status = 'offline'
+        if db_manager:
+            try:
+                with db_manager.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                database_status = 'online'
+            except Exception as e:
+                logger.warning(f"Database health check failed: {e}")
+                database_status = 'offline'
+        else:
+            database_status = 'disabled'
+
+        # 2. Broker status (OpenAlgo connectivity)
+        broker_status = 'disconnected'
+        broker_error = None
+        if openalgo and hasattr(openalgo, 'check_connection'):
+            try:
+                broker_check = openalgo.check_connection()
+                if broker_check.get('connected'):
+                    broker_status = 'connected'
+                else:
+                    broker_status = 'disconnected'
+                    broker_error = broker_check.get('error')
+            except Exception as e:
+                logger.warning(f"Broker health check failed: {e}")
+                broker_status = 'disconnected'
+                broker_error = str(e)
+        elif openalgo:
+            # Fallback: assume connected if client exists but no check_connection method
+            broker_status = 'connected'
+        else:
+            broker_status = 'disabled'
+
+        # 3. Webhook status (based on last signal timestamp)
+        webhook_status = 'inactive'
+        last_signal_timestamp = engine.stats.get('last_signal_timestamp')
+        if last_signal_timestamp:
+            try:
+                last_signal_dt = datetime.fromisoformat(last_signal_timestamp)
+                # Consider webhook active if signal received in last 24 hours
+                hours_since_signal = (datetime.now() - last_signal_dt).total_seconds() / 3600
+                if hours_since_signal < 24:
+                    webhook_status = 'active'
+                else:
+                    webhook_status = 'inactive'
+            except Exception:
+                webhook_status = 'inactive'
+        else:
+            # No signals received yet - webhook endpoint exists but no traffic
+            webhook_status = 'active'  # Endpoint is available, just no signals
+
+        # Determine overall status
+        overall_status = 'healthy'
+        if database_status == 'offline' or broker_status == 'disconnected':
+            overall_status = 'unhealthy'
+        elif database_status == 'disabled' or broker_status == 'disabled':
+            overall_status = 'degraded'
+
         return jsonify({
-            'status': 'healthy',
+            'status': overall_status,
             'timestamp': datetime.now().isoformat(),
-            'test_mode': engine.test_mode,  # Include test mode status
+            # Real service statuses for frontend SystemHealth component
+            'database': database_status,
+            'broker': broker_status,
+            'broker_error': broker_error,
+            'webhook': webhook_status,
+            'last_signal_timestamp': last_signal_timestamp,
+            # Existing fields
+            'test_mode': engine.test_mode,
             'silent_mode': voice_announcer.silent_mode if voice_announcer else False,
             'rollover_scheduler': 'running' if rollover_scheduler else 'disabled',
             'eod_scheduler': 'running' if (eod_scheduler and eod_scheduler.is_running()) else 'disabled',
@@ -2421,7 +2643,7 @@ def run_live(args):
                     lot_size = 100
                 elif 'BANKNIFTY' in symbol_upper or 'NIFTYBANK' in symbol_upper:
                     instrument = 'BANK_NIFTY'
-                    lot_size = 35
+                    lot_size = 30  # Dec 2025 onwards
                 elif 'SENSEX' in symbol_upper:
                     instrument = 'SENSEX'
                     lot_size = 10
@@ -2534,7 +2756,9 @@ def run_live(args):
             # Calculate lots based on instrument
             lot_sizes = {
                 'GOLD_MINI': 100,
-                'BANK_NIFTY': 15,
+                'SILVER_MINI': 5,
+                'COPPER': 2500,
+                'BANK_NIFTY': 30,  # Dec 2025 onwards
                 'NIFTY': 25,
                 'SENSEX': 10,
                 'FINNIFTY': 25,
@@ -2582,6 +2806,8 @@ def run_live(args):
 
             # Add symbol-specific fields
             if instrument == 'GOLD_MINI':
+                position.futures_symbol = data['symbol']
+            elif instrument in ('COPPER', 'SILVER_MINI'):
                 position.futures_symbol = data['symbol']
             elif instrument == 'BANK_NIFTY':
                 # For synthetic futures, we'd need PE/CE symbols
@@ -2653,7 +2879,9 @@ def run_live(args):
             # Lot sizes for various instruments
             lot_sizes = {
                 'GOLD_MINI': 100,
-                'BANK_NIFTY': 35,
+                'SILVER_MINI': 5,
+                'COPPER': 2500,
+                'BANK_NIFTY': 30,  # Dec 2025 onwards
                 'NIFTY': 75,
                 'SENSEX': 10,
                 'FINNIFTY': 25,
@@ -2691,6 +2919,10 @@ def run_live(args):
                             instrument = 'NIFTY'
                         elif 'SENSEX' in symbol_upper:
                             instrument = 'SENSEX'
+                        elif 'SILVERM' in symbol_upper:
+                            instrument = 'SILVER_MINI'
+                        elif 'COPPER' in symbol_upper:
+                            instrument = 'COPPER'
                         elif 'GOLD' in symbol_upper:
                             instrument = 'GOLD_MINI'
 
@@ -2903,6 +3135,58 @@ def run_live(args):
 
         except Exception as e:
             logger.error(f"Error untagging position: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    # =========================================================================
+    # ADMIN: Position P&L Update (for testing/manual adjustment)
+    # =========================================================================
+
+    @app.route('/admin/position/update-pnl', methods=['POST'])
+    def admin_update_position_pnl():
+        """
+        Update unrealized P&L for a position (admin/testing use)
+
+        Request body:
+        {
+            "position_id": "SILVER_MINI_Long_1",
+            "unrealized_pnl": 81100.0
+        }
+        """
+        if not engine:
+            return jsonify({'error': 'Trading engine not initialized'}), 500
+
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        position_id = data.get('position_id')
+        unrealized_pnl = data.get('unrealized_pnl')
+
+        if not position_id:
+            return jsonify({'error': 'position_id is required'}), 400
+        if unrealized_pnl is None:
+            return jsonify({'error': 'unrealized_pnl is required'}), 400
+
+        try:
+            # Get position from portfolio
+            position = engine.portfolio.positions.get(position_id)
+            if not position:
+                return jsonify({'error': f'Position not found: {position_id}'}), 404
+
+            old_pnl = position.unrealized_pnl
+            position.unrealized_pnl = float(unrealized_pnl)
+
+            logger.info(f"[ADMIN] Updated P&L for {position_id}: {old_pnl} -> {unrealized_pnl}")
+
+            return jsonify({
+                'success': True,
+                'position_id': position_id,
+                'old_pnl': old_pnl,
+                'new_pnl': position.unrealized_pnl
+            }), 200
+
+        except Exception as e:
+            logger.error(f"Error updating position P&L: {e}")
             return jsonify({'error': str(e)}), 500
 
     logger.info("=" * 60)

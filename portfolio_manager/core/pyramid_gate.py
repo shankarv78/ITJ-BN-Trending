@@ -52,6 +52,10 @@ class PyramidGateController:
             inst_type = InstrumentType.BANK_NIFTY
         elif instrument == "GOLD_MINI":
             inst_type = InstrumentType.GOLD_MINI
+        elif instrument == "COPPER":
+            inst_type = InstrumentType.COPPER
+        elif instrument == "SILVER_MINI":
+            inst_type = InstrumentType.SILVER_MINI
         else:
             return PyramidGateCheck(
                 allowed=False,

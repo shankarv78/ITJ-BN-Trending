@@ -11,6 +11,8 @@ class InstrumentType(Enum):
     """Supported instruments"""
     GOLD_MINI = "GOLD_MINI"
     BANK_NIFTY = "BANK_NIFTY"
+    COPPER = "COPPER"
+    SILVER_MINI = "SILVER_MINI"
 
 class SignalType(Enum):
     """Signal types"""
@@ -33,8 +35,8 @@ class InstrumentConfig:
     """Configuration for each instrument"""
     name: str
     instrument_type: InstrumentType
-    lot_size: int  # Units per lot (35 for BN, 100g for Gold)
-    point_value: float  # Rs per point PER LOT (35 for BN, 10 for Gold Mini)
+    lot_size: int  # Units per lot (30 for BN Dec 2025+, 100g for Gold)
+    point_value: float  # Rs per point PER LOT (30 for BN Dec 2025+, 10 for Gold Mini)
     margin_per_lot: float  # Rs per lot
     initial_risk_percent: float = 0.5  # Initial position risk
     ongoing_risk_percent: float = 1.0  # Ongoing position risk
@@ -103,7 +105,7 @@ class Signal:
 
         # Validate instrument
         instrument = data['instrument'].upper()
-        if instrument not in ['BANK_NIFTY', 'GOLD_MINI']:
+        if instrument not in ['BANK_NIFTY', 'GOLD_MINI', 'COPPER', 'SILVER_MINI']:
             raise ValueError(f"Invalid instrument: {instrument}")
 
         # Strict position validation
@@ -224,7 +226,7 @@ class Position:
 
         Args:
             point_value: Rs per point per LOT
-                - Bank Nifty: 35 (lot_size × ₹1/point/unit)
+                - Bank Nifty: 30 (lot_size × ₹1/point/unit, Dec 2025+)
                 - Gold Mini: 10 (₹10 per ₹1 move, since quoted per 10g but contract is 100g)
 
         Returns:
@@ -240,7 +242,7 @@ class Position:
         Args:
             current_price: Current market price
             point_value: Rs per point per LOT
-                - Bank Nifty: 35 (lot_size × ₹1/point/unit)
+                - Bank Nifty: 30 (lot_size × ₹1/point/unit, Dec 2025+)
                 - Gold Mini: 10 (₹10 per ₹1 move, since quoted per 10g but contract is 100g)
 
         Returns:
@@ -272,11 +274,15 @@ class PortfolioState:
     total_risk_percent: float = 0.0
     gold_risk_percent: float = 0.0
     banknifty_risk_percent: float = 0.0
+    silver_risk_percent: float = 0.0
+    copper_risk_percent: float = 0.0
 
     # Volatility metrics
     total_vol_amount: float = 0.0
     total_vol_percent: float = 0.0
     gold_vol_percent: float = 0.0
+    silver_vol_percent: float = 0.0
+    copper_vol_percent: float = 0.0
     banknifty_vol_percent: float = 0.0
 
     # Margin metrics
@@ -439,7 +445,7 @@ class EODMonitorSignal:
         """Validate EOD monitor signal data"""
         if self.price <= 0:
             raise ValueError(f"Invalid price: {self.price}")
-        if self.instrument not in ['BANK_NIFTY', 'GOLD_MINI']:
+        if self.instrument not in ['BANK_NIFTY', 'GOLD_MINI', 'COPPER', 'SILVER_MINI']:
             raise ValueError(f"Invalid instrument: {self.instrument}")
         # Validate indicators have reasonable values
         if self.indicators.atr < 0:

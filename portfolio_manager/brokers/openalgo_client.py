@@ -29,6 +29,66 @@ class OpenAlgoClient:
         })
         logger.info(f"OpenAlgo client initialized: {self.base_url}")
 
+    def check_connection(self) -> Dict:
+        """
+        Check if broker is reachable and authenticated.
+
+        Uses the funds endpoint as a lightweight connectivity test.
+        Also detects if OpenAlgo is in 'analyze' mode (not connected to real broker).
+
+        Returns:
+            Dict with 'connected' (bool), 'status' (str), and optional 'error' (str)
+        """
+        try:
+            # Make direct API call to get full response including 'mode' field
+            url = f"{self.base_url}/api/v1/funds"
+            payload = {"apikey": self.api_key}
+            response = self.session.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+
+            # Check if OpenAlgo is in analyze mode (not connected to real broker)
+            mode = result.get('mode')
+            if mode == 'analyze':
+                return {
+                    'connected': False,
+                    'status': 'analyzer_mode',
+                    'error': 'OpenAlgo is in ANALYZER MODE - not connected to real broker'
+                }
+
+            funds = result.get('data', {})
+            if funds and 'availablecash' in funds:
+                return {
+                    'connected': True,
+                    'status': 'connected',
+                    'available_cash': float(funds.get('availablecash', 0))
+                }
+            else:
+                # API returned but no valid data - possibly auth issue
+                return {
+                    'connected': False,
+                    'status': 'auth_error',
+                    'error': 'Invalid response from broker API'
+                }
+        except requests.exceptions.ConnectionError as e:
+            return {
+                'connected': False,
+                'status': 'unreachable',
+                'error': f'Cannot connect to broker: {e}'
+            }
+        except requests.exceptions.Timeout:
+            return {
+                'connected': False,
+                'status': 'timeout',
+                'error': 'Broker connection timed out'
+            }
+        except Exception as e:
+            return {
+                'connected': False,
+                'status': 'error',
+                'error': str(e)
+            }
+
     def place_order(self, symbol: str, action: str, quantity: int,
                     order_type: str = "MARKET", product: str = "NRML",
                     price: float = 0.0, exchange: str = "NFO",
@@ -64,7 +124,8 @@ class OpenAlgoClient:
             "disclosed_quantity": "0"
         }
 
-        logger.info(f"Placing order: {action} {quantity} {symbol}")
+        logger.info(f"Placing order: {action} {quantity} {symbol} @ {exchange}")
+        logger.debug(f"Order payload: {payload}")
 
         try:
             response = self.session.post(url, json=payload, timeout=10)
@@ -77,6 +138,14 @@ class OpenAlgoClient:
                 logger.error(f"Order failed: {result}")
 
             return result
+        except requests.exceptions.HTTPError as e:
+            # Log full response body for debugging
+            try:
+                error_body = e.response.text if e.response else "No response body"
+                logger.error(f"Order request failed [{e.response.status_code}]: {error_body}")
+            except Exception:
+                logger.error(f"Order request failed: {e}")
+            return {"status": "error", "message": str(e)}
         except requests.exceptions.RequestException as e:
             logger.error(f"Order request failed: {e}")
             return {"status": "error", "message": str(e)}
@@ -119,6 +188,62 @@ class OpenAlgoClient:
             return None
         except Exception as e:
             logger.error(f"Failed to get order status: {e}")
+            return None
+
+    def get_trade_fill_price(self, order_id: str) -> Optional[float]:
+        """
+        Get actual fill price from tradebook for a completed order.
+
+        The orderbook may not have accurate fill prices - tradebook has actual execution prices.
+
+        Args:
+            order_id: Order ID to look up
+
+        Returns:
+            Average fill price if found, None otherwise
+        """
+        url = f"{self.base_url}/api/v1/tradebook"
+        try:
+            payload = {"apikey": self.api_key}
+            response = self.session.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+
+            # Handle response format
+            data = result.get('data', [])
+            if isinstance(data, dict):
+                trades = data.get('trades', [])
+            else:
+                trades = data if isinstance(data, list) else []
+
+            # Find trades for this order and calculate average price
+            order_trades = []
+            for trade in trades:
+                if isinstance(trade, dict) and str(trade.get('orderid')) == str(order_id):
+                    order_trades.append(trade)
+
+            if not order_trades:
+                logger.debug(f"No trades found for order {order_id}")
+                return None
+
+            # Calculate weighted average price
+            total_qty = 0
+            total_value = 0.0
+            for trade in order_trades:
+                qty = float(trade.get('quantity', 0) or trade.get('filledqty', 0) or 0)
+                price = float(trade.get('averageprice', 0) or trade.get('price', 0) or trade.get('tradeprice', 0) or 0)
+                if qty > 0 and price > 0:
+                    total_qty += qty
+                    total_value += qty * price
+
+            if total_qty > 0:
+                avg_price = total_value / total_qty
+                logger.info(f"Tradebook fill price for {order_id}: ₹{avg_price:.2f} ({len(order_trades)} trades, {total_qty} qty)")
+                return avg_price
+
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get tradebook fill price for {order_id}: {e}")
             return None
 
     def get_positions(self) -> List[Dict]:
@@ -211,6 +336,34 @@ class OpenAlgoClient:
             except Exception as e:
                 logger.warning(f"Could not calculate Gold Mini expiry, using fallback: {e}")
                 actual_symbol = "GOLDM05JAN26FUT"  # Fallback for Jan 2026
+                actual_exchange = "MCX"
+        elif symbol == "COPPER":
+            # Copper futures: COPPER{DD}{MMM}{YY}FUT (e.g., COPPER31DEC25FUT)
+            try:
+                from core.expiry_calendar import ExpiryCalendar
+                from datetime import date
+                expiry_cal = ExpiryCalendar()
+                expiry = expiry_cal.get_expiry_after_rollover("COPPER", date.today())
+                # Format: COPPER{DD}{MMM}{YY}FUT
+                actual_symbol = f"COPPER{expiry.strftime('%d%b%y').upper()}FUT"
+                actual_exchange = "MCX"
+            except Exception as e:
+                logger.warning(f"Could not calculate Copper expiry, using fallback: {e}")
+                actual_symbol = "COPPER31DEC25FUT"  # Fallback for Dec 2025
+                actual_exchange = "MCX"
+        elif symbol == "SILVER_MINI":
+            # Silver Mini futures: SILVERM{DD}{MMM}{YY}FUT (e.g., SILVERM27FEB26FUT)
+            try:
+                from core.expiry_calendar import ExpiryCalendar
+                from datetime import date
+                expiry_cal = ExpiryCalendar()
+                expiry = expiry_cal.get_expiry_after_rollover("SILVER_MINI", date.today())
+                # Format: SILVERM{DD}{MMM}{YY}FUT
+                actual_symbol = f"SILVERM{expiry.strftime('%d%b%y').upper()}FUT"
+                actual_exchange = "MCX"
+            except Exception as e:
+                logger.warning(f"Could not calculate Silver Mini expiry, using fallback: {e}")
+                actual_symbol = "SILVERM27FEB26FUT"  # Fallback for Feb 2026
                 actual_exchange = "MCX"
 
         url = f"{self.base_url}/api/v1/quotes"

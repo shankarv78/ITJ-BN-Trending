@@ -154,8 +154,15 @@ def import_trades(conn, trades: list[dict]):
             realized_pnl = float(trade.get('pnl', 0))
 
         # The CSV stores lots in the "quantity" field
-        # Gold Mini lot size = 10, Bank Nifty lot size = 15
-        lot_size = 10 if instrument == 'GOLD_MINI' else 15
+        # Get lot size based on instrument
+        if instrument == 'GOLD_MINI':
+            lot_size = 100
+        elif instrument == 'SILVER_MINI':
+            lot_size = 5
+        elif instrument == 'COPPER':
+            lot_size = 2500
+        else:  # BANK_NIFTY and others
+            lot_size = 30
         lots = quantity  # CSV quantity IS the number of lots
         actual_quantity = lots * lot_size
 

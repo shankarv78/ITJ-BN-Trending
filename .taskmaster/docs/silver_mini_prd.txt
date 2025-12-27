@@ -1,0 +1,217 @@
+# Silver Mini Portfolio Manager Integration PRD
+
+## Overview
+Add complete Silver Mini (SILVERM) trading support to Portfolio Manager, enabling live trading of MCX Silver Mini futures with proper position sizing, risk management, and rollover handling.
+
+## Contract Specifications
+- Symbol: SILVERM (MCX)
+- Contract Size: 5 kg per lot
+- Point Value: Rs 5 per Rs 1/kg move (5kg × Re 1)
+- Margin: Rs 200,000 per lot (estimate)
+- Expiry Pattern: Feb, Apr, Jun, Aug, Nov (NOT Oct/Dec - bimonthly non-standard)
+- Expiry Day: Last calendar day of contract month
+- Rollover: 8 days before expiry (tender period)
+- Symbol Format: SILVERM{DD}{MMM}{YY}FUT (e.g., SILVERM27FEB26FUT)
+
+## Feature 1: Core Types & Configuration (P0 - Blocking)
+
+### Task 1.1: Add SILVER_MINI to InstrumentType enum in models.py
+Add SILVER_MINI = "SILVER_MINI" to InstrumentType enum at line 14 in core/models.py. This is the foundation for all other changes.
+Files: portfolio_manager/core/models.py
+Acceptance: InstrumentType.SILVER_MINI.value returns "SILVER_MINI"
+
+### Task 1.2: Add SILVER_MINI to Signal validation in models.py
+Add 'SILVER_MINI' to the valid instruments list in Signal.from_dict() method at line 107.
+Files: portfolio_manager/core/models.py
+Dependencies: Task 1.1
+Acceptance: Signal.from_dict() accepts instrument: "SILVER_MINI"
+
+### Task 1.3: Add SILVER_MINI to EODMonitorSignal validation
+Add 'SILVER_MINI' to valid instruments at line 443 in models.py.
+Files: portfolio_manager/core/models.py
+Dependencies: Task 1.1
+Acceptance: EODMonitorSignal accepts SILVER_MINI
+
+### Task 1.4: Add SILVER_MINI to symbol_mapper.py duplicate InstrumentType enum
+There's a duplicate InstrumentType enum at lines 24-28 in symbol_mapper.py. Add SILVER_MINI there for consistency.
+Files: portfolio_manager/core/symbol_mapper.py
+Dependencies: Task 1.1
+Acceptance: Both enums are in sync
+
+### Task 1.5: Add LOT_SIZES entry for SILVER_MINI
+Add 'SILVER_MINI': 5 to LOT_SIZES dict at lines 111-115 in symbol_mapper.py.
+Files: portfolio_manager/core/symbol_mapper.py
+Dependencies: Task 1.4
+Acceptance: LOT_SIZES['SILVER_MINI'] returns 5
+
+### Task 1.6: Add InstrumentConfig for SILVER_MINI in config.py
+Add full InstrumentConfig to INSTRUMENT_CONFIGS dict with: name="Silver Mini", lot_size=5, point_value=5.0, margin_per_lot=200000.0, initial_atr_mult=2.0, trailing_atr_mult=3.0, max_pyramids=5.
+Files: portfolio_manager/core/config.py
+Dependencies: Task 1.1
+Acceptance: get_instrument_config(InstrumentType.SILVER_MINI) returns correct config
+
+### Task 1.7: Add silver_mini_rollover_days config
+Add self.silver_mini_rollover_days = 8 to PortfolioConfig class around line 84.
+Files: portfolio_manager/core/config.py
+Acceptance: config.silver_mini_rollover_days returns 8
+
+### Task 1.8: Add SILVER_MINI to market_close_times and eod_instruments_enabled
+Add "SILVER_MINI": "23:30" to market_close_times dict and "SILVER_MINI": True to eod_instruments_enabled dict.
+Files: portfolio_manager/core/config.py
+Acceptance: MCX hours used for Silver Mini
+
+## Feature 2: Instrument Logic & Risk Calculations (P0)
+
+### Task 2.1: Add InstrumentType mapping in portfolio_state.py
+Add SILVER_MINI case to if/elif chain at lines 101-109 that maps instrument string to InstrumentType.
+Files: portfolio_manager/core/portfolio_state.py
+Dependencies: Task 1.1
+Acceptance: "SILVER_MINI" maps to InstrumentType.SILVER_MINI
+
+### Task 2.2: Add margin_per_lot and point_value for SILVER_MINI in portfolio_state.py
+Add SILVER_MINI cases for margin calculation (lines 175-180) with margin_per_lot=200000.0 and point_value (lines 221-226, 269-274) with point_value=5.0.
+Files: portfolio_manager/core/portfolio_state.py
+Dependencies: Task 1.6
+Acceptance: Margin and P&L calculations correct for Silver Mini
+
+### Task 2.3: Add InstrumentType mapping in pyramid_gate.py
+Add SILVER_MINI case to if/elif chain at lines 51-56 in PyramidGateController.
+Files: portfolio_manager/core/pyramid_gate.py
+Dependencies: Task 1.1
+Acceptance: Pyramid validation works for Silver Mini
+
+### Task 2.4: Add InstrumentType mapping in stop_manager.py
+Add SILVER_MINI case to if/elif chain at lines 65-73 in TomBassoStopManager.
+Files: portfolio_manager/core/stop_manager.py
+Dependencies: Task 1.6
+Acceptance: Stop calculations use correct Silver Mini config
+
+### Task 2.5: Add point_value in signal_validator.py
+Add SILVER_MINI case with point_value=5.0 at lines 294-299.
+Files: portfolio_manager/core/signal_validator.py
+Dependencies: Task 1.6
+Acceptance: Pyramid 1R validation uses correct point value
+
+### Task 2.6: Add point_value in strategy_manager.py
+Fix hardcoded point_value at line 415-417 to include SILVER_MINI case with point_value=5.
+Files: portfolio_manager/core/strategy_manager.py
+Dependencies: Task 1.6
+Acceptance: Strategy P&L tracking correct
+
+## Feature 3: Expiry Calculation & Symbol Translation (P0)
+
+### Task 3.1: Implement get_silver_mini_expiry() function
+Create new function in expiry_utils.py for Silver Mini expiry. Must handle non-standard contract months: Feb, Apr, Jun, Aug, Nov (NOT Oct/Dec). Expiry is last calendar day. Edge case: In December, next contract is February of next year.
+Files: portfolio_manager/live/expiry_utils.py
+Dependencies: Task 1.1
+Acceptance: Returns correct expiry for all reference dates including December edge case
+
+### Task 3.2: Implement format_silver_mini_futures_symbol() function
+Create function to format symbols as SILVERM{DD}{MMM}{YY}FUT. Support Zerodha and Dhan formats.
+Files: portfolio_manager/live/expiry_utils.py
+Dependencies: Task 3.1
+Acceptance: format_silver_mini_futures_symbol("28NOV25") returns "SILVERM28NOV25FUT"
+
+### Task 3.3: Update get_next_month_expiry() for SILVER_MINI
+Add SILVER_MINI case handling the non-standard month sequence: Nov->Feb(next year), Aug->Nov, Jun->Aug, Apr->Jun, Feb->Apr.
+Files: portfolio_manager/live/expiry_utils.py
+Dependencies: Task 3.1
+Acceptance: Correct next month for all Silver Mini transitions
+
+### Task 3.4: Add SILVER_MINI to is_market_hours()
+Add SILVER_MINI to MCX market hours check at line 555.
+Files: portfolio_manager/live/expiry_utils.py
+Dependencies: Task 3.1
+Acceptance: Uses MCX hours (09:00-23:30)
+
+### Task 3.5: Add SILVER_MINI to expiry_calendar.py
+Add 'SILVER_MINI': 3 to DEFAULT_ROLLOVER_DAYS, add to _get_exchange_for_instrument() returning "MCX", and add get_silver_mini_expiry() method to ExpiryCalendar class.
+Files: portfolio_manager/core/expiry_calendar.py
+Dependencies: Task 3.1
+Acceptance: ExpiryCalendar fully supports Silver Mini
+
+### Task 3.6: Add SILVER_MINI to symbol_mapper.translate()
+Add SILVER_MINI case and implement _translate_silver_mini() method returning TranslatedSymbol with MCX exchange and SILVERM symbol format.
+Files: portfolio_manager/core/symbol_mapper.py
+Dependencies: Task 3.1, Task 3.2
+Acceptance: translate("SILVER_MINI", "BUY") returns correct TranslatedSymbol
+
+### Task 3.7: Add SILVER to MCX exchange routing in order_executor.py
+Update exchange detection at line 117 to include SILVER. Add SILVER_MINI symbol translation in SimpleLimitExecutor (lines 148-173) and ProgressiveExecutor (lines 733-758).
+Files: portfolio_manager/core/order_executor.py
+Dependencies: Task 3.2
+Acceptance: Orders route to MCX with correct symbol
+
+## Feature 4: Engine Integration & Execution (P0)
+
+### Task 4.1: Add SILVER_MINI to live/engine.py sizers dict
+Add TomBassoPositionSizer for SILVER_MINI to sizers dict at lines 80-93.
+Files: portfolio_manager/live/engine.py
+Dependencies: Task 1.6
+Acceptance: No KeyError for SILVER_MINI signals
+
+### Task 4.2: Add SILVER_MINI to backtest/engine.py sizers dict
+Add TomBassoPositionSizer for SILVER_MINI to sizers dict at lines 39-52.
+Files: portfolio_manager/backtest/engine.py
+Dependencies: Task 1.6
+Acceptance: Backtesting works for Silver Mini
+
+### Task 4.3: Add rollover support in rollover_scanner.py
+Add SILVER_MINI case for rollover_days (use silver_mini_rollover_days) at lines 161-167. Add to MCX futures group at lines 211-215.
+Files: portfolio_manager/live/rollover_scanner.py
+Dependencies: Task 1.7
+Acceptance: Positions flagged for rollover 8 days before expiry
+
+### Task 4.4: Implement Silver Mini rollover in rollover_executor.py
+Add SILVER_MINI dispatch case at lines 185-200. Implement _rollover_silver_mini_position() method following gold_mini pattern. Add SILVER to exchange detection at line 926. Simple futures rollover: close current, open next contract.
+Files: portfolio_manager/live/rollover_executor.py
+Dependencies: Task 3.1, Task 3.2, Task 3.3
+Acceptance: Full rollover lifecycle works for Silver Mini
+
+## Feature 5: Utilities & Sync Tools (P1)
+
+### Task 5.1: Add SILVER_MINI to lot_size_history.py
+Add case returning 5 for SILVER_MINI at lines 71-89.
+Files: portfolio_manager/core/lot_size_history.py
+Acceptance: get_lot_size_for_instrument("SILVER_MINI") returns 5
+
+### Task 5.2: Add SILVERM detection in sync_from_broker.py
+Add detection at lines 52-57: elif 'SILVERM' in symbol.upper(): instrument = 'SILVER_MINI'.
+Files: portfolio_manager/sync_from_broker.py
+Acceptance: Manual sync recognizes Silver Mini positions
+
+### Task 5.3: Update portfolio_manager.py lot handling
+Verify SILVERM detection at lines 2484-2509 is correct (broker returns lots directly). Add 'SILVER_MINI': 5 to lot_sizes dicts at lines 2605-2612 and 2724-2726.
+Files: portfolio_manager/portfolio_manager.py
+Acceptance: Lot sizes correct throughout
+
+### Task 5.4: Fix import_from_csv.py and add voice pronunciation
+Fix hardcoded lot_size at line 158 in import_from_csv.py. Add "Silver Mini" pronunciation to voice_announcer.py.
+Files: portfolio_manager/scripts/import_from_csv.py, portfolio_manager/core/voice_announcer.py
+Acceptance: CSV import and voice work for Silver Mini
+
+## Feature 6: Testing & Validation (P0)
+
+### Task 6.1: Add Silver Mini unit tests for symbol_mapper
+Test translate() returns correct SILVERM symbol, test expiry for all contract months, test December edge case, test get_lot_size.
+Files: portfolio_manager/tests/unit/test_symbol_mapper.py
+Dependencies: Task 3.6
+Acceptance: All symbol mapper tests pass
+
+### Task 6.2: Add Silver Mini unit tests for signal_validator
+Test SILVER_MINI signal validation, point_value=5 in calculations, pyramid validation.
+Files: portfolio_manager/tests/unit/test_signal_validator.py
+Dependencies: Task 2.5
+Acceptance: All signal validator tests pass
+
+### Task 6.3: Add Silver Mini expiry calculation tests
+Test all 5 contract months, year rollover (Nov->Feb), month transitions, rollover window calculations.
+Files: portfolio_manager/tests/unit/test_expiry_utils.py
+Dependencies: Task 3.1
+Acceptance: All expiry tests pass
+
+### Task 6.4: Add Silver Mini test fixtures
+Create sample SILVER_MINI signals (BASE_ENTRY, PYRAMID, EXIT), position data, EOD_MONITOR signals.
+Files: portfolio_manager/tests/fixtures/
+Dependencies: Task 1.1
+Acceptance: Fixtures available for all test files

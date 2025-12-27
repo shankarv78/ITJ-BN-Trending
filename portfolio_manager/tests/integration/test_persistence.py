@@ -422,9 +422,9 @@ class TestRecoveryFlow:
         )
 
         # Use a tighter stop to ensure position sizer calculates >0 lots
-        # With 0.5% risk, 5M equity, 35 point_value: need risk_per_lot < 25,000
-        # stop_distance * 35 < 25,000 → stop_distance < 714
-        # Use stop at 49500 (500 point distance) → risk_per_lot = 17,500 → lot_r = 1.21 lots
+        # With 0.5% risk, 5M equity, 30 point_value: need risk_per_lot < 25,000
+        # stop_distance * 30 < 25,000 → stop_distance < 833
+        # Use stop at 49500 (500 point distance) → risk_per_lot = 15,000 → lot_r = 1.42 lots
         signal = Signal(
             timestamp=datetime.now(timezone.utc) - timedelta(seconds=5),
             instrument="BANK_NIFTY",
@@ -533,7 +533,7 @@ class TestRecoveryFlow:
         if recovered_pos:
             # Simulate position is in profit at 51000 (current pyramid signal price)
             # This allows the pyramid gate to pass the profit check
-            point_value = 35.0  # BANK_NIFTY
+            point_value = 30.0  # BANK_NIFTY (Dec 2025 onwards)
             current_price = 51000.0  # Price of pyramid signal
             engine2.portfolio.update_position_unrealized_pnl("BANK_NIFTY_Long_1", current_price)
             # Position P&L updated to allow pyramid gate to pass

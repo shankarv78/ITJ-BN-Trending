@@ -35,6 +35,8 @@ def mock_expiry_calendar():
     calendar.get_expiry_after_rollover = Mock(side_effect=lambda instrument, ref_date=None: {
         "GOLD_MINI": date(2026, 1, 5),
         "BANK_NIFTY": date(2024, 12, 26),
+        "SILVER_MINI": date(2026, 2, 27),  # Feb 2026 (bimonthly contract)
+        "COPPER": date(2025, 12, 31),
     }.get(instrument, date(2025, 12, 31)))
     return calendar
 
@@ -311,8 +313,8 @@ class TestUtilities:
         assert symbol_mapper.get_lot_size("GOLD_MINI") == 100
 
     def test_lot_size_bank_nifty(self, symbol_mapper):
-        """Bank Nifty lot size is 35"""
-        assert symbol_mapper.get_lot_size("BANK_NIFTY") == 35
+        """Bank Nifty lot size is 30 (Dec 2025 onwards)"""
+        assert symbol_mapper.get_lot_size("BANK_NIFTY") == 30
 
     def test_lot_size_unknown(self, symbol_mapper):
         """Unknown instrument defaults to 1"""
@@ -320,8 +322,8 @@ class TestUtilities:
 
     def test_calculate_quantity(self, symbol_mapper):
         """Calculate total quantity from lots"""
-        # 2 lots of Bank Nifty = 2 * 35 = 70
-        assert symbol_mapper.calculate_quantity("BANK_NIFTY", 2) == 70
+        # 2 lots of Bank Nifty = 2 * 30 = 60
+        assert symbol_mapper.calculate_quantity("BANK_NIFTY", 2) == 60
 
         # 3 lots of Gold Mini = 3 * 100 = 300
         assert symbol_mapper.calculate_quantity("GOLD_MINI", 3) == 300
@@ -357,6 +359,54 @@ class TestGlobalInstance:
         mapper = get_symbol_mapper()
         # After previous test, should have an instance
         assert mapper is not None or mapper is None  # Accept either state
+
+
+# =============================================================================
+# SERIALIZATION TESTS
+# =============================================================================
+
+# =============================================================================
+# SILVER MINI TRANSLATION TESTS
+# =============================================================================
+
+class TestSilverMiniTranslation:
+    """Test Silver Mini futures symbol translation"""
+
+    def test_buy_signal(self, symbol_mapper):
+        """Silver Mini BUY → SILVERM27FEB26FUT"""
+        result = symbol_mapper.translate("SILVER_MINI", action="BUY")
+
+        assert result.instrument == "SILVER_MINI"
+        assert result.exchange == "MCX"
+        assert result.is_synthetic == False
+        assert result.expiry_date == date(2026, 2, 27)
+        assert len(result.symbols) == 1
+        assert result.symbols[0] == "SILVERM27FEB26FUT"
+        assert result.atm_strike is None
+
+    def test_sell_signal(self, symbol_mapper):
+        """Silver Mini SELL → SILVERM27FEB26FUT with SELL action"""
+        result = symbol_mapper.translate("SILVER_MINI", action="SELL")
+
+        assert len(result.order_legs) == 1
+        assert result.order_legs[0].action == "SELL"
+        assert result.order_legs[0].leg_type == "FUT"
+        assert result.order_legs[0].exchange == "MCX"
+
+    def test_order_leg_structure(self, symbol_mapper):
+        """Verify order leg structure for Silver Mini"""
+        result = symbol_mapper.translate("SILVER_MINI", action="BUY")
+
+        leg = result.order_legs[0]
+        assert leg.symbol == "SILVERM27FEB26FUT"
+        assert leg.exchange == "MCX"
+        assert leg.action == "BUY"
+        assert leg.leg_type == "FUT"
+        assert leg.lot_multiplier == 1
+
+    def test_lot_size(self, symbol_mapper):
+        """Verify Silver Mini lot size is 5"""
+        assert symbol_mapper.LOT_SIZES.get('SILVER_MINI') == 5
 
 
 # =============================================================================

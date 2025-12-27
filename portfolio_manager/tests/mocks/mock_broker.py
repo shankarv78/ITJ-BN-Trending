@@ -140,7 +140,7 @@ class MockBrokerSimulator:
         if exchange == "MCX" or "GOLD" in symbol.upper():
             lot_size = 10  # Gold Mini
         else:
-            lot_size = 35  # Bank Nifty
+            lot_size = 30  # Bank Nifty (Dec 2025 onwards)
 
         lots = max(1, quantity // lot_size)
 

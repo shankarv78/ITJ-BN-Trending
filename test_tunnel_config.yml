@@ -1,0 +1,3 @@
+# Temporary config for test tunnel only
+# Does not affect production tunnel
+url: http://localhost:5004

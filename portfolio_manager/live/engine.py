@@ -76,12 +76,23 @@ class LiveTradingEngine:
         self.openalgo = openalgo_client
 
         # Position sizers per instrument (SAME as backtest)
+        # Pass test_mode to enable min 1 lot for pyramid testing
         self.sizers = {
             InstrumentType.GOLD_MINI: TomBassoPositionSizer(
-                get_instrument_config(InstrumentType.GOLD_MINI)
+                get_instrument_config(InstrumentType.GOLD_MINI),
+                test_mode=self.test_mode
             ),
             InstrumentType.BANK_NIFTY: TomBassoPositionSizer(
-                get_instrument_config(InstrumentType.BANK_NIFTY)
+                get_instrument_config(InstrumentType.BANK_NIFTY),
+                test_mode=self.test_mode
+            ),
+            InstrumentType.COPPER: TomBassoPositionSizer(
+                get_instrument_config(InstrumentType.COPPER),
+                test_mode=self.test_mode
+            ),
+            InstrumentType.SILVER_MINI: TomBassoPositionSizer(
+                get_instrument_config(InstrumentType.SILVER_MINI),
+                test_mode=self.test_mode
             )
         }
 
@@ -102,7 +113,8 @@ class LiveTradingEngine:
             'orders_failed': 0,
             'rollovers_executed': 0,
             'rollovers_failed': 0,
-            'rollover_cost_total': 0.0
+            'rollover_cost_total': 0.0,
+            'last_signal_timestamp': None  # Track when last webhook was received
         }
 
         # Rollover components
@@ -282,6 +294,7 @@ class LiveTradingEngine:
                 }
 
         self.stats['signals_received'] += 1
+        self.stats['last_signal_timestamp'] = datetime.now().isoformat()
 
         logger.info(f"[LIVE] Processing: {signal.signal_type.value} {signal.position} @ ₹{signal.price}")
 
@@ -371,6 +384,10 @@ class LiveTradingEngine:
             inst_type = InstrumentType.GOLD_MINI
         elif instrument == "BANK_NIFTY":
             inst_type = InstrumentType.BANK_NIFTY
+        elif instrument == "COPPER":
+            inst_type = InstrumentType.COPPER
+        elif instrument == "SILVER_MINI":
+            inst_type = InstrumentType.SILVER_MINI
         else:
             return {'status': 'error', 'reason': f'Unknown instrument'}
 
@@ -463,9 +480,10 @@ class LiveTradingEngine:
                     execute_anyway = False
 
                     if announcer:
+                        risk_str = f"{exec_result.risk_increase_pct:.1%}" if exec_result.risk_increase_pct is not None else "N/A"
                         details = (
                             f"Price divergence: {exec_result.divergence_pct:.1%}. "
-                            f"Risk increase: {exec_result.risk_increase_pct:.1%}"
+                            f"Risk increase: {risk_str}"
                         )
                         execute_anyway = announcer.request_validation_confirmation(
                             instrument=signal.instrument,
@@ -701,11 +719,14 @@ class LiveTradingEngine:
             # Use execution price (broker price) for entry, not signal price
             entry_price = execution_result['order_details'].get('fill_price', execution_price)
 
+            # Extract strike for Bank Nifty synthetic positions
+            strike = execution_result.get('order_details', {}).get('strike')
+
             position = Position(
                 position_id=f"{instrument}_{signal.position}",
                 instrument=instrument,
                 entry_timestamp=signal.timestamp,
-                entry_price=entry_price,  # Use actual fill price
+                entry_price=entry_price,  # For BN: synthetic price (Strike + CE - PE), for Gold: futures price
                 lots=original_lots,  # Use adjusted lots (or 1 in test mode)
                 quantity=original_lots * inst_config.lot_size,
                 initial_stop=initial_stop,
@@ -713,13 +734,15 @@ class LiveTradingEngine:
                 highest_close=signal.price,
                 limiter=constraints.limiter,
                 is_base_position=True,  # Mark as base position
+                strike=strike,  # ATM strike for Bank Nifty synthetic (None for Gold Mini)
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
                 is_test=self.test_mode,  # Mark as test position if in test mode
                 original_lots=calculated_lots if self.test_mode else None,  # Store original calculated lots
                 **{k: v for k, v in execution_result.get('order_details', {}).items()
-                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price',
-                                'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled']}  # Exclude execution metadata
+                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price', 'strike',
+                                'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled',
+                                'pe_order_id', 'ce_order_id', 'futures_order_id', 'expiry']}  # Exclude execution metadata
             )
 
             self.portfolio.add_position(position)
@@ -805,6 +828,10 @@ class LiveTradingEngine:
 
             if result.status == ExecutionStatus.EXECUTED:
                 # Use actual executed symbols - they contain all info (strike, expiry in the name)
+                # Calculate synthetic futures entry price: Strike + CE - PE
+                synthetic_price = result.get_synthetic_price()
+                fill_price = synthetic_price if synthetic_price else signal.price
+
                 return {
                     'status': 'success',
                     'order_details': {
@@ -813,7 +840,9 @@ class LiveTradingEngine:
                         'pe_entry_price': result.pe_result.fill_price if result.pe_result else signal.price,
                         'ce_entry_price': result.ce_result.fill_price if result.ce_result else signal.price,
                         'pe_symbol': result.pe_symbol,  # e.g., BANKNIFTY30DEC2560000PE
-                        'ce_symbol': result.ce_symbol   # e.g., BANKNIFTY30DEC2560000CE
+                        'ce_symbol': result.ce_symbol,  # e.g., BANKNIFTY30DEC2560000CE
+                        'strike': result.strike,  # ATM strike used for synthetic
+                        'fill_price': fill_price  # Synthetic futures entry price (Strike + CE - PE)
                     }
                 }
             else:
@@ -914,6 +943,10 @@ class LiveTradingEngine:
         # Get instrument type
         if instrument == "GOLD_MINI":
             inst_type = InstrumentType.GOLD_MINI
+        elif instrument == "COPPER":
+            inst_type = InstrumentType.COPPER
+        elif instrument == "SILVER_MINI":
+            inst_type = InstrumentType.SILVER_MINI
         else:
             inst_type = InstrumentType.BANK_NIFTY
 
@@ -1011,9 +1044,10 @@ class LiveTradingEngine:
                     execute_anyway = False
 
                     if announcer:
+                        risk_str = f"{exec_result.risk_increase_pct:.1%}" if exec_result.risk_increase_pct is not None else "N/A"
                         details = (
                             f"Price divergence: {exec_result.divergence_pct:.1%}. "
-                            f"Risk increase: {exec_result.risk_increase_pct:.1%}"
+                            f"Risk increase: {risk_str}"
                         )
                         execute_anyway = announcer.request_validation_confirmation(
                             instrument=signal.instrument,
@@ -1250,26 +1284,32 @@ class LiveTradingEngine:
             ce_entry_price = execution_result.get('order_details', {}).get('ce_entry_price')
 
             # Use execution price (broker price) for entry, not signal price
+            # For BN: This is synthetic price (Strike + CE - PE), for Gold: futures price
             entry_price = execution_result['order_details'].get('fill_price', execution_price)
+
+            # Extract strike for Bank Nifty synthetic positions
+            strike = execution_result.get('order_details', {}).get('strike')
 
             position = Position(
                 position_id=f"{instrument}_{signal.position}",
                 instrument=instrument,
                 entry_timestamp=signal.timestamp,
-                entry_price=entry_price,  # Use actual fill price
+                entry_price=entry_price,  # For BN: synthetic price (Strike + CE - PE), for Gold: futures price
                 lots=original_lots,  # Use adjusted lots (or 1 in test mode)
                 quantity=original_lots * inst_config.lot_size,
                 initial_stop=initial_stop,
                 current_stop=initial_stop,
                 highest_close=signal.price,
                 is_base_position=False,  # Mark as pyramid position
+                strike=strike,  # ATM strike for Bank Nifty synthetic (None for Gold Mini)
                 pe_entry_price=pe_entry_price,  # Store for rollover P&L calculation
                 ce_entry_price=ce_entry_price,  # Store for rollover P&L calculation
                 is_test=self.test_mode,  # Mark as test position if in test mode
                 original_lots=calculated_lots if self.test_mode else None,  # Store original calculated lots
                 **{k: v for k, v in execution_result.get('order_details', {}).items()
-                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price',
-                                'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled']}  # Exclude execution metadata
+                   if k not in ['pe_entry_price', 'ce_entry_price', 'order_id', 'fill_price', 'strike',
+                                'lots_filled', 'slippage_pct', 'attempts', 'partial_fill', 'lots_cancelled',
+                                'pe_order_id', 'ce_order_id', 'futures_order_id', 'expiry']}  # Exclude execution metadata
             )
 
             self.portfolio.add_position(position)
@@ -1486,6 +1526,10 @@ class LiveTradingEngine:
             inst_type = InstrumentType.BANK_NIFTY
         elif position.instrument == "GOLD_MINI":
             inst_type = InstrumentType.GOLD_MINI
+        elif position.instrument == "COPPER":
+            inst_type = InstrumentType.COPPER
+        elif position.instrument == "SILVER_MINI":
+            inst_type = InstrumentType.SILVER_MINI
         else:
             inst_type = InstrumentType.BANK_NIFTY  # Default fallback
 
@@ -1557,7 +1601,7 @@ class LiveTradingEngine:
 
         else:
             # ============================
-            # GOLD MINI: Sell Futures
+            # MCX FUTURES: Sell Futures (Gold Mini, Copper, etc.)
             # ============================
             if not self.symbol_mapper:
                 logger.error("[OPENALGO] SymbolMapper not initialized!")
@@ -1569,7 +1613,7 @@ class LiveTradingEngine:
             # Get current price for exit - use mid-price (avg of bid/ask) for fair limit
             exit_price = position.entry_price
             try:
-                quote = self.openalgo.get_quote("GOLD_MINI")
+                quote = self.openalgo.get_quote(position.instrument)
                 bid = quote.get('bid') or quote.get('ltp')
                 ask = quote.get('ask') or quote.get('ltp')
                 if bid and ask:
@@ -1583,14 +1627,14 @@ class LiveTradingEngine:
             # Translate symbol
             try:
                 translated = self.symbol_mapper.translate(
-                    instrument="GOLD_MINI",
+                    instrument=position.instrument,
                     action="SELL",
                     current_price=exit_price
                 )
-                # Gold Mini is single-leg futures, use first symbol
+                # MCX futures are single-leg, use first symbol
                 futures_symbol = translated.symbols[0] if translated.symbols else None
                 if not futures_symbol:
-                    raise ValueError("No symbol generated for Gold Mini")
+                    raise ValueError(f"No symbol generated for {position.instrument}")
             except Exception as e:
                 logger.error(f"[OPENALGO] Symbol translation failed: {e}")
                 return {
@@ -1598,7 +1642,7 @@ class LiveTradingEngine:
                     'error': f'symbol_translation_failed: {e}'
                 }
 
-            logger.info(f"[OPENALGO] Gold Mini exit: {futures_symbol}")
+            logger.info(f"[OPENALGO] {position.instrument} exit: {futures_symbol}")
 
             # Create a signal for the exit (placeholder values for required fields)
             exit_signal = Signal(

@@ -412,9 +412,18 @@ class StrategyManager:
         strategy_id = getattr(position, 'strategy_id', STRATEGY_ITJ_TREND_FOLLOW)
 
         # Calculate realized P&L
-        # For Bank Nifty: point_value = 35 (lot_size × 1)
+        # For Bank Nifty: point_value = 30 (lot_size × 1) - Dec 2025 onwards
         # For Gold Mini: point_value = 10 (100g × 0.1/g)
-        point_value = 35 if position.instrument == 'BANK_NIFTY' else 10
+        # For Silver Mini: point_value = 5 (5kg × 1/kg)
+        # For Copper: point_value = 2500 (2500kg × 1/kg)
+        if position.instrument == 'BANK_NIFTY':
+            point_value = 30
+        elif position.instrument == 'COPPER':
+            point_value = 2500
+        elif position.instrument == 'SILVER_MINI':
+            point_value = 5
+        else:  # GOLD_MINI
+            point_value = 10
         realized_pnl = (exit_price - position.entry_price) * position.lots * point_value
 
         # Determine direction

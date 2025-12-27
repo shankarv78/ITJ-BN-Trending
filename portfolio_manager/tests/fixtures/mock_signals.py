@@ -29,13 +29,13 @@ def generate_mock_csv_data():
         'Net P&L INR': [70000.0, 70000.0, 37500.0, 37500.0],
         'Cumulative P&L INR': [70000.0, 70000.0, 107500.0, 107500.0]
     }
-    
+
     return pd.DataFrame(data)
 
 def generate_signal_sequence():
     """Generate sequence of signals for testing"""
     base_time = datetime(2025, 11, 15, 10, 30)
-    
+
     signals = [
         # BASE ENTRY - Gold
         Signal(
@@ -89,9 +89,35 @@ def generate_signal_sequence():
             er=0.83,
             supertrend=51800.0,
             reason="TOM_BASSO_STOP"
+        ),
+        # BASE ENTRY - Silver Mini
+        Signal(
+            timestamp=base_time + timedelta(days=3),
+            instrument="SILVER_MINI",
+            signal_type=SignalType.BASE_ENTRY,
+            position="Long_1",
+            price=90500.0,
+            stop=88700.0,  # 2 × ATR stop
+            suggested_lots=3,
+            atr=900.0,
+            er=0.78,
+            supertrend=88700.0
+        ),
+        # PYRAMID - Silver Mini
+        Signal(
+            timestamp=base_time + timedelta(days=4),
+            instrument="SILVER_MINI",
+            signal_type=SignalType.PYRAMID,
+            position="Long_2",
+            price=92000.0,
+            stop=90200.0,
+            suggested_lots=2,
+            atr=900.0,
+            er=0.80,
+            supertrend=90200.0
         )
     ]
-    
+
     return signals
 
 def create_sample_positions():
@@ -124,4 +150,3 @@ def create_sample_positions():
             status="open"
         )
     }
-

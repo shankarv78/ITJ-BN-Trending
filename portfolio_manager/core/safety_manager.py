@@ -272,7 +272,7 @@ class SafetyManager:
         from datetime import date
 
         # Determine exchange for instrument
-        exchange = "MCX" if instrument == "GOLD_MINI" else "NSE"
+        exchange = "MCX" if instrument in ("GOLD_MINI", "COPPER", "SILVER_MINI") else "NSE"
 
         # ============================
         # HOLIDAY CHECK FIRST

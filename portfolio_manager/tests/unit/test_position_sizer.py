@@ -61,8 +61,8 @@ class TestTomBassoPositionSizer:
         """Test sizer initialization with config"""
         sizer = TomBassoPositionSizer(bank_nifty_config)
 
-        assert sizer.lot_size == 35
-        assert sizer.point_value == 35.0
+        assert sizer.lot_size == 30
+        assert sizer.point_value == 30.0
         assert sizer.margin_per_lot == 270000.0
 
     def test_risk_based_lots_calculation(self, bank_nifty_config, base_entry_signal_bn):
@@ -74,8 +74,8 @@ class TestTomBassoPositionSizer:
         # Risk% = 0.5% (initial risk)
         # Risk amount = 5000000 × 0.005 = 25,000
         # Risk per point = 52000 - 51650 = 350 points
-        # Risk per lot = 350 × 35 = 12,250
-        # Lot-R = (25000 / 12250) × 0.82 (ER) = 1.673 lots
+        # Risk per lot = 350 × 30 = 10,500
+        # Lot-R = (25000 / 10500) × 0.82 (ER) = 1.952 lots
 
         result = sizer.calculate_base_entry_size(
             base_entry_signal_bn,
@@ -83,7 +83,7 @@ class TestTomBassoPositionSizer:
             available_margin=3000000.0
         )
 
-        assert result.lot_r == pytest.approx(1.673, rel=0.01)
+        assert result.lot_r == pytest.approx(1.952, rel=0.01)
 
     def test_volatility_based_lots_calculation(self, bank_nifty_config, base_entry_signal_bn):
         """Test Lot-V (volatility-based) calculation"""
@@ -94,8 +94,8 @@ class TestTomBassoPositionSizer:
         # Vol% = 0.5% (initial volatility for Bank Nifty)
         # Vol budget = 5000000 × 0.005 = 25,000
         # ATR = 350 points
-        # Vol per lot = 350 × 35 = 12,250
-        # Lot-V = 25000 / 12250 = 2.04 lots
+        # Vol per lot = 350 × 30 = 10,500
+        # Lot-V = 25000 / 10500 = 2.38 lots
 
         result = sizer.calculate_base_entry_size(
             base_entry_signal_bn,
@@ -103,7 +103,7 @@ class TestTomBassoPositionSizer:
             available_margin=3000000.0
         )
 
-        assert result.lot_v == pytest.approx(2.04, rel=0.01)
+        assert result.lot_v == pytest.approx(2.38, rel=0.01)
 
     def test_margin_based_lots_calculation(self, bank_nifty_config, base_entry_signal_bn):
         """Test Lot-M (margin-based) calculation"""
@@ -127,10 +127,10 @@ class TestTomBassoPositionSizer:
         sizer = TomBassoPositionSizer(bank_nifty_config)
 
         # With Bank Nifty config (risk%=0.5%, vol%=0.5%):
-        # Lot-R = (5M × 0.005) / (350 × 35) × 0.82 = 1.67 lots
-        # Lot-V = (5M × 0.005) / (350 × 35) = 2.04 lots
+        # Lot-R = (5M × 0.005) / (350 × 30) × 0.82 = 1.95 lots
+        # Lot-V = (5M × 0.005) / (350 × 30) = 2.38 lots
         # Lot-M = 3M / 270k = 11.11 lots
-        # MIN = 1.67 → FLOOR = 1 lot (risk limited)
+        # MIN = 1.95 → FLOOR = 1 lot (risk limited)
 
         result = sizer.calculate_base_entry_size(
             base_entry_signal_bn,
@@ -211,11 +211,11 @@ class TestTomBassoPositionSizer:
         sizer = TomBassoPositionSizer(gold_config)
         equity = 5000000.0
 
-        # Expected for Gold:
+        # Expected for Gold (base entry uses Risk + Margin only, matching Pine Script):
         # Lot-R: (5M × 0.5%) / (700 × 10) × 0.85 = 3.04 lots
-        # Lot-V: (5M × 0.2%) / (450 × 10) = 2.22 lots
+        # Lot-V: (5M × 0.2%) / (450 × 10) = 2.22 lots (reference only, NOT used)
         # Lot-M: 3000000 / 105000 = 28.57 lots
-        # MIN = 2.22 → FLOOR = 2 lots (volatility limited)
+        # MIN(Lot-R, Lot-M) = 3.04 → FLOOR = 3 lots (risk limited)
 
         result = sizer.calculate_base_entry_size(
             base_entry_signal_gold,
@@ -223,8 +223,8 @@ class TestTomBassoPositionSizer:
             available_margin=3000000.0
         )
 
-        assert result.final_lots == 2
-        assert result.limiter == "volatility"
+        assert result.final_lots == 3
+        assert result.limiter == "risk"
 
     def test_pyramid_constraints_abc(self, bank_nifty_config):
         """Test pyramid triple constraint (A, B, C)"""
@@ -253,7 +253,7 @@ class TestTomBassoPositionSizer:
 
         # Lot-A (margin): 1000000 / 270000 = 3.7 → 3 lots
         # Lot-B (50% rule): 10 × 0.5 = 5 lots
-        # Lot-C (risk budget): (150000 × 0.5) / (500 × 35) = 4.28 lots
+        # Lot-C (risk budget): (150000 × 0.5) / (500 × 30) = 5.0 lots
         # MIN = 3 lots (margin limited)
 
         assert result.final_lots == 3
@@ -268,16 +268,16 @@ class TestTomBassoPositionSizer:
 
         # Bank Nifty config: ongoing_risk_percent=1.0%, ongoing_vol_percent=0.7%
         #
-        # Position risk = 400 × 10 × 35 = Rs 140,000 = 2.8% (exceeds 1.0% ongoing)
-        # Risk peel: target=50k (1% of 5M), excess=90k, peel=CEIL(90k/14k) = 7 lots
+        # Position risk = 400 × 10 × 30 = Rs 120,000 = 2.4% (exceeds 1.0% ongoing)
+        # Risk peel: target=50k (1% of 5M), excess=70k, peel=CEIL(70k/12k) = 6 lots
         #
-        # Position vol = 300 × 10 × 35 = Rs 105,000 = 2.1% (exceeds 0.7% ongoing)
-        # Vol peel: target=35k (0.7% of 5M), excess=70k, peel=CEIL(70k/10.5k) = 7 lots
+        # Position vol = 300 × 10 × 30 = Rs 90,000 = 1.8% (exceeds 0.7% ongoing)
+        # Vol peel: target=35k (0.7% of 5M), excess=55k, peel=CEIL(55k/9k) = 7 lots
         #
-        # Final = MAX(7, 7) = 7 lots
+        # Final = MAX(6, 7) = 7 lots
 
-        position_risk = 400 * 10 * 35  # Rs 140,000
-        position_vol = 300 * 10 * 35  # Rs 105,000
+        position_risk = 400 * 10 * 30  # Rs 120,000
+        position_vol = 300 * 10 * 30  # Rs 90,000
 
         lots_to_peel, reason = sizer.calculate_peel_off_size(
             position_risk=position_risk,
@@ -296,12 +296,12 @@ class TestTomBassoPositionSizer:
         equity = 5000000.0
         current_lots = 2  # Smaller position
 
-        # Position risk = 100 × 2 × 35 = Rs 7,000 = 0.14% (under 1% limit) ✓
-        # Position vol = 50 × 2 × 35 = Rs 3,500 = 0.07% (under 0.3% limit) ✓
+        # Position risk = 100 × 2 × 30 = Rs 6,000 = 0.12% (under 1% limit) ✓
+        # Position vol = 50 × 2 × 30 = Rs 3,000 = 0.06% (under 0.7% limit) ✓
         # Both under limits → no peel-off
 
-        position_risk = 100 * 2 * 35  # Rs 7,000
-        position_vol = 50 * 2 * 35    # Rs 3,500
+        position_risk = 100 * 2 * 30  # Rs 6,000
+        position_vol = 50 * 2 * 30    # Rs 3,000
 
         lots_to_peel, reason = sizer.calculate_peel_off_size(
             position_risk=position_risk,
@@ -381,7 +381,7 @@ class TestTomBassoPositionSizer:
 
         # Lot-A (margin): 2M / 270k = 7.4 lots
         # Lot-B (50%): 10 × 0.5 = 5 lots ← Should limit
-        # Lot-C (risk): (500k × 0.5) / (500 × 35) = 14.28 lots
+        # Lot-C (risk): (500k × 0.5) / (500 × 30) = 16.67 lots
 
         assert result.lot_v == 5.0  # Lot-B constraint
         assert result.final_lots == 5
@@ -420,8 +420,8 @@ class TestTomBassoPositionSizer:
         bn_sizer = TomBassoPositionSizer(bank_nifty_config)
         gold_sizer = TomBassoPositionSizer(gold_config)
 
-        # Bank Nifty: point_value = 35, margin = 270k
-        assert bn_sizer.point_value == 35.0
+        # Bank Nifty: point_value = 30, margin = 270k
+        assert bn_sizer.point_value == 30.0
         assert bn_sizer.margin_per_lot == 270000.0
 
         # Gold: point_value = 10, margin = 105k
@@ -436,9 +436,9 @@ class TestTomBassoPositionSizer:
         current_lots = 20
 
         # High volatility: ATR = 500, 20 lots
-        # Position vol = 500 × 20 × 35 = Rs 350,000 = 7.0% (exceeds 3% limit)
-        position_risk = 200 * 20 * 35  # Rs 140,000 (2.8%, under limit)
-        position_vol = 500 * 20 * 35  # Rs 350,000 (7.0%, over limit!)
+        # Position vol = 500 × 20 × 30 = Rs 300,000 = 6.0% (exceeds 0.7% limit)
+        position_risk = 200 * 20 * 30  # Rs 120,000 (2.4%, exceeds limit)
+        position_vol = 500 * 20 * 30  # Rs 300,000 (6.0%, over limit!)
 
         lots_to_peel, reason = sizer.calculate_peel_off_size(
             position_risk=position_risk,
@@ -453,11 +453,11 @@ class TestTomBassoPositionSizer:
 @pytest.mark.parametrize("equity,expected_lots", [
     # Bank Nifty config: risk%=0.5%, vol%=0.5%
     # Signal: price=52000, stop=51650 (350 pts), ATR=350, ER=0.82
-    # Lot-R = (equity × 0.005) / (350 × 35) × 0.82
-    # Lot-V = (equity × 0.005) / (350 × 35)
-    (1000000, 0),   # 10L: Lot-R=0.33, Lot-V=0.41 → 0 lots
-    (5000000, 1),   # 50L: Lot-R=1.67, Lot-V=2.04 → 1 lot (risk limited)
-    (10000000, 3),  # 1Cr: Lot-R=3.35, Lot-V=4.08 → 3 lots (risk limited)
+    # Lot-R = (equity × 0.005) / (350 × 30) × 0.82
+    # Lot-V = (equity × 0.005) / (350 × 30)
+    (1000000, 0),   # 10L: Lot-R=0.39, Lot-V=0.48 → 0 lots
+    (5000000, 1),   # 50L: Lot-R=1.95, Lot-V=2.38 → 1 lot (risk limited)
+    (10000000, 3),  # 1Cr: Lot-R=3.90, Lot-V=4.76 → 3 lots (risk limited)
 ])
 def test_position_sizing_at_different_equity_levels(equity, expected_lots, bank_nifty_config, base_entry_signal_bn):
     """Parametrized test: position sizing at various equity levels"""

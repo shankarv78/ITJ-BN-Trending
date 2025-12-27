@@ -1,11 +1,24 @@
 //@version=5
 // ========================================
-// SILVER MINI TREND FOLLOWING STRATEGY v8.0
+// SILVER MINI TREND FOLLOWING STRATEGY v8.5
 // EOD PRE-CLOSE EXECUTION SYSTEM
 // ========================================
 //
-// Version: v8.0
-// Date: 2025-12-10 (v8.0 release)
+// Version: v8.5
+// Date: 2025-12-26 (v8.5 release)
+//
+// v8.5 CHANGES (from v8.0):
+// ========================================
+// 1. GEOMETRIC LOT_B SCALING (FIX)
+//    - lot_b now uses true geometric scaling: base * 0.5^(pyramid_level)
+//    - Pyr1: base * 0.5^1, Pyr2: base * 0.5^2, Pyr3: base * 0.5^3, etc.
+//    - Previously was flat 50% of base for all pyramids (bug)
+//
+// 2. BARSTATE.ISCONFIRMED CHECK
+//    - Added to base entry and pyramid entry
+//    - Ensures entry/alert only fires at confirmed bar close
+//    - Consistent with exit logic
+//
 // Asset: MCX Silver Mini 5kg Futures
 // Base Strategy: ITJ Trend Following V2 (with Triple-Constraint Pyramiding)
 //
@@ -76,7 +89,7 @@
 //
 // ========================================
 
-strategy("Silver Mini Trend Following Strategy v8.0 (EOD PreClose)",
+strategy("Silver Mini Trend Following Strategy v8.5 (EOD PreClose)",
      overlay=true,
      pyramiding=6,
      initial_capital=5000000,
@@ -450,12 +463,12 @@ bool pyramid_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_poi
 float price_move_from_last = not na(last_pyramid_price) ? close - last_pyramid_price : 0.0
 float atr_moves_from_last = atr_pyramid > 0 ? price_move_from_last / atr_pyramid : 0.0
 
-// ROC momentum check for pyramids (defined at global scope for plotshape access)
-bool roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
-
 // PYRAMIDING: v5.2 CAPITAL-INDEPENDENT Gate + Triple-Constraint Sizing
 // Gate is now PRICE-BASED: price must move by at least 1R (initial risk in points)
 if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyramids
+
+    // ROC momentum check (optional filter for pyramids)
+    roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
 
     // ========================================
     // TRIPLE CONSTRAINT SIZING (Capital-dependent - correct!)
@@ -468,8 +481,9 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
         lot_a := free_margin > 0 ? math.floor(free_margin / margin_per_lot) : 0
 
         // CONSTRAINT 2: lot-b (Discipline Safety)
-        // Maintain 50% geometric scaling from base position
-        lot_b := math.floor(initial_position_size * 0.5)
+        // v8.5: TRUE geometric scaling - each pyramid halves previous size
+        // pyramid_count=0 → 0.5^1 = 0.5, pyramid_count=1 → 0.5^2 = 0.25, etc.
+        lot_b := math.floor(initial_position_size * math.pow(pyramid_size_ratio, pyramid_count + 1))
 
         // CONSTRAINT 3: lot-c (Profit Safety)
         // Only risk 50% of excess profit (profit beyond base risk)
@@ -830,7 +844,6 @@ plotshape(long_entry and strategy.position_size == 0,
      style=shape.arrowup,
      size=size.tiny,
      text="",
-     textcolor=color.white,
      force_overlay=true)
 
 plotshape(long_exit and strategy.position_size > 0,
@@ -840,7 +853,6 @@ plotshape(long_exit and strategy.position_size > 0,
      style=shape.arrowdown,
      size=size.tiny,
      text="",
-     textcolor=color.white,
      force_overlay=true)
 
 // ========================================

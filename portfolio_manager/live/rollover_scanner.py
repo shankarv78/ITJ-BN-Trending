@@ -162,6 +162,10 @@ class RolloverScanner:
             rollover_days = self.config.banknifty_rollover_days
         elif position.instrument == "GOLD_MINI":
             rollover_days = self.config.gold_mini_rollover_days
+        elif position.instrument == "COPPER":
+            rollover_days = self.config.copper_rollover_days
+        elif position.instrument == "SILVER_MINI":
+            rollover_days = self.config.silver_mini_rollover_days
         else:
             logger.warning(f"  {position.position_id}: Unknown instrument {position.instrument}")
             return None
@@ -204,12 +208,12 @@ class RolloverScanner:
         Get expiry string from position
 
         Bank Nifty uses `expiry` field
-        Gold Mini uses `contract_month` or `expiry` field
+        Gold Mini/Copper use `contract_month` or `expiry` field
         """
         if position.instrument == "BANK_NIFTY":
             return position.expiry
-        elif position.instrument == "GOLD_MINI":
-            # Gold Mini may have expiry or contract_month
+        elif position.instrument in ("GOLD_MINI", "COPPER", "SILVER_MINI"):
+            # MCX futures may have expiry or contract_month
             if position.expiry:
                 return position.expiry
             elif position.contract_month:
@@ -255,7 +259,7 @@ class RolloverScanner:
 
         Args:
             portfolio: Portfolio state manager
-            instrument: "BANK_NIFTY" or "GOLD_MINI"
+            instrument: "BANK_NIFTY", "GOLD_MINI", or "COPPER"
             scan_date: Date to scan from
 
         Returns:

@@ -114,7 +114,7 @@ class OrderExecutor(ABC):
             Quote dictionary with ltp, bid, ask
         """
         # Determine exchange based on instrument
-        if "GOLD" in instrument.upper():
+        if "GOLD" in instrument.upper() or "COPPER" in instrument.upper() or "SILVER" in instrument.upper():
             exchange = "MCX"
         else:
             exchange = "NFO"
@@ -158,7 +158,33 @@ class OrderExecutor(ABC):
             except Exception as e:
                 logger.error(f"[OrderExecutor] Failed to translate GOLD_MINI symbol: {e}")
                 actual_symbol = "GOLDM05JAN26FUT"  # Fallback
-        elif "GOLD" in instrument.upper():
+        elif instrument == "COPPER":
+            # Copper futures: COPPER{DD}{MMM}{YY}FUT (e.g., COPPER31DEC25FUT)
+            exchange = "MCX"
+            try:
+                from core.expiry_calendar import ExpiryCalendar
+                from datetime import date
+                expiry_cal = ExpiryCalendar()
+                expiry = expiry_cal.get_expiry_after_rollover("COPPER", date.today())
+                actual_symbol = f"COPPER{expiry.strftime('%d%b%y').upper()}FUT"
+                logger.info(f"[OrderExecutor] Translated COPPER -> {actual_symbol}")
+            except Exception as e:
+                logger.error(f"[OrderExecutor] Failed to translate COPPER symbol: {e}")
+                actual_symbol = "COPPER31DEC25FUT"  # Fallback
+        elif instrument == "SILVER_MINI":
+            # Silver Mini futures: SILVERM{DD}{MMM}{YY}FUT (e.g., SILVERM27FEB26FUT)
+            exchange = "MCX"
+            try:
+                from core.expiry_calendar import ExpiryCalendar
+                from datetime import date
+                expiry_cal = ExpiryCalendar()
+                expiry = expiry_cal.get_expiry_after_rollover("SILVER_MINI", date.today())
+                actual_symbol = f"SILVERM{expiry.strftime('%d%b%y').upper()}FUT"
+                logger.info(f"[OrderExecutor] Translated SILVER_MINI -> {actual_symbol}")
+            except Exception as e:
+                logger.error(f"[OrderExecutor] Failed to translate SILVER_MINI symbol: {e}")
+                actual_symbol = "SILVERM27FEB26FUT"  # Fallback
+        elif "GOLD" in instrument.upper() or "COPPER" in instrument.upper() or "SILVER" in instrument.upper():
             exchange = "MCX"
         else:
             exchange = "NFO"  # Bank Nifty and other NSE derivatives
@@ -727,7 +753,27 @@ class ProgressiveExecutor(OrderExecutor):
                         actual_symbol = f"GOLDM{expiry.strftime('%d%b%y').upper()}FUT"
                     except Exception:
                         actual_symbol = "GOLDM05JAN26FUT"  # Fallback
-                elif "GOLD" in signal.instrument.upper():
+                elif signal.instrument == "COPPER":
+                    exchange = "MCX"
+                    try:
+                        from core.expiry_calendar import ExpiryCalendar
+                        from datetime import date
+                        expiry_cal = ExpiryCalendar()
+                        expiry = expiry_cal.get_expiry_after_rollover("COPPER", date.today())
+                        actual_symbol = f"COPPER{expiry.strftime('%d%b%y').upper()}FUT"
+                    except Exception:
+                        actual_symbol = "COPPER31DEC25FUT"  # Fallback
+                elif signal.instrument == "SILVER_MINI":
+                    exchange = "MCX"
+                    try:
+                        from core.expiry_calendar import ExpiryCalendar
+                        from datetime import date
+                        expiry_cal = ExpiryCalendar()
+                        expiry = expiry_cal.get_expiry_after_rollover("SILVER_MINI", date.today())
+                        actual_symbol = f"SILVERM{expiry.strftime('%d%b%y').upper()}FUT"
+                    except Exception:
+                        actual_symbol = "SILVERM27FEB26FUT"  # Fallback
+                elif "GOLD" in signal.instrument.upper() or "COPPER" in signal.instrument.upper() or "SILVER" in signal.instrument.upper():
                     exchange = "MCX"
                     actual_symbol = signal.instrument
                 else:
@@ -735,7 +781,15 @@ class ProgressiveExecutor(OrderExecutor):
                     actual_symbol = signal.instrument
 
                 # Round price to tick size
-                tick_size = 1.0 if exchange == "MCX" else 0.05
+                # MCX Gold Mini: Rs 1 tick, MCX Copper: Rs 0.05 tick, MCX Silver Mini: Rs 1 tick, NFO: Rs 0.05 tick
+                if signal.instrument == "COPPER":
+                    tick_size = 0.05  # Copper tick size is Rs 0.05 per kg
+                elif signal.instrument == "SILVER_MINI":
+                    tick_size = 1.0  # Silver Mini tick size is Rs 1 per kg
+                elif exchange == "MCX":
+                    tick_size = 1.0  # Gold Mini tick size
+                else:
+                    tick_size = 0.05  # NFO tick size
                 attempt_price = round(round(attempt_price / tick_size) * tick_size, 2)
 
                 if order_id and attempt > 0:
@@ -875,10 +929,17 @@ class ProgressiveExecutor(OrderExecutor):
                         attempt_price
                     )
 
-                    # Warn if we had to fall back to attempt_price
+                    # If orderbook didn't have fill price, try tradebook for actual execution price
+                    if fill_price == attempt_price and order_id:
+                        tradebook_price = self.openalgo.get_trade_fill_price(order_id)
+                        if tradebook_price:
+                            fill_price = tradebook_price
+                            logger.info(f"[ProgressiveExecutor] Using tradebook fill price: ₹{fill_price:,.2f}")
+
+                    # Warn if we still had to fall back to attempt_price
                     if fill_price == attempt_price:
                         logger.warning(
-                            f"[ProgressiveExecutor] Could not find fill price in response, using attempt_price. "
+                            f"[ProgressiveExecutor] Could not find fill price in orderbook or tradebook, using attempt_price. "
                             f"Available keys: {list(status_response.keys())}"
                         )
 
@@ -915,6 +976,12 @@ class ProgressiveExecutor(OrderExecutor):
                         status_response.get('price') or
                         attempt_price
                     )
+
+                    # Try tradebook for actual fill price if orderbook didn't have it
+                    if avg_fill_price == attempt_price and order_id:
+                        tradebook_price = self.openalgo.get_trade_fill_price(order_id)
+                        if tradebook_price:
+                            avg_fill_price = tradebook_price
 
                     logger.info(
                         f"[ProgressiveExecutor] Partial fill on attempt {attempt_num}: "
@@ -983,22 +1050,84 @@ class SyntheticExecutionResult:
     # These contain all info needed: instrument, expiry date, strike, option type
     pe_symbol: Optional[str] = None
     ce_symbol: Optional[str] = None
+    # ATM strike used for synthetic futures (needed for price calculation)
+    strike: Optional[int] = None
+
+    def get_synthetic_price(self) -> Optional[float]:
+        """
+        Calculate synthetic futures price using correct formula.
+
+        Synthetic Long Entry = Strike + CE_Premium - PE_Premium
+
+        For ENTRY (SELL PE + BUY CE):
+        - We SELL PE at market (receive premium, short position)
+        - We BUY CE at market (pay premium, long position)
+        - Net position = Long synthetic futures at (Strike + CE - PE)
+
+        For EXIT (BUY PE + SELL CE):
+        - We BUY PE to close short (pay premium)
+        - We SELL CE to close long (receive premium)
+        - Synthetic exit price = Strike + CE_received - PE_paid
+
+        Returns:
+            Synthetic futures price, or None if calculation not possible
+        """
+        if self.strike is None:
+            logger.warning(
+                "[SyntheticExecutionResult] Cannot calculate synthetic price: strike is None"
+            )
+            return None
+
+        pe_price = self.pe_result.fill_price if self.pe_result else None
+        ce_price = self.ce_result.fill_price if self.ce_result else None
+
+        if pe_price is None or ce_price is None:
+            logger.warning(
+                f"[SyntheticExecutionResult] Cannot calculate synthetic price: "
+                f"PE_price={'None' if pe_price is None else pe_price}, "
+                f"CE_price={'None' if ce_price is None else ce_price}"
+            )
+            return None
+
+        # Synthetic = Strike + CE - PE
+        synthetic_price = self.strike + ce_price - pe_price
+
+        # Edge case protection: synthetic price should never be negative
+        if synthetic_price <= 0:
+            logger.error(
+                f"[SyntheticExecutionResult] INVALID synthetic price {synthetic_price:.2f} "
+                f"(strike={self.strike}, CE={ce_price}, PE={pe_price}). Check option prices!"
+            )
+            return None
+
+        return synthetic_price
 
     def to_execution_result(self, lots: int, signal_price: float) -> ExecutionResult:
         """Convert to standard ExecutionResult for compatibility"""
         if self.status == ExecutionStatus.EXECUTED:
-            # Use average of PE and CE fill prices
             pe_price = self.pe_result.fill_price if self.pe_result else 0
             ce_price = self.ce_result.fill_price if self.ce_result else 0
-            avg_price = (pe_price + ce_price) / 2 if pe_price and ce_price else signal_price
+
+            # Use correct synthetic futures price formula: Strike + CE - PE
+            # Fallback to signal_price if strike not available
+            synthetic_price = self.get_synthetic_price()
+
+            if synthetic_price is not None:
+                execution_price = synthetic_price
+            else:
+                execution_price = signal_price
+                logger.warning(
+                    f"[SyntheticExecutionResult] Using signal_price fallback ₹{signal_price:,.2f} "
+                    f"(synthetic price calculation failed)"
+                )
 
             result = ExecutionResult(
                 status=ExecutionStatus.EXECUTED,
-                execution_price=avg_price,
+                execution_price=execution_price,
                 lots_filled=lots,
                 order_id=f"PE:{self.pe_result.order_id if self.pe_result else 'N/A'}|CE:{self.ce_result.order_id if self.ce_result else 'N/A'}",
                 attempts=1,
-                notes=f"Synthetic futures: PE={pe_price}, CE={ce_price}"
+                notes=f"Synthetic futures: strike={self.strike}, PE={pe_price}, CE={ce_price}, synthetic_price={execution_price:.2f}"
             )
             result.calculate_slippage(signal_price)
             return result
@@ -1113,8 +1242,19 @@ class SyntheticFuturesExecutor:
             current_price=current_price
         )
 
-        # Symbols are already stored by _execute_two_legs (pe_symbol, ce_symbol)
-        # That's all we need - the actual executed symbols contain all info
+        # Store the ATM strike used for synthetic price calculation
+        result.strike = translated.atm_strike
+
+        # Log synthetic price if execution succeeded
+        if result.status == ExecutionStatus.EXECUTED:
+            synthetic_price = result.get_synthetic_price()
+            if synthetic_price:
+                logger.info(
+                    f"[SyntheticFuturesExecutor] Synthetic entry price: ₹{synthetic_price:,.2f} "
+                    f"(strike={result.strike}, PE={result.pe_result.fill_price if result.pe_result else 'N/A'}, "
+                    f"CE={result.ce_result.fill_price if result.ce_result else 'N/A'})"
+                )
+
         return result
 
     def execute_exit(
@@ -1152,6 +1292,8 @@ class SyntheticFuturesExecutor:
         )
 
         # Get translated symbols (or use provided ones)
+        exit_strike = None
+
         if pe_symbol and ce_symbol:
             # Use provided symbols (closing at same strike as entry)
             from core.symbol_mapper import OrderLeg, ExchangeCode
@@ -1167,6 +1309,8 @@ class SyntheticFuturesExecutor:
                 action="SELL",  # Close long call
                 leg_type="CE"
             )
+            # Extract strike from symbol (e.g., BANKNIFTY30DEC2560000PE -> 60000)
+            exit_strike = self._extract_strike_from_symbol(pe_symbol)
         else:
             # Calculate new ATM symbols
             if self.symbol_mapper is None:
@@ -1188,26 +1332,42 @@ class SyntheticFuturesExecutor:
 
             pe_leg = translated.order_legs[0]
             ce_leg = translated.order_legs[1]
+            exit_strike = translated.atm_strike
 
         logger.info(
             f"[SyntheticFuturesExecutor] Executing exit: "
-            f"PE={pe_leg.symbol}({pe_leg.action}), CE={ce_leg.symbol}({ce_leg.action})"
+            f"PE={pe_leg.symbol}({pe_leg.action}), CE={ce_leg.symbol}({ce_leg.action}), strike={exit_strike}"
         )
 
         # Calculate quantity
         if self.symbol_mapper:
             lot_size = self.symbol_mapper.get_lot_size(instrument)
         else:
-            lot_size = 35  # Bank Nifty default
+            lot_size = 30  # Bank Nifty default (Dec 2025 onwards)
         quantity = lots * lot_size
 
-        return self._execute_two_legs(
+        result = self._execute_two_legs(
             pe_leg=pe_leg,
             ce_leg=ce_leg,
             quantity=quantity,
             lots=lots,
             current_price=current_price
         )
+
+        # Store the strike used for synthetic exit price calculation
+        result.strike = exit_strike
+
+        # Log synthetic exit price if execution succeeded
+        if result.status == ExecutionStatus.EXECUTED:
+            synthetic_price = result.get_synthetic_price()
+            if synthetic_price:
+                logger.info(
+                    f"[SyntheticFuturesExecutor] Synthetic exit price: ₹{synthetic_price:,.2f} "
+                    f"(strike={result.strike}, PE={result.pe_result.fill_price if result.pe_result else 'N/A'}, "
+                    f"CE={result.ce_result.fill_price if result.ce_result else 'N/A'})"
+                )
+
+        return result
 
     def _execute_two_legs(
         self,
@@ -1778,6 +1938,35 @@ class SyntheticFuturesExecutor:
             tick_size = 0.05  # NFO options
 
         return round(round(price / tick_size) * tick_size, 2)
+
+    def _extract_strike_from_symbol(self, symbol: str) -> Optional[int]:
+        """
+        Extract strike price from Bank Nifty option symbol.
+
+        Symbol format: BANKNIFTY[DDMMMYY][STRIKE][PE/CE]
+        Example: BANKNIFTY30DEC2560000PE -> 60000
+
+        Args:
+            symbol: Option symbol string
+
+        Returns:
+            Strike price as integer, or None if extraction fails
+        """
+        import re
+        try:
+            # Match pattern: letters/numbers followed by strike and PE/CE
+            # BANKNIFTY30DEC2560000PE -> capture 60000
+            match = re.search(r'(\d{4,6})(PE|CE)$', symbol)
+            if match:
+                strike = int(match.group(1))
+                logger.debug(f"Extracted strike {strike} from {symbol}")
+                return strike
+            else:
+                logger.warning(f"Could not extract strike from symbol: {symbol}")
+                return None
+        except Exception as e:
+            logger.warning(f"Failed to extract strike from {symbol}: {e}")
+            return None
 
     def _get_limit_price(self, symbol: str, action: str, exchange: str = "NFO") -> Optional[float]:
         """

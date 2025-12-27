@@ -49,7 +49,11 @@ def map_position_to_signal(position):
     # Determine instrument from symbol
     symbol = position.get('tradingsymbol', position.get('symbol', ''))
 
-    if 'GOLD' in symbol.upper():
+    if 'COPPER' in symbol.upper():
+        instrument = 'COPPER'
+    elif 'SILVERM' in symbol.upper():
+        instrument = 'SILVER_MINI'
+    elif 'GOLD' in symbol.upper():
         instrument = 'GOLD_MINI'
     elif 'BANKNIFTY' in symbol.upper():
         instrument = 'BANK_NIFTY'

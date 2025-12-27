@@ -337,6 +337,51 @@ class HolidayCalendar:
 
         return next_day
 
+    def get_previous_trading_day(self, from_date: date, exchange: str) -> date:
+        """
+        Get previous trading day before a given date.
+
+        Used for expiry calculation when the nominal expiry date falls on
+        a weekend or holiday. For example:
+        - If 5th is Sunday, return 3rd (Friday)
+        - If 5th is Monday holiday and 4th is Sunday, 3rd is Saturday, return 2nd
+
+        Args:
+            from_date: Starting date
+            exchange: Exchange to check ("NSE" or "MCX")
+
+        Returns:
+            Previous trading day (may be the same date if it's a trading day)
+        """
+        check_date = from_date
+
+        while not self.is_trading_day(check_date, exchange):
+            check_date -= timedelta(days=1)
+            # Safety: Don't go more than 10 days back
+            if (from_date - check_date).days > 10:
+                logger.warning(f"[HOLIDAY] Could not find trading day within 10 days before {from_date}")
+                break
+
+        return check_date
+
+    def get_actual_expiry_date(self, nominal_expiry: date, exchange: str) -> date:
+        """
+        Get the actual expiry date, adjusting for weekends and holidays.
+
+        If the nominal expiry date is a weekend or holiday, returns the
+        previous trading day.
+
+        Args:
+            nominal_expiry: The nominal expiry date (e.g., 5th of month for Gold Mini)
+            exchange: Exchange to check ("NSE" or "MCX")
+
+        Returns:
+            Actual expiry date (adjusted for holidays/weekends)
+        """
+        if self.is_trading_day(nominal_expiry, exchange):
+            return nominal_expiry
+        return self.get_previous_trading_day(nominal_expiry, exchange)
+
     def get_status(self) -> Dict:
         """Get calendar status for API response."""
         today = date.today()

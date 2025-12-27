@@ -157,8 +157,18 @@ class DatabaseStateManager:
                  %(is_test)s, %(original_lots)s, %(strategy_id)s, 1)
                 ON CONFLICT (position_id) DO UPDATE SET
                     status = EXCLUDED.status,
+                    entry_timestamp = EXCLUDED.entry_timestamp,
+                    entry_price = EXCLUDED.entry_price,
+                    lots = EXCLUDED.lots,
+                    quantity = EXCLUDED.quantity,
+                    initial_stop = EXCLUDED.initial_stop,
                     current_stop = EXCLUDED.current_stop,
                     highest_close = EXCLUDED.highest_close,
+                    atr = EXCLUDED.atr,
+                    limiter = EXCLUDED.limiter,
+                    risk_contribution = EXCLUDED.risk_contribution,
+                    vol_contribution = EXCLUDED.vol_contribution,
+                    is_base_position = EXCLUDED.is_base_position,
                     unrealized_pnl = EXCLUDED.unrealized_pnl,
                     realized_pnl = EXCLUDED.realized_pnl,
                     rollover_status = EXCLUDED.rollover_status,
@@ -169,6 +179,14 @@ class DatabaseStateManager:
                     exit_price = EXCLUDED.exit_price,
                     exit_reason = EXCLUDED.exit_reason,
                     strategy_id = EXCLUDED.strategy_id,
+                    futures_symbol = EXCLUDED.futures_symbol,
+                    futures_order_id = EXCLUDED.futures_order_id,
+                    pe_symbol = EXCLUDED.pe_symbol,
+                    ce_symbol = EXCLUDED.ce_symbol,
+                    pe_order_id = EXCLUDED.pe_order_id,
+                    ce_order_id = EXCLUDED.ce_order_id,
+                    pe_entry_price = EXCLUDED.pe_entry_price,
+                    ce_entry_price = EXCLUDED.ce_entry_price,
                     version = portfolio_positions.version + 1,
                     updated_at = CURRENT_TIMESTAMP
             """, pos_dict)
@@ -774,6 +792,150 @@ class DatabaseStateManager:
         except Exception as e:
             logger.error(f"Failed to record leadership transition: {e}")
             return False
+
+    # ===== CAPITAL TRANSACTION OPERATIONS =====
+
+    def inject_capital(self, transaction_type: str, amount: float, notes: str = None,
+                       created_by: str = 'API') -> dict:
+        """
+        Record a capital injection (deposit) or withdrawal
+
+        Args:
+            transaction_type: 'DEPOSIT' or 'WITHDRAW'
+            amount: Positive amount to deposit/withdraw
+            notes: Optional notes about the transaction
+            created_by: Source of transaction ('API', 'MANUAL', 'SYSTEM')
+
+        Returns:
+            Dictionary with transaction details including new equity
+
+        Raises:
+            ValueError: If transaction_type is invalid or amount <= 0
+            RuntimeError: If withdrawal would result in negative equity
+        """
+        if transaction_type not in ('DEPOSIT', 'WITHDRAW'):
+            raise ValueError(f"Invalid transaction_type: {transaction_type}. Must be 'DEPOSIT' or 'WITHDRAW'")
+
+        if amount <= 0:
+            raise ValueError(f"Amount must be positive: {amount}")
+
+        with self.transaction() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            # Get current equity
+            cursor.execute("SELECT closed_equity FROM portfolio_state WHERE id = 1")
+            row = cursor.fetchone()
+            if not row:
+                raise RuntimeError("Portfolio state not found in database")
+
+            equity_before = float(row['closed_equity'])
+
+            # Calculate new equity
+            if transaction_type == 'DEPOSIT':
+                equity_after = equity_before + amount
+            else:  # WITHDRAW
+                equity_after = equity_before - amount
+                if equity_after < 0:
+                    raise RuntimeError(f"Withdrawal of {amount} would result in negative equity. Current: {equity_before}")
+
+            # Record transaction in ledger
+            cursor.execute("""
+                INSERT INTO capital_transactions
+                (transaction_type, amount, notes, equity_before, equity_after, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (transaction_type, amount, notes, equity_before, equity_after, created_by))
+            tx_row = cursor.fetchone()
+
+            # Update portfolio_state
+            cursor.execute("""
+                UPDATE portfolio_state
+                SET closed_equity = %s,
+                    version = version + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (equity_after,))
+
+            # Invalidate cache
+            self._portfolio_state_cache = None
+
+            result = {
+                'transaction_id': tx_row['id'],
+                'transaction_type': transaction_type,
+                'amount': amount,
+                'notes': notes,
+                'equity_before': equity_before,
+                'equity_after': equity_after,
+                'created_at': tx_row['created_at'].isoformat(),
+                'created_by': created_by
+            }
+
+            logger.info(f"Capital {transaction_type}: {amount:,.2f} | Equity: {equity_before:,.2f} -> {equity_after:,.2f}")
+            return result
+
+    def get_capital_transactions(self, limit: int = 50, transaction_type: str = None) -> List[dict]:
+        """
+        Get recent capital transactions
+
+        Args:
+            limit: Maximum number of transactions to return
+            transaction_type: Optional filter by 'DEPOSIT' or 'WITHDRAW'
+
+        Returns:
+            List of transaction dictionaries
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            if transaction_type:
+                cursor.execute("""
+                    SELECT * FROM capital_transactions
+                    WHERE transaction_type = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (transaction_type, limit))
+            else:
+                cursor.execute("""
+                    SELECT * FROM capital_transactions
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (limit,))
+
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_capital_summary(self) -> dict:
+        """
+        Get summary of all capital transactions
+
+        Returns:
+            Dictionary with deposit_count, total_deposits, withdraw_count,
+            total_withdrawals, net_capital_change
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("SELECT * FROM capital_summary")
+            row = cursor.fetchone()
+
+            if row:
+                return {
+                    'deposit_count': row['deposit_count'],
+                    'total_deposits': float(row['total_deposits'] or 0),
+                    'withdraw_count': row['withdraw_count'],
+                    'total_withdrawals': float(row['total_withdrawals'] or 0),
+                    'net_capital_change': float(row['net_capital_change'] or 0),
+                    'first_transaction': row['first_transaction'].isoformat() if row['first_transaction'] else None,
+                    'last_transaction': row['last_transaction'].isoformat() if row['last_transaction'] else None
+                }
+
+            return {
+                'deposit_count': 0,
+                'total_deposits': 0,
+                'withdraw_count': 0,
+                'total_withdrawals': 0,
+                'net_capital_change': 0,
+                'first_transaction': None,
+                'last_transaction': None
+            }
 
     def close_all_connections(self):
         """Close all database connections in pool"""

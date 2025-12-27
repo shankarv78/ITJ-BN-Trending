@@ -1,36 +1,54 @@
 //@version=5
 // ========================================
-// SILVER MINI TREND FOLLOWING STRATEGY v8.0
-// EOD PRE-CLOSE EXECUTION SYSTEM
+// GOLD MINI TREND FOLLOWING STRATEGY v8.5
+// ✨ EOD PRE-CLOSE EXECUTION SYSTEM
 // ========================================
 //
-// Version: v8.0
-// Date: 2025-12-10 (v8.0 release)
-// Asset: MCX Silver Mini 5kg Futures
+// Version: v8.5
+// Date: 2025-12-26 (v8.5 release)
+// Asset: MCX Gold Mini 100g Futures
 // Base Strategy: ITJ Trend Following V2 (with Triple-Constraint Pyramiding)
+//
+// v8.5 CHANGES (from v8.0):
+// ========================================
+// 1. ✨ BARSTATE.ISCONFIRMED ON ENTRIES
+//    - Added barstate.isconfirmed check to base entry and pyramid entry
+//    - Ensures entries only execute at confirmed bar close
+//    - Consistent with exit logic (which already had this check)
+//    - Prevents duplicate entries during bar formation
+//
+// 2. ✨ GEOMETRIC LOT_B SCALING (BUGFIX)
+//    - Fixed lot_b calculation to use TRUE geometric scaling
+//    - Old (flat): initial_position_size * 0.5 (same for all pyramids)
+//    - New (geometric): initial_position_size * 0.5^(pyramid_count+1)
+//    - PYR1: 0.5x base, PYR2: 0.25x base, PYR3: 0.125x base
+//
+// ========================================
+// Inherited from v8.0:
+// ========================================
 //
 // v8.0 CHANGES (from v7.0):
 // ========================================
-// 1. EOD_MONITOR ALERTS FOR PRE-CLOSE EXECUTION
+// 1. ✨ EOD_MONITOR ALERTS FOR PRE-CLOSE EXECUTION
 //    - Added EOD_MONITOR signal generation during LAST 5 MINUTES (23:25 onwards)
 //    - Fires on EVERY TICK so Python gets real-time condition updates
 //    - Enables Python to execute orders at T-30s with LATEST condition state
 //    - Prevents missed trades when bar-close signal arrives after market close
 //
-// 2. EOD_MONITOR SIGNAL STRUCTURE (RAW DATA ONLY)
+// 2. ✨ EOD_MONITOR SIGNAL STRUCTURE (RAW DATA ONLY)
 //    - type: "EOD_MONITOR" (distinct from BASE_ENTRY/PYRAMID/EXIT)
 //    - conditions: All 7 entry conditions (rsi_condition, ema_condition, etc.)
 //    - indicators: RSI, EMA, DC_upper, ADX, ER, SuperTrend, ATR
 //    - position_status: in_position, pyramid_count (for reference)
 //    - NOTE: NO sizing field - Python calculates using REAL portfolio equity
 //
-// 3. ARCHITECTURE PRINCIPLE
+// 3. ✨ ARCHITECTURE PRINCIPLE
 //    - TradingView = SIGNAL GENERATOR ONLY
 //    - Python Portfolio Manager = TOM BASSO POSITION SIZING ENGINE
-//    - Capital is SHARED across Bank Nifty + Gold Mini + Silver Mini
+//    - Capital is SHARED across Bank Nifty + Gold Mini
 //    - Position sizing MUST use actual portfolio equity, not Pine Script estimates
 //
-// 4. MCX SEASONAL TIMING
+// 4. ✨ MCX SEASONAL TIMING
 //    - Alert fires on EVERY TICK during 5-min EOD window (is_eod_alert_window)
 //    - Python EODScheduler handles precise timing (T-30s decision, T-15s tracking)
 //    - MCX close time varies: 23:30 IST (US DST) or 23:55 IST (US Standard)
@@ -39,19 +57,19 @@
 // ========================================
 // Inherited from v7.0:
 // ========================================
-// 1. JSON ALERT SYSTEM ADDED
+// 1. ✨ JSON ALERT SYSTEM ADDED
 //    - Added complete JSON alert format for portfolio manager integration
 //    - BASE_ENTRY alerts with all required fields
 //    - PYRAMID alerts for all pyramid levels (Long_2 through Long_6)
 //    - EXIT alerts for all positions with Tom Basso stops
 //    - All alerts include: instrument, position, price, stop, lots, atr, er, supertrend, roc, timestamp
 //
-// 2. ALERT FIELD COMPLETENESS
-//    - BASE_ENTRY: instrument="SILVER_MINI", price, stop, lots, atr, er, supertrend, roc, timestamp
-//    - PYRAMID: instrument="SILVER_MINI", position, price, stop, lots, atr, er, supertrend, roc, timestamp
-//    - EXIT: instrument="SILVER_MINI", position, price, stop, entry_price, lots, reason, atr, er, supertrend, roc, timestamp
+// 2. ✨ ALERT FIELD COMPLETENESS
+//    - BASE_ENTRY: instrument="GOLD_MINI", price, stop, lots, atr, er, supertrend, roc, timestamp
+//    - PYRAMID: instrument="GOLD_MINI", position, price, stop, lots, atr, er, supertrend, roc, timestamp
+//    - EXIT: instrument="GOLD_MINI", position, price, stop, entry_price, lots, reason, atr, er, supertrend, roc, timestamp
 //
-// 3. COMPATIBILITY
+// 3. ✨ COMPATIBILITY
 //    - JSON format matches portfolio_manager/core/models.py Signal dataclass
 //    - Ready for automated webhook processing
 //    - All fields validated and required for Tom Basso position sizing
@@ -65,20 +83,20 @@
 // - All v5.2 features maintained
 //
 // ========================================
-// MCX SILVER MINI (5kg) CONFIGURATION
+// MCX GOLD MINI (100g) CONFIGURATION
 // ========================================
-// Contract: Silver Mini 5kg (SILVERM on MCX)
-// Lot Size: 5kg per contract
-// Margin: Rs 2,00,000 per lot (updated)
+// Contract: Gold Mini 100g (GOLDMINI on MCX)
+// Lot Size: 100g per contract
+// Margin: Rs 1,05,000 per lot (updated)
 // Trading Hours: 9:00 AM - 11:30 PM (14.5 hours)
 // Recommended Timeframe: 60-min (1-hour candles)
 // Commission: 0.05% (futures, lower than options)
 //
 // ========================================
 
-strategy("Silver Mini Trend Following Strategy v8.0 (EOD PreClose)",
+strategy("Gold Mini Trend Following Strategy v8.5 (EOD PreClose)",
      overlay=true,
-     pyramiding=6,
+     pyramiding=3,
      initial_capital=5000000,
      default_qty_type=strategy.fixed,
      default_qty_value=1,
@@ -106,7 +124,7 @@ dc_period = input.int(20, "DC Period", minval=1)
 
 // ADX Parameters
 adx_period = input.int(30, "ADX Period", minval=1)
-adx_threshold = input.float(25, "ADX Threshold", minval=0, tooltip="Silver Mini: 25 (higher than Gold's 15, optimized for silver volatility)")
+adx_threshold = input.float(15, "ADX Threshold", minval=0, tooltip="v5.2: 15 (stricter trend filter, user-optimized)")
 
 // Efficiency Ratio Parameters
 er_period = input.int(3, "ER Period", minval=1, tooltip="v5.2: 3 (faster ER calculation, user-optimized)")
@@ -142,19 +160,19 @@ show_all_info = input.bool(false, "Show All Info (Debug)", tooltip="Show both in
 
 // Position Sizing Parameters
 risk_percent = input.float(1.5, "Risk % of Capital", minval=0.1, maxval=10, step=0.1, tooltip="Risk per trade as percentage of equity")
-lot_size = input.int(5, "Point Value (Rs per tick)", minval=1, tooltip="Silver Mini: Rs 5 per tick (5kg contract = 5×1kg, Re 1 tick × 5 = Rs 5)")
+lot_size = input.int(10, "Point Value (Rs per tick)", minval=1, tooltip="Gold Mini: Rs 10 per tick (100g contract = 10×10g, Re 1 tick × 10 = Rs 10)")
 
-// Margin Management (Silver Mini Futures)
+// Margin Management (Gold Mini Futures)
 use_margin_check = input.bool(true, "Enable Margin Check", tooltip="Prevent pyramiding if insufficient margin available")
-margin_per_lot = input.float(2.0, "Margin per Lot (Lakhs)", minval=0.1, step=0.05, tooltip="Rs 2,00,000 per lot (MCX Silver Mini margin requirement)")
+margin_per_lot = input.float(1.05, "Margin per Lot (Lakhs)", minval=0.1, step=0.05, tooltip="v5.2: Rs 1,05,000 (updated MCX margin requirement)")
 use_leverage = input.bool(false, "Use Leverage", tooltip="Enable leverage for margin calculations")
 leverage_multiplier = input.float(1.0, "Leverage Multiplier", minval=0.1, maxval=10, step=0.1, tooltip="Multiply available margin by this factor (1.0 = no leverage, 2.0 = 2x leverage)")
 
 // Pyramiding Parameters
 enable_pyramiding = input.bool(true, "Enable Pyramiding", tooltip="Allow adding to winning positions")
-max_pyramids = input.int(5, "Max Pyramids", minval=1, maxval=5, tooltip="Silver Mini: 5 pyramids (6 total positions max)")
+max_pyramids = input.int(3, "Max Pyramids", minval=1, maxval=5, tooltip="v5.2: 3 (more conservative, user-optimized)")
 use_1r_gate = input.bool(true, "Use 1R Pyramid Gate", tooltip="Require price to move > 1R from entry before pyramiding. If disabled, only ATR spacing is required.")
-atr_pyramid_threshold = input.float(1.5, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25, tooltip="Silver Mini: 1.5 ATR spacing (wider than Gold due to higher volatility)")
+atr_pyramid_threshold = input.float(0.5, "ATR Pyramid Threshold", minval=0.25, maxval=2.0, step=0.25, tooltip="Price must move this many ATRs from last entry to trigger pyramid")
 pyramid_size_ratio = input.float(0.5, "Pyramid Size Ratio", minval=0.25, maxval=1.0, step=0.05, tooltip="Size of each pyramid as ratio of previous entry (0.5 = 50%)")
 
 // Stop Loss Management
@@ -162,12 +180,12 @@ stop_loss_mode = input.string("Tom Basso", "Stop Loss Mode", options=["SuperTren
 atr_period_pyramid = input.int(10, "ATR Period (Pyramiding)", minval=1, tooltip="ATR period for calculating pyramid triggers")
 
 // Tom Basso ATR Trailing Stop Parameters (only used if mode = "Tom Basso")
-basso_initial_atr_mult = input.float(2.0, "Basso Initial Stop (× ATR)", minval=0.5, maxval=5.0, step=0.5, tooltip="Silver Mini: 2× ATR initial stop (wider than Gold due to higher volatility)")
-basso_trailing_atr_mult = input.float(3.0, "Basso Trailing Stop (× ATR)", minval=1.0, maxval=5.0, step=0.5, tooltip="Silver Mini: 3× ATR trailing stop (wider than Gold due to higher volatility)")
+basso_initial_atr_mult = input.float(1.0, "Basso Initial Stop (× ATR)", minval=0.5, maxval=5.0, step=0.5, tooltip="Initial stop distance from entry (multiplier of ATR)")
+basso_trailing_atr_mult = input.float(2.0, "Basso Trailing Stop (× ATR)", minval=1.0, maxval=5.0, step=0.5, tooltip="Trailing stop distance from highest close (multiplier of ATR)")
 basso_atr_period = input.int(10, "Basso ATR Period", minval=5, maxval=50, tooltip="ATR period for Tom Basso stop calculation")
 
 // Trade Start Date Filter
-use_start_date = input.bool(false, "Use Start Date Filter", tooltip="Only allow trades from specified date onwards")
+use_start_date = input.bool(true, "Use Start Date Filter", tooltip="Only allow trades from specified date onwards")
 start_date = input.time(timestamp("11 Nov 2025 00:00 +0000"), "Trade Start Date", tooltip="Strategy will only take trades from this date onwards")
 
 // ========================================
@@ -245,7 +263,7 @@ long_entry = rsi_condition and ema_condition and dc_condition and adx_condition 
 // Exit Condition: Candle closes below SuperTrend
 long_exit = close < supertrend
 
-// EOD Detection: MCX Silver close varies by season (23:30 or 23:55 IST)
+// EOD Detection: MCX Gold close varies by season (23:30 or 23:55 IST)
 // Conservative approach: Flag EOD window from 23:00 onwards
 is_eod_candle = hour(time) >= 23 and minute(time) >= 0
 // EOD Alert Window: 15 minutes before market close
@@ -427,7 +445,7 @@ if long_entry and strategy.position_size == 0 and barstate.isconfirmed
         // Use mode-specific stop: Tom Basso uses ATR-based stop, others use SuperTrend
         float alert_stop = stop_loss_mode == "Tom Basso" ? initial_stop_price : supertrend
         timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
-        json_entry = '{"type":"BASE_ENTRY", "instrument":"SILVER_MINI", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(alert_stop) + ', "lots":' + str.tostring(final_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+        json_entry = '{"type":"BASE_ENTRY", "instrument":"GOLD_MINI", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(alert_stop) + ', "lots":' + str.tostring(final_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
         alert(json_entry, alert.freq_once_per_bar_close)
 
 // v5.2: Initialize lot constraint variables at appropriate scope for info panel access
@@ -450,12 +468,12 @@ bool pyramid_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_poi
 float price_move_from_last = not na(last_pyramid_price) ? close - last_pyramid_price : 0.0
 float atr_moves_from_last = atr_pyramid > 0 ? price_move_from_last / atr_pyramid : 0.0
 
-// ROC momentum check for pyramids (defined at global scope for plotshape access)
-bool roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
-
 // PYRAMIDING: v5.2 CAPITAL-INDEPENDENT Gate + Triple-Constraint Sizing
 // Gate is now PRICE-BASED: price must move by at least 1R (initial risk in points)
 if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyramids
+
+    // ROC momentum check (optional filter for pyramids)
+    roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
 
     // ========================================
     // TRIPLE CONSTRAINT SIZING (Capital-dependent - correct!)
@@ -468,8 +486,9 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
         lot_a := free_margin > 0 ? math.floor(free_margin / margin_per_lot) : 0
 
         // CONSTRAINT 2: lot-b (Discipline Safety)
-        // Maintain 50% geometric scaling from base position
-        lot_b := math.floor(initial_position_size * 0.5)
+        // v8.5: TRUE geometric scaling - each pyramid halves previous size
+        // pyramid_count=0 → 0.5^1 = 0.5, pyramid_count=1 → 0.5^2 = 0.25, etc.
+        lot_b := math.floor(initial_position_size * math.pow(pyramid_size_ratio, pyramid_count + 1))
 
         // CONSTRAINT 3: lot-c (Profit Safety)
         // Only risk 50% of excess profit (profit beyond base risk)
@@ -537,7 +556,7 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
         // JSON Alert for PYRAMID
         timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
         pyramid_stop = stop_loss_mode == "SuperTrend" ? supertrend : (stop_loss_mode == "Tom Basso" ? (not na(basso_stop_long1) ? basso_stop_long1 : supertrend) : supertrend)
-        json_pyramid = '{"type":"PYRAMID", "instrument":"SILVER_MINI", "position":"Long_' + str.tostring(pyramid_count + 1) + '", "price":' + str.tostring(close) + ', "stop":' + str.tostring(pyramid_stop) + ', "lots":' + str.tostring(pyramid_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+        json_pyramid = '{"type":"PYRAMID", "instrument":"GOLD_MINI", "position":"Long_' + str.tostring(pyramid_count + 1) + '", "price":' + str.tostring(close) + ', "stop":' + str.tostring(pyramid_stop) + ', "lots":' + str.tostring(pyramid_lots) + ', "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
         alert(json_pyramid, alert.freq_once_per_bar_close)
 
 // STOP LOSS MANAGEMENT
@@ -553,7 +572,7 @@ if strategy.position_size > 0
             exit_lots = strategy.position_size
             // JSON Alert for SuperTrend Exit
             timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
-            json_exit = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(supertrend) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(exit_lots) + ', "reason":"SuperTrend", "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+            json_exit = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"ALL", "price":' + str.tostring(close) + ', "stop":' + str.tostring(supertrend) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(exit_lots) + ', "reason":"SuperTrend", "atr":' + str.tostring(atr_pyramid) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
             alert(json_exit, alert.freq_once_per_bar_close)
             strategy.close_all(comment="EXIT - Below ST")
             // Reset tracking
@@ -683,7 +702,7 @@ if strategy.position_size > 0
                 strategy.close("Long_1", comment="EXIT - Basso Stop")
                 // JSON Alert for Long_1 Exit
                 timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
-                json_exit_l1 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long1) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(initial_position_size) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+                json_exit_l1 = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"Long_1", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long1) + ', "entry_price":' + str.tostring(initial_entry_price) + ', "lots":' + str.tostring(initial_position_size) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l1, alert.freq_once_per_bar_close)
                 initial_entry_price := na
                 basso_stop_long1 := na
@@ -700,7 +719,7 @@ if strategy.position_size > 0
                 // JSON Alert for Long_2 Exit
                 timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr1_lots_exit = math.round(initial_position_size * pyramid_size_ratio)
-                json_exit_l2 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_2", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long2) + ', "entry_price":' + str.tostring(pyr1_entry_price) + ', "lots":' + str.tostring(pyr1_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+                json_exit_l2 = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"Long_2", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long2) + ', "entry_price":' + str.tostring(pyr1_entry_price) + ', "lots":' + str.tostring(pyr1_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l2, alert.freq_once_per_bar_close)
                 pyr1_entry_price := na
                 basso_stop_long2 := na
@@ -717,7 +736,7 @@ if strategy.position_size > 0
                 // JSON Alert for Long_3 Exit
                 timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr2_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 2))
-                json_exit_l3 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_3", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long3) + ', "entry_price":' + str.tostring(pyr2_entry_price) + ', "lots":' + str.tostring(pyr2_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+                json_exit_l3 = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"Long_3", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long3) + ', "entry_price":' + str.tostring(pyr2_entry_price) + ', "lots":' + str.tostring(pyr2_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l3, alert.freq_once_per_bar_close)
                 pyr2_entry_price := na
                 basso_stop_long3 := na
@@ -734,7 +753,7 @@ if strategy.position_size > 0
                 // JSON Alert for Long_4 Exit
                 timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr3_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 3))
-                json_exit_l4 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_4", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long4) + ', "entry_price":' + str.tostring(pyr3_entry_price) + ', "lots":' + str.tostring(pyr3_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+                json_exit_l4 = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"Long_4", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long4) + ', "entry_price":' + str.tostring(pyr3_entry_price) + ', "lots":' + str.tostring(pyr3_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l4, alert.freq_once_per_bar_close)
                 pyr3_entry_price := na
                 basso_stop_long4 := na
@@ -751,7 +770,7 @@ if strategy.position_size > 0
                 // JSON Alert for Long_5 Exit
                 timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr4_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 4))
-                json_exit_l5 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_5", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long5) + ', "entry_price":' + str.tostring(pyr4_entry_price) + ', "lots":' + str.tostring(pyr4_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+                json_exit_l5 = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"Long_5", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long5) + ', "entry_price":' + str.tostring(pyr4_entry_price) + ', "lots":' + str.tostring(pyr4_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l5, alert.freq_once_per_bar_close)
                 pyr4_entry_price := na
                 basso_stop_long5 := na
@@ -768,7 +787,7 @@ if strategy.position_size > 0
                 // JSON Alert for Long_6 Exit
                 timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
                 pyr5_lots_exit = math.round(initial_position_size * math.pow(pyramid_size_ratio, 5))
-                json_exit_l6 = '{"type":"EXIT", "instrument":"SILVER_MINI", "position":"Long_6", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long6) + ', "entry_price":' + str.tostring(pyr5_entry_price) + ', "lots":' + str.tostring(pyr5_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
+                json_exit_l6 = '{"type":"EXIT", "instrument":"GOLD_MINI", "position":"Long_6", "price":' + str.tostring(close) + ', "stop":' + str.tostring(basso_stop_long6) + ', "entry_price":' + str.tostring(pyr5_entry_price) + ', "lots":' + str.tostring(pyr5_lots_exit) + ', "reason":"TOM_BASSO_STOP", "atr":' + str.tostring(atr_basso) + ', "er":' + str.tostring(er) + ', "supertrend":' + str.tostring(supertrend) + ', "roc":' + str.tostring(roc) + ', "timestamp":"' + timestamp_str + '"}'
                 alert(json_exit_l6, alert.freq_once_per_bar_close)
                 pyr5_entry_price := na
                 basso_stop_long6 := na
@@ -830,7 +849,6 @@ plotshape(long_entry and strategy.position_size == 0,
      style=shape.arrowup,
      size=size.tiny,
      text="",
-     textcolor=color.white,
      force_overlay=true)
 
 plotshape(long_exit and strategy.position_size > 0,
@@ -840,7 +858,6 @@ plotshape(long_exit and strategy.position_size > 0,
      style=shape.arrowdown,
      size=size.tiny,
      text="",
-     textcolor=color.white,
      force_overlay=true)
 
 // ========================================
@@ -893,7 +910,7 @@ if show_info_panel
 
         table.cell(infoTable, 0, row, "ADX(30)")
         table.cell(infoTable, 1, row, str.tostring(adx, "#.##"))
-        table.cell(infoTable, 2, row, adx_condition ? "✓ <25" : "✗ " + str.tostring(adx, "#.##"), text_color=adx_condition ? color.green : color.red)
+        table.cell(infoTable, 2, row, adx_condition ? "✓ <15" : "✗ " + str.tostring(adx, "#.##"), text_color=adx_condition ? color.green : color.red)
         row := row + 1
 
         table.cell(infoTable, 0, row, "ER(3)")
@@ -1116,7 +1133,7 @@ if show_info_panel
         // v5.2 Version indicator when flat
         table.cell(infoTable, 0, row, "Version", bgcolor=color.new(color.gray, 80))
         table.cell(infoTable, 1, row, "v8.0", bgcolor=color.new(color.gray, 80))
-        table.cell(infoTable, 2, row, "10-Dec-2025", bgcolor=color.new(color.gray, 80))
+        table.cell(infoTable, 2, row, "02-Dec-2025", bgcolor=color.new(color.gray, 80))
         row := row + 1
 
 // ========================================
@@ -1128,7 +1145,7 @@ if show_info_panel
 plot(show_debug ? (rsi_condition ? 1 : 0) : na, "RSI>70", color=color.new(color.red, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (ema_condition ? 1 : 0) : na, "C>EMA", color=color.new(color.blue, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (dc_condition ? 1 : 0) : na, "C>DC", color=color.new(color.green, 0), style=plot.style_stepline, linewidth=1)
-plot(show_debug ? (adx_condition ? 1 : 0) : na, "ADX<25", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
+plot(show_debug ? (adx_condition ? 1 : 0) : na, "ADX<15", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (er_condition ? 1 : 0) : na, "ER>0.8", color=color.new(color.purple, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (st_condition ? 1 : 0) : na, "C>ST", color=color.new(color.teal, 0), style=plot.style_stepline, linewidth=1)
 plot(show_debug ? (not_doji ? 1 : 0) : na, "Not Doji", color=color.new(color.maroon, 0), style=plot.style_stepline, linewidth=1)
@@ -1142,7 +1159,7 @@ plot(show_debug ? (long_entry ? 7 : 0) : na, "ALL CONDITIONS", color=color.new(c
 // Python Portfolio Manager handles:
 //   - Precise timing (executes at T-30s)
 //   - Position sizing using REAL portfolio equity (shared across instruments)
-//   - Margin validation across Bank Nifty + Gold Mini + Silver Mini positions
+//   - Margin validation across Bank Nifty + Gold Mini positions
 //
 // MCX close time varies: 23:30 IST (US DST) or 23:55 IST (US Standard)
 // Python EODScheduler dynamically determines actual close time
@@ -1170,7 +1187,7 @@ if enable_eod_monitoring and is_eod_alert_window
     timestamp_str = str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
 
     // Complete EOD_MONITOR JSON
-    eod_json = '{"type":"EOD_MONITOR","instrument":"SILVER_MINI","timestamp":"' + timestamp_str + '","price":' + str.tostring(close) + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'
+    eod_json = '{"type":"EOD_MONITOR","instrument":"GOLD_MINI","timestamp":"' + timestamp_str + '","price":' + str.tostring(close) + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'
 
     // Fire on EVERY TICK during EOD window so Python gets latest values
     // Python ignores signals once execution has started

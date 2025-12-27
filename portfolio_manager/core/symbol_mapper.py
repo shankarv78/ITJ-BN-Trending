@@ -3,6 +3,8 @@ Symbol Mapper - Translate generic instrument names to OpenAlgo format
 
 Supports:
 - GOLD_MINI → GOLDM[DDMMMYY]FUT (simple futures)
+- COPPER → COPPER[DDMMMYY]FUT (simple futures)
+- SILVER_MINI → SILVERM[DDMMMYY]FUT (simple futures, bimonthly)
 - BANK_NIFTY → BANKNIFTY[DDMMMYY][Strike]PE/CE (synthetic futures - 2 legs)
 
 Features:
@@ -17,13 +19,10 @@ from datetime import date, datetime
 from typing import List, Optional, Tuple
 from enum import Enum
 
+# Import InstrumentType from models to avoid duplication
+from core.models import InstrumentType
+
 logger = logging.getLogger(__name__)
-
-
-class InstrumentType(Enum):
-    """Instrument types"""
-    GOLD_MINI = "GOLD_MINI"
-    BANK_NIFTY = "BANK_NIFTY"
 
 
 class ExchangeCode(Enum):
@@ -108,7 +107,9 @@ class SymbolMapper:
     # Lot sizes for quantity calculation
     LOT_SIZES = {
         'GOLD_MINI': 100,
-        'BANK_NIFTY': 35,  # Current lot size (as of Nov 2024)
+        'BANK_NIFTY': 30,  # Current lot size (Dec 2025 onwards)
+        'COPPER': 2500,    # 2500 kg per lot
+        'SILVER_MINI': 5,  # 5 kg per lot (MCX Silver Mini)
     }
 
     def __init__(self, expiry_calendar=None, holiday_calendar=None, price_provider=None):
@@ -150,6 +151,10 @@ class SymbolMapper:
         """
         if instrument == "GOLD_MINI":
             return self._translate_gold_mini(action, reference_date)
+        elif instrument == "COPPER":
+            return self._translate_copper(action, reference_date)
+        elif instrument == "SILVER_MINI":
+            return self._translate_silver_mini(action, reference_date)
         elif instrument == "BANK_NIFTY":
             return self._translate_bank_nifty(action, current_price, reference_date)
         else:
@@ -187,6 +192,87 @@ class SymbolMapper:
 
         return TranslatedSymbol(
             instrument="GOLD_MINI",
+            exchange=ExchangeCode.MCX.value,
+            symbols=[symbol],
+            expiry_date=expiry,
+            is_synthetic=False,
+            order_legs=[order_leg]
+        )
+
+    def _translate_copper(
+        self,
+        action: str,
+        reference_date: Optional[date] = None
+    ) -> TranslatedSymbol:
+        """
+        Translate COPPER to OpenAlgo futures format.
+
+        Format: COPPER[DDMMMYY]FUT
+        Example: COPPER31DEC25FUT
+        """
+        # Get expiry date (with rollover check)
+        expiry = self.expiry_calendar.get_expiry_after_rollover("COPPER", reference_date)
+
+        # Format: COPPER[DDMMMYY]FUT
+        date_str = expiry.strftime('%d%b%y').upper()
+        symbol = f"COPPER{date_str}FUT"
+
+        # Build order leg
+        order_leg = OrderLeg(
+            symbol=symbol,
+            exchange=ExchangeCode.MCX.value,
+            action=action,
+            leg_type="FUT"
+        )
+
+        logger.info(
+            f"[SYMBOL] Copper translated: expiry={expiry}, symbol={symbol}, action={action}"
+        )
+
+        return TranslatedSymbol(
+            instrument="COPPER",
+            exchange=ExchangeCode.MCX.value,
+            symbols=[symbol],
+            expiry_date=expiry,
+            is_synthetic=False,
+            order_legs=[order_leg]
+        )
+
+    def _translate_silver_mini(
+        self,
+        action: str,
+        reference_date: Optional[date] = None
+    ) -> TranslatedSymbol:
+        """
+        Translate SILVER_MINI to OpenAlgo futures format.
+
+        Format: SILVERM[DDMMMYY]FUT
+        Example: SILVERM27FEB26FUT
+
+        Note: Silver Mini has bimonthly expiry (Feb, Apr, Jun, Aug, Nov)
+        and expires on the last day of the contract month.
+        """
+        # Get expiry date (with rollover check)
+        expiry = self.expiry_calendar.get_expiry_after_rollover("SILVER_MINI", reference_date)
+
+        # Format: SILVERM[DDMMMYY]FUT (day-month-year format)
+        date_str = expiry.strftime('%d%b%y').upper()
+        symbol = f"SILVERM{date_str}FUT"
+
+        # Build order leg
+        order_leg = OrderLeg(
+            symbol=symbol,
+            exchange=ExchangeCode.MCX.value,
+            action=action,
+            leg_type="FUT"
+        )
+
+        logger.info(
+            f"[SYMBOL] Silver Mini translated: expiry={expiry}, symbol={symbol}, action={action}"
+        )
+
+        return TranslatedSymbol(
+            instrument="SILVER_MINI",
             exchange=ExchangeCode.MCX.value,
             symbols=[symbol],
             expiry_date=expiry,

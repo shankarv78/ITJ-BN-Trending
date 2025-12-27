@@ -64,7 +64,7 @@ def mock_symbol_mapper():
         return create_mock_translated_symbol(instrument, action)
 
     mock_mapper.translate.side_effect = mock_translate
-    mock_mapper.get_lot_size.return_value = 35  # Bank Nifty lot size
+    mock_mapper.get_lot_size.return_value = 30  # Bank Nifty lot size (Dec 2025 onwards)
     mock_mapper.get_bank_nifty_synthetic_symbols.return_value = ("BANKNIFTY30DEC25PE", "BANKNIFTY30DEC25CE")
     mock_mapper.get_gold_mini_symbol.return_value = "GOLDM05JAN26FUT"
 

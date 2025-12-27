@@ -162,6 +162,77 @@ class TestBankNiftyExpiry:
 
 
 # =============================================================================
+# SILVER MINI EXPIRY TESTS
+# =============================================================================
+
+class TestSilverMiniExpiry:
+    """Test Silver Mini expiry calculation (bimonthly, last day of month)"""
+
+    def test_contract_months(self, calendar):
+        """Silver Mini contracts are Feb, Apr, Jun, Aug, Nov"""
+        assert calendar.SILVER_MINI_CONTRACT_MONTHS == [2, 4, 6, 8, 11]
+
+    def test_january_gets_february(self, calendar):
+        """Reference in January → February contract"""
+        ref = date(2026, 1, 15)
+        expiry = calendar.get_silver_mini_expiry(ref)
+
+        # February 2026: last day is Feb 28 (not leap year in 2026)
+        # Feb 28, 2026 is Saturday → adjusted to Friday Feb 27
+        assert expiry.year == 2026
+        assert expiry.month == 2
+
+    def test_march_gets_april(self, calendar):
+        """Reference in March → April contract (Mar is not a contract month)"""
+        ref = date(2026, 3, 15)
+        expiry = calendar.get_silver_mini_expiry(ref)
+
+        assert expiry.month == 4  # April contract
+        assert expiry.year == 2026
+
+    def test_december_gets_next_year_february(self, calendar):
+        """Reference in December → February next year"""
+        ref = date(2025, 12, 15)
+        expiry = calendar.get_silver_mini_expiry(ref)
+
+        # December has no contract (Nov is last), next is Feb 2026
+        assert expiry.year == 2026
+        assert expiry.month == 2
+
+    def test_in_contract_month_before_expiry(self, calendar):
+        """Reference in contract month before expiry → same month"""
+        ref = date(2026, 2, 15)
+        expiry = calendar.get_silver_mini_expiry(ref)
+
+        # February contract, Feb 27/28 expiry
+        assert expiry.month == 2
+        assert expiry.year == 2026
+
+    def test_in_contract_month_after_expiry(self, calendar):
+        """Reference in contract month after expiry → next contract month"""
+        # If Feb 27 is expiry and we're on Feb 28
+        ref = date(2026, 3, 1)  # After Feb expiry
+        expiry = calendar.get_silver_mini_expiry(ref)
+
+        # Next contract is April
+        assert expiry.month == 4
+        assert expiry.year == 2026
+
+    def test_november_contract(self, calendar):
+        """November is a contract month (not October!)"""
+        ref = date(2025, 10, 15)  # October
+        expiry = calendar.get_silver_mini_expiry(ref)
+
+        # October is not a contract month, next is November
+        assert expiry.month == 11
+        assert expiry.year == 2025
+
+    def test_rollover_threshold(self, calendar):
+        """Silver Mini has 3 day rollover threshold"""
+        assert calendar.DEFAULT_ROLLOVER_DAYS.get('SILVER_MINI') == 3
+
+
+# =============================================================================
 # HOLIDAY ADJUSTMENT TESTS
 # =============================================================================
 

@@ -302,10 +302,36 @@ def check_broker(api_key: str) -> tuple[bool, str]:
 
             # Check if funds request was successful
             if data.get('status') == 'success':
-                return True, f"Live mode - broker connected"
+                # Verify we actually got funds data (not empty)
+                funds_data = data.get('data', {})
+                if funds_data and 'availablecash' in funds_data:
+                    available = float(funds_data.get('availablecash', 0))
+                    return True, f"Live mode - ₹{available:,.0f} available"
+                else:
+                    return False, "⚠️ Broker connected but no funds data returned"
 
-            return True, f"OK (mode: {mode})"
-        return False, f"HTTP {response.status_code}"
+            # Status is not 'success' - broker likely disconnected
+            status = data.get('status', 'unknown')
+            error_msg = data.get('message', data.get('error', 'Unknown error'))
+
+            # Common error patterns when broker token expires/disconnects
+            if 'token' in str(error_msg).lower() or 'session' in str(error_msg).lower():
+                return False, f"🔴 BROKER SESSION EXPIRED: {error_msg}"
+            elif 'auth' in str(error_msg).lower() or 'login' in str(error_msg).lower():
+                return False, f"🔴 BROKER AUTH FAILED: {error_msg}"
+            elif status == 'error':
+                return False, f"🔴 BROKER ERROR: {error_msg}"
+            else:
+                return False, f"⚠️ Broker status: {status} - {error_msg}"
+
+        elif response.status_code == 401:
+            return False, "🔴 API key invalid or expired"
+        elif response.status_code == 403:
+            return False, "🔴 API permission denied"
+        else:
+            return False, f"HTTP {response.status_code}"
+    except requests.exceptions.Timeout:
+        return False, "⏱️ Broker request timeout"
     except Exception as e:
         return False, str(e)
 

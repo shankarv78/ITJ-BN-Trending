@@ -47,7 +47,7 @@ class MockOpenAlgoClient:
     """Mock OpenAlgo client for testing"""
     def get_funds(self):
         return {'availablecash': 5000000.0}
-    
+
     def get_quote(self, symbol):
         # Return realistic prices
         if symbol == "BANK_NIFTY":
@@ -55,10 +55,10 @@ class MockOpenAlgoClient:
         elif symbol == "GOLD_MINI":
             return {'ltp': 70000, 'bid': 69990, 'ask': 70010}
         return {'ltp': 50000, 'bid': 49990, 'ask': 50010}
-    
+
     def place_order(self, symbol, action, quantity, order_type="MARKET", price=0.0):
         return {'status': 'success', 'orderid': f'MOCK_{symbol}_{action}'}
-    
+
     def get_order_status(self, order_id):
         return {'status': 'COMPLETE', 'price': 50000}
 
@@ -75,7 +75,7 @@ def setup_test_database():
         )
         conn.autocommit = True
         cursor = conn.cursor()
-        
+
         # Ensure tables exist
         migration_dir = os.path.join(os.path.dirname(__file__), '../../migrations')
         migration_files = [
@@ -83,7 +83,7 @@ def setup_test_database():
             '002_add_heartbeat_index.sql',
             '003_add_leadership_history.sql'
         ]
-        
+
         for migration_file in migration_files:
             migration_path = os.path.join(migration_dir, migration_file)
             if os.path.exists(migration_path):
@@ -93,7 +93,7 @@ def setup_test_database():
                         cursor.execute(sql)
                     except (psycopg2.errors.DuplicateTable, psycopg2.errors.DuplicateObject, psycopg2.errors.ProgrammingError):
                         pass
-        
+
         conn.close()
         return True
     except Exception as e:
@@ -113,7 +113,7 @@ def cleanup_test_data():
         )
         conn.autocommit = True
         cursor = conn.cursor()
-        
+
         # Cleanup test data - only delete PERF_TEST positions (safe)
         cursor.execute("DELETE FROM leadership_history")
         cursor.execute("DELETE FROM instance_metadata WHERE instance_id LIKE 'perf-test-%'")
@@ -125,7 +125,7 @@ def cleanup_test_data():
             cursor.execute("DELETE FROM signal_log WHERE signal_hash LIKE 'perf-test-%'")
         except Exception:
             pass
-        
+
         conn.close()
         return True
     except Exception as e:
@@ -194,18 +194,18 @@ def check_for_non_test_positions() -> bool:
 def create_test_positions(num_positions: int) -> List[str]:
     """
     Create test positions directly in database (bypassing signal processing)
-    
+
     Args:
         num_positions: Number of positions to create
-        
+
     Returns:
         List of position IDs created
     """
     print(f"\n📦 Creating {num_positions} test positions...")
-    
+
     db_manager = DatabaseStateManager(TEST_DB_CONFIG)
     config = PortfolioConfig()
-    
+
     # Create engine to calculate portfolio state
     engine = LiveTradingEngine(
         initial_capital=5000000.0,
@@ -213,26 +213,26 @@ def create_test_positions(num_positions: int) -> List[str]:
         config=config,
         db_manager=db_manager
     )
-    
+
     position_ids = []
     instruments = ["BANK_NIFTY", "GOLD_MINI"]
-    lot_sizes = {"BANK_NIFTY": 35, "GOLD_MINI": 100}
-    point_values = {"BANK_NIFTY": 35.0, "GOLD_MINI": 10.0}
-    
+    lot_sizes = {"BANK_NIFTY": 30, "GOLD_MINI": 100}
+    point_values = {"BANK_NIFTY": 30.0, "GOLD_MINI": 10.0}
+
     for i in range(num_positions):
         instrument = instruments[i % len(instruments)]
         position_layer = f"Long_{((i // len(instruments)) % 5) + 1}"  # Cycle through Long_1 to Long_5
-        
+
         # Create unique position ID
         position_id = f"PERF_TEST_{instrument}_{position_layer}_{i}"
-        
+
         # Create position directly
         base_price = 50000.0 if instrument == "BANK_NIFTY" else 70000.0
         entry_price = base_price + (i * 50)  # Vary prices slightly
         lots = 2 + (i % 3)  # Vary lots: 2, 3, or 4
         quantity = lots * lot_sizes[instrument]
         initial_stop = entry_price - 500.0
-        
+
         position = Position(
             position_id=position_id,
             instrument=instrument,
@@ -252,14 +252,14 @@ def create_test_positions(num_positions: int) -> List[str]:
             risk_contribution=0.5,  # 0.5% risk per position
             vol_contribution=0.2
         )
-        
+
         # Save position directly to database
         db_manager.save_position(position)
         position_ids.append(position_id)
-        
+
         # Add to portfolio for state calculation
         engine.portfolio.add_position(position)
-    
+
     # Recalculate portfolio state after all positions are added
     # This ensures risk and margin calculations are accurate
     state = engine.portfolio.get_current_state()
@@ -267,7 +267,7 @@ def create_test_positions(num_positions: int) -> List[str]:
     # Save complete portfolio state with calculated risk/margin values
     # This allows validation to pass by ensuring saved values match calculated values
     db_manager.save_portfolio_state(state, 5000000.0)
-    
+
     # Verify the saved state matches calculated state
     saved_state = db_manager.get_portfolio_state()
     if saved_state:
@@ -275,7 +275,7 @@ def create_test_positions(num_positions: int) -> List[str]:
         print(f"   - Calculated risk: ₹{state.total_risk_amount:,.2f}")
         print(f"   - Saved margin: ₹{saved_state.get('margin_used', 0):,.2f}")
         print(f"   - Calculated margin: ₹{state.margin_used:,.2f}")
-    
+
     print(f"✅ Created {len(position_ids)} positions")
     return position_ids
 
@@ -283,27 +283,27 @@ def create_test_positions(num_positions: int) -> List[str]:
 def measure_recovery_time(num_positions: int) -> Tuple[float, bool, str]:
     """
     Measure recovery time for given number of positions
-    
+
     Args:
         num_positions: Number of positions to recover
-        
+
     Returns:
         Tuple of (duration_seconds, success, error_code)
     """
     print(f"\n⏱️  Measuring recovery time for {num_positions} positions...")
-    
+
     db_manager = DatabaseStateManager(TEST_DB_CONFIG)
     config = PortfolioConfig()
-    
+
     engine = LiveTradingEngine(
         initial_capital=5000000.0,
         openalgo_client=MockOpenAlgoClient(),
         config=config,
         db_manager=db_manager
     )
-    
+
     recovery_manager = CrashRecoveryManager(db_manager)
-    
+
     # Measure recovery time
     start_time = time.time()
     success, error_code = recovery_manager.load_state(
@@ -311,32 +311,32 @@ def measure_recovery_time(num_positions: int) -> Tuple[float, bool, str]:
         trading_engine=engine
     )
     duration = time.time() - start_time
-    
+
     if success:
         print(f"✅ Recovery completed in {duration:.3f} seconds")
         print(f"   - Recovered {len(engine.portfolio.positions)} positions")
     else:
         print(f"❌ Recovery failed: {error_code}")
-    
+
     return duration, success, error_code
 
 
 def run_performance_test(position_counts: List[int]) -> Dict[int, Tuple[float, bool]]:
     """
     Run performance test for multiple position counts
-    
+
     Args:
         position_counts: List of position counts to test
-        
+
     Returns:
         Dictionary mapping position_count -> (duration, success)
     """
     results = {}
-    
+
     print("=" * 70)
     print("PERFORMANCE TEST: Recovery with Multiple Positions")
     print("=" * 70)
-    
+
     # Setup database
     if not setup_test_database():
         print("❌ Failed to setup database. Exiting.")
@@ -353,37 +353,37 @@ def run_performance_test(position_counts: List[int]) -> Dict[int, Tuple[float, b
         print(f"\n{'=' * 70}")
         print(f"TEST: {num_positions} Positions")
         print(f"{'=' * 70}")
-        
+
         # Create positions
         position_ids = create_test_positions(num_positions)
-        
+
         if len(position_ids) < num_positions:
             print(f"⚠️  Warning: Only created {len(position_ids)} positions (expected {num_positions})")
-        
+
         # Measure recovery time (run 3 times and average)
         durations = []
         successes = []
-        
+
         for run in range(3):
             print(f"\n  Run {run + 1}/3:")
             duration, success, error_code = measure_recovery_time(num_positions)
             durations.append(duration)
             successes.append(success)
-            
+
             # Small delay between runs
             time.sleep(0.5)
-        
+
         # Calculate average
         avg_duration = sum(durations) / len(durations)
         all_success = all(successes)
-        
+
         results[num_positions] = (avg_duration, all_success)
-        
+
         print(f"\n📊 Results for {num_positions} positions:")
         print(f"   - Average recovery time: {avg_duration:.3f} seconds")
         print(f"   - All runs successful: {all_success}")
         print(f"   - Individual runs: {[f'{d:.3f}s' for d in durations]}")
-        
+
         # Check performance target
         if num_positions == 10:
             target = 2.0
@@ -393,31 +393,31 @@ def run_performance_test(position_counts: List[int]) -> Dict[int, Tuple[float, b
             target = 5.0
         else:
             target = None
-        
+
         if target:
             if avg_duration <= target:
                 print(f"   ✅ PASS: {avg_duration:.3f}s <= {target}s target")
             else:
                 print(f"   ❌ FAIL: {avg_duration:.3f}s > {target}s target")
-        
+
         # Cleanup for next test
         cleanup_test_data()
         time.sleep(1)
-    
+
     return results
 
 
 def plot_results(results: Dict[int, Tuple[float, bool]]):
     """
     Plot recovery time vs position count
-    
+
     Args:
         results: Dictionary mapping position_count -> (duration, success)
     """
     if not results:
         print("❌ No results to plot")
         return
-    
+
     if not HAS_MATPLOTLIB:
         print("⚠️  matplotlib not available - skipping plot generation")
         print("\n📊 Results Summary (text format):")
@@ -426,43 +426,43 @@ def plot_results(results: Dict[int, Tuple[float, bool]]):
             duration, success = results[count]
             print(f"  {count} positions: {duration:.3f}s")
         return
-    
+
     position_counts = sorted(results.keys())
     durations = [results[count][0] for count in position_counts]
-    
+
     # Create plot
     plt.figure(figsize=(10, 6))
     plt.plot(position_counts, durations, 'b-o', linewidth=2, markersize=8, label='Recovery Time')
-    
+
     # Add performance targets
     targets = {
         10: 2.0,
         20: 3.0,
         50: 5.0
     }
-    
+
     for count, target in targets.items():
         if count in position_counts:
             plt.axhline(y=target, color='r', linestyle='--', alpha=0.5, label=f'Target ({count} pos): {target}s' if count == 10 else '')
             if count != 10:
                 plt.text(count, target + 0.1, f'Target: {target}s', ha='center', va='bottom', fontsize=9, color='r')
-    
+
     plt.xlabel('Number of Positions', fontsize=12)
     plt.ylabel('Recovery Time (seconds)', fontsize=12)
     plt.title('Recovery Performance: Time vs Position Count', fontsize=14, fontweight='bold')
     plt.grid(True, alpha=0.3)
     plt.legend()
-    
+
     # Add annotations
     for count, duration in zip(position_counts, durations):
-        plt.annotate(f'{duration:.2f}s', (count, duration), 
+        plt.annotate(f'{duration:.2f}s', (count, duration),
                     textcoords="offset points", xytext=(0,10), ha='center', fontsize=9)
-    
+
     # Save plot
     plot_path = os.path.join(os.path.dirname(__file__), 'recovery_performance_plot.png')
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     print(f"\n📊 Performance plot saved to: {plot_path}")
-    
+
     # Show plot
     try:
         plt.show()
@@ -476,22 +476,22 @@ def main():
     print("PERFORMANCE TEST: Recovery with 10+ Positions")
     print("Task 1.8 - Automated Performance Testing")
     print("=" * 70)
-    
+
     # Test position counts
     position_counts = [10, 20, 30, 50]
-    
+
     # Run tests
     results = run_performance_test(position_counts)
-    
+
     # Print summary
     print("\n" + "=" * 70)
     print("PERFORMANCE TEST SUMMARY")
     print("=" * 70)
-    
+
     for count in sorted(results.keys()):
         duration, success = results[count]
         status = "✅ PASS" if success else "❌ FAIL"
-        
+
         # Check target
         if count == 10:
             target = 2.0
@@ -505,22 +505,22 @@ def main():
         else:
             target = None
             target_status = "N/A"
-        
+
         print(f"\n{count} positions:")
         print(f"  - Recovery time: {duration:.3f} seconds")
         print(f"  - Success: {status}")
         if target:
             print(f"  - Target ({target}s): {target_status}")
-    
+
     # Generate plot
     print("\n" + "=" * 70)
     print("GENERATING PERFORMANCE PLOT")
     print("=" * 70)
     plot_results(results)
-    
+
     # Final cleanup
     cleanup_test_data()
-    
+
     print("\n" + "=" * 70)
     print("TEST COMPLETE")
     print("=" * 70)
@@ -528,4 +528,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

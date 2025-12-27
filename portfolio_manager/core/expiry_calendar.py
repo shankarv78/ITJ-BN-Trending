@@ -3,16 +3,46 @@ Expiry Calendar - Calculate contract expiry dates
 
 Supports:
 - Gold Mini (MCX): 5th of each month
-- Bank Nifty (NFO): Last Thursday of each month
+- Copper (MCX): Last day of each month
+- Bank Nifty (NFO): Hardcoded from NSE website (updated manually)
 
 Handles holidays and rollover detection.
 """
 import logging
 from datetime import date, timedelta
 import calendar
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# BANK NIFTY EXPIRY DATES - HARDCODED FROM NSE WEBSITE
+# Update this list when new months are available on NSE
+# Source: https://www.nseindia.com/
+# ============================================================
+BANKNIFTY_EXPIRY_DATES: List[date] = [
+    # 2025 Expiries (from NSE)
+    date(2025, 1, 29),
+    date(2025, 1, 30),
+    date(2025, 2, 26),
+    date(2025, 2, 27),
+    date(2025, 3, 26),
+    date(2025, 3, 27),
+    date(2025, 4, 24),
+    date(2025, 5, 29),
+    date(2025, 6, 26),
+    date(2025, 7, 31),
+    date(2025, 8, 28),
+    date(2025, 9, 25),
+    date(2025, 9, 30),
+    date(2025, 10, 28),
+    date(2025, 11, 25),
+    date(2025, 12, 30),
+    # 2026 Expiries (from NSE - add more as they become available)
+    date(2026, 1, 27),
+    date(2026, 2, 24),
+]
 
 
 class ExpiryCalendar:
@@ -21,13 +51,16 @@ class ExpiryCalendar:
 
     Expiry Rules:
     - Gold Mini (MCX): 5th of each month. If 5th is weekend/holiday, previous trading day.
+    - Copper (MCX): Last day of month. If last day is weekend/holiday, previous trading day.
     - Bank Nifty (NFO): Last Thursday of month. If Thursday is holiday, previous trading day.
     """
 
     # Default rollover days before expiry
     DEFAULT_ROLLOVER_DAYS = {
         'GOLD_MINI': 3,
-        'BANK_NIFTY': 5
+        'COPPER': 3,
+        'BANK_NIFTY': 5,
+        'SILVER_MINI': 8  # 8 days for tender period
     }
 
     def __init__(self, holiday_calendar=None):
@@ -71,27 +104,144 @@ class ExpiryCalendar:
 
         return expiry
 
-    def get_bank_nifty_expiry(self, reference_date: Optional[date] = None) -> date:
+    def get_copper_expiry(self, reference_date: Optional[date] = None) -> date:
         """
-        Get Bank Nifty MONTHLY expiry date.
+        Get Copper futures expiry date.
 
-        Bank Nifty monthly options expire on the LAST TUESDAY of the month.
-        (Changed from last Thursday in 2024)
-        If the last Tuesday is a holiday, shift to next trading day.
+        Copper expires on last day of each month.
+        If last day is weekend/holiday, use previous trading day.
 
         Args:
             reference_date: Reference date (default: today)
 
         Returns:
-            Monthly expiry date (last Wednesday of month - NSE changed from Tuesday in 2024)
+            Expiry date
         """
         if reference_date is None:
             reference_date = date.today()
 
         year, month = reference_date.year, reference_date.month
 
-        # Find last Wednesday of this month (NSE changed from Tuesday to Wednesday in 2024)
-        expiry = self._get_last_wednesday(year, month)
+        # Get last day of current month
+        last_day = calendar.monthrange(year, month)[1]
+        expiry = date(year, month, last_day)
+
+        # If we're past this month's expiry, use next month
+        if reference_date > expiry:
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+            last_day = calendar.monthrange(year, month)[1]
+            expiry = date(year, month, last_day)
+
+        # Adjust for weekends and holidays
+        expiry = self._adjust_for_holidays(expiry, "MCX")
+
+        return expiry
+
+    # Silver Mini bimonthly contract months (Feb, Apr, Jun, Aug, Nov)
+    SILVER_MINI_CONTRACT_MONTHS = [2, 4, 6, 8, 11]
+
+    def get_silver_mini_expiry(self, reference_date: Optional[date] = None) -> date:
+        """
+        Get Silver Mini futures expiry date.
+
+        Silver Mini has bimonthly contracts (Feb, Apr, Jun, Aug, Nov).
+        Expires on last day of the contract month.
+        If last day is weekend/holiday, use previous trading day.
+
+        Args:
+            reference_date: Reference date (default: today)
+
+        Returns:
+            Expiry date
+        """
+        if reference_date is None:
+            reference_date = date.today()
+
+        year, month = reference_date.year, reference_date.month
+
+        # Find the current or next contract month
+        contract_month = None
+        contract_year = year
+        for m in self.SILVER_MINI_CONTRACT_MONTHS:
+            if m >= month:
+                contract_month = m
+                break
+
+        # If no contract month found this year, use February next year
+        if contract_month is None:
+            contract_month = 2
+            contract_year = year + 1
+
+        # Get last day of contract month
+        last_day = calendar.monthrange(contract_year, contract_month)[1]
+        expiry = date(contract_year, contract_month, last_day)
+
+        # If we're past this expiry, move to next contract month
+        if reference_date > expiry:
+            # Find next contract month
+            try:
+                current_idx = self.SILVER_MINI_CONTRACT_MONTHS.index(contract_month)
+                if current_idx < len(self.SILVER_MINI_CONTRACT_MONTHS) - 1:
+                    contract_month = self.SILVER_MINI_CONTRACT_MONTHS[current_idx + 1]
+                else:
+                    # Roll to February next year
+                    contract_month = 2
+                    contract_year += 1
+            except ValueError:
+                contract_month = 2
+                contract_year += 1
+
+            last_day = calendar.monthrange(contract_year, contract_month)[1]
+            expiry = date(contract_year, contract_month, last_day)
+
+        # Adjust for weekends and holidays
+        expiry = self._adjust_for_holidays(expiry, "MCX")
+
+        return expiry
+
+    def get_bank_nifty_expiry(self, reference_date: Optional[date] = None) -> date:
+        """
+        Get Bank Nifty MONTHLY expiry date from hardcoded NSE data.
+
+        Uses BANKNIFTY_EXPIRY_DATES list which is manually updated from NSE website.
+        Falls back to calculation if date not in hardcoded list.
+
+        Args:
+            reference_date: Reference date (default: today)
+
+        Returns:
+            Next expiry date on or after reference_date
+        """
+        if reference_date is None:
+            reference_date = date.today()
+
+        # Find next expiry from hardcoded list
+        for expiry in BANKNIFTY_EXPIRY_DATES:
+            if expiry >= reference_date:
+                logger.debug(f"[EXPIRY] Bank Nifty expiry from hardcoded: {expiry}")
+                return expiry
+
+        # Fallback: if reference_date is beyond hardcoded dates, calculate
+        # This ensures system doesn't break if list isn't updated
+        logger.warning(
+            f"[EXPIRY] No hardcoded Bank Nifty expiry found for {reference_date}. "
+            f"Update BANKNIFTY_EXPIRY_DATES in core/expiry_calendar.py! "
+            f"Falling back to last Tuesday calculation."
+        )
+        return self._calculate_bank_nifty_expiry_fallback(reference_date)
+
+    def _calculate_bank_nifty_expiry_fallback(self, reference_date: date) -> date:
+        """
+        Fallback calculation for Bank Nifty expiry (last Tuesday of month).
+        Only used when hardcoded dates are exhausted.
+        """
+        year, month = reference_date.year, reference_date.month
+
+        # Find last Tuesday of this month
+        expiry = self._get_last_tuesday(year, month)
 
         # If we're past this month's expiry, get next month's
         if reference_date > expiry:
@@ -99,12 +249,17 @@ class ExpiryCalendar:
             if month > 12:
                 month = 1
                 year += 1
-            expiry = self._get_last_wednesday(year, month)
-
-        # Adjust for holidays - for Bank Nifty, shift FORWARD if holiday
-        expiry = self._adjust_for_holidays_forward(expiry, "NSE")
+            expiry = self._get_last_tuesday(year, month)
 
         return expiry
+
+    def _get_last_tuesday(self, year: int, month: int) -> date:
+        """Get the last Tuesday of a given month."""
+        last_day = calendar.monthrange(year, month)[1]
+        last_date = date(year, month, last_day)
+        while last_date.weekday() != 1:  # Tuesday = 1
+            last_date -= timedelta(days=1)
+        return last_date
 
     def _get_last_wednesday(self, year: int, month: int) -> date:
         """Get the last Wednesday of a given month (NSE changed from Tuesday in 2024)."""
@@ -195,6 +350,10 @@ class ExpiryCalendar:
         """
         if instrument == "GOLD_MINI":
             return self.get_gold_mini_expiry(reference_date)
+        elif instrument == "COPPER":
+            return self.get_copper_expiry(reference_date)
+        elif instrument == "SILVER_MINI":
+            return self.get_silver_mini_expiry(reference_date)
         elif instrument == "BANK_NIFTY":
             return self.get_bank_nifty_expiry(reference_date)
         else:
@@ -202,7 +361,7 @@ class ExpiryCalendar:
 
     def _get_exchange_for_instrument(self, instrument: str) -> str:
         """Get exchange code for an instrument."""
-        if instrument == "GOLD_MINI":
+        if instrument in ("GOLD_MINI", "COPPER", "SILVER_MINI"):
             return "MCX"
         elif instrument == "BANK_NIFTY":
             return "NSE"

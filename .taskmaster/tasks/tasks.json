@@ -731,19 +731,778 @@
         ],
         "priority": "medium",
         "subtasks": []
+      },
+      {
+        "id": 35,
+        "title": "Fix Synthetic Futures Price Calculation and Align 1R Gate with Pine Script",
+        "description": "Correct the Bank Nifty synthetic futures entry/exit price calculation from incorrect (PE+CE)/2 to correct formula (Strike + CE - PE), and fix the 1R pyramid gate in signal_validator.py to use actual 1R (entry-stop) instead of ATR×1.5 to align with Pine Script logic.",
+        "details": "**PROBLEM SUMMARY:**\n1. **Synthetic Futures Price (Bank Nifty):** Currently calculated as (PE_premium + CE_premium) / 2 which is meaningless. Correct formula: Strike + CE_Premium - PE_Premium\n2. **1R Gate Mismatch:** signal_validator.py uses ATR×1.5 while Pine Script uses actual 1R = entry_price - stop_price\n\n**IMPACT:**\n- Position entry_price stored incorrectly for Bank Nifty\n- 1R pyramid gate may incorrectly accept/reject signals\n- Slippage calculations meaningless for synthetic futures\n- P&L display misleading\n\n**FORMULA REFERENCE:**\n- Synthetic Long Entry = Strike + CE_Buy_Price - PE_Sell_Price\n- Synthetic Long Exit = Strike + CE_Sell_Price - PE_Buy_Price\n- 1R = base_entry_price - initial_stop_price (from Pine Script)\n\n**FILES AFFECTED:**\n- core/order_executor.py (SyntheticExecutionResult, execute_entry, execute_exit, to_execution_result)\n- live/engine.py (_execute_entry_openalgo, position creation for base/pyramid/exit)\n- live/rollover_executor.py (rollover entry price calculation)\n- core/signal_validator.py (_validate_1r_movement)",
+        "testStrategy": "1. Unit test synthetic price calculation with various strike/premium combinations\n2. Unit test 1R validation with entry=50000, stop=49500, price_move=400 (should fail: 400 < 500)\n3. Integration test Bank Nifty base entry stores correct synthetic price\n4. Integration test pyramid 1R gate matches Pine Script behavior\n5. Test rollover preserves correct synthetic pricing",
+        "status": "done",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add strike field to SyntheticExecutionResult",
+            "description": "Add strike: Optional[int] field to SyntheticExecutionResult dataclass in order_executor.py to store the ATM strike used during synthetic futures execution.",
+            "details": "Location: core/order_executor.py lines 1014-1027. Add field after ce_symbol. This is required to calculate the correct synthetic futures price.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "testStrategy": "Verify dataclass accepts strike parameter and stores it correctly.",
+            "updatedAt": "2025-12-23T09:11:11.316386Z"
+          },
+          {
+            "id": 2,
+            "title": "Fix to_execution_result() to use correct synthetic price formula",
+            "description": "Change to_execution_result() from (PE+CE)/2 to Strike + CE - PE formula.",
+            "details": "Location: core/order_executor.py lines 1029-1052. Replace avg_price = (pe_price + ce_price) / 2 with synthetic_price = self.strike + ce_price - pe_price. Handle fallback if strike is None.",
+            "status": "done",
+            "dependencies": [
+              1
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Unit test with strike=50000, CE=350, PE=320 → should return 50030 not 335.",
+            "updatedAt": "2025-12-23T09:11:11.316392Z"
+          },
+          {
+            "id": 3,
+            "title": "Store strike in execute_entry() from translated.atm_strike",
+            "description": "Pass the ATM strike from symbol mapper to SyntheticExecutionResult in execute_entry().",
+            "details": "Location: core/order_executor.py execute_entry() around line 1150. After calling _execute_two_legs(), set result.strike = translated.atm_strike.",
+            "status": "done",
+            "dependencies": [
+              1
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Verify execute_entry() returns result with strike field populated.",
+            "updatedAt": "2025-12-23T09:11:11.316393Z"
+          },
+          {
+            "id": 4,
+            "title": "Update _execute_entry_openalgo() to return strike and correct fill_price",
+            "description": "Add strike to order_details returned from Bank Nifty execution, and ensure fill_price uses synthetic formula.",
+            "details": "Location: live/engine.py lines 818-830. Add 'strike': result.strike to order_details. Calculate and add correct 'fill_price' using strike + CE - PE.",
+            "status": "done",
+            "dependencies": [
+              3
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Verify order_details contains strike and correct synthetic fill_price.",
+            "updatedAt": "2025-12-23T09:11:11.316394Z"
+          },
+          {
+            "id": 5,
+            "title": "Update Base Entry position creation to set strike and correct entry_price",
+            "description": "When creating Position for Bank Nifty base entry, set strike from order_details and use synthetic entry_price.",
+            "details": "Location: live/engine.py lines 716-735. For Bank Nifty, set position.strike = order_details.get('strike'). Verify entry_price uses the corrected fill_price from order_details.",
+            "status": "done",
+            "dependencies": [
+              4
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Integration test that Bank Nifty position has correct strike and synthetic entry_price.",
+            "updatedAt": "2025-12-23T09:11:11.316395Z"
+          },
+          {
+            "id": 6,
+            "title": "Update Pyramid position creation to set strike and correct entry_price",
+            "description": "Apply same fix as base entry to pyramid position creation for Bank Nifty.",
+            "details": "Location: live/engine.py pyramid position creation (around lines 1260-1290). Same changes as base entry - set strike, use synthetic entry_price.",
+            "status": "done",
+            "dependencies": [
+              5
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Integration test that Bank Nifty pyramid position has correct strike and synthetic entry_price.",
+            "updatedAt": "2025-12-23T09:11:11.316396Z"
+          },
+          {
+            "id": 7,
+            "title": "Update execute_exit() to return synthetic exit price",
+            "description": "Calculate and return synthetic exit price for Bank Nifty exits.",
+            "details": "Location: core/order_executor.py execute_exit() and live/engine.py _execute_exit_openalgo(). Calculate exit_price = strike + CE_exit - PE_exit. Return in order_details.",
+            "status": "done",
+            "dependencies": [
+              1
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Verify exit returns correct synthetic price for P&L calculation.",
+            "updatedAt": "2025-12-23T09:11:11.316397Z"
+          },
+          {
+            "id": 8,
+            "title": "Fix rollover_executor.py to use synthetic price formula",
+            "description": "Update rollover to calculate new entry_price as strike + CE - PE instead of just strike.",
+            "details": "Location: live/rollover_executor.py line 436. Change position.entry_price = float(new_strike) to position.entry_price = new_strike + ce_open.fill_price - pe_open.fill_price.",
+            "status": "done",
+            "dependencies": [
+              1
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "Test rollover correctly updates entry_price with synthetic formula.",
+            "updatedAt": "2025-12-23T09:11:11.316397Z"
+          },
+          {
+            "id": 9,
+            "title": "Fix signal_validator.py 1R gate to use actual 1R instead of ATR×1.5",
+            "description": "Change _validate_1r_movement() to use initial_risk = entry - stop (matching Pine Script) instead of ATR×1.5.",
+            "details": "Location: core/signal_validator.py lines 238-243. Replace atr_threshold = signal.atr * 1.5 with initial_risk = base_position.entry_price - base_position.initial_stop. Check price_move <= initial_risk.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 35,
+            "testStrategy": "Test with entry=50000, stop=49500, signal_price=50400. Should reject (400 < 500). With signal_price=50600, should pass (600 > 500).",
+            "updatedAt": "2025-12-23T09:11:11.316398Z"
+          },
+          {
+            "id": 10,
+            "title": "Write comprehensive unit tests for synthetic price calculation",
+            "description": "Create unit tests covering various synthetic price scenarios.",
+            "details": "Test cases: Normal (strike=50000, CE=350, PE=320 → 50030), Large premium diff, Zero premium, Missing strike fallback.",
+            "status": "done",
+            "dependencies": [
+              2
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "All test cases pass with expected synthetic prices.",
+            "updatedAt": "2025-12-23T09:11:11.316399Z"
+          },
+          {
+            "id": 11,
+            "title": "Write comprehensive unit tests for 1R gate alignment",
+            "description": "Create unit tests verifying 1R gate matches Pine Script logic.",
+            "details": "Test cases: Price move < 1R (reject), Price move = 1R (reject), Price move > 1R (pass), Edge cases with various stop distances.",
+            "status": "done",
+            "dependencies": [
+              9
+            ],
+            "parentTaskId": 35,
+            "testStrategy": "All test cases behave identically to Pine Script logic.",
+            "updatedAt": "2025-12-23T09:11:11.316399Z"
+          }
+        ]
+      },
+      {
+        "id": 36,
+        "title": "Update Core Models and Configuration for Silver Mini",
+        "description": "Extend core data models and configuration files to support SILVER_MINI instrument type, including enum values, validation logic, and instrument-specific parameters.",
+        "details": "1. In `portfolio_manager/core/models.py`: Add `SILVER_MINI = 'SILVER_MINI'` to `InstrumentType` enum. Update `Signal.from_dict` and `EODMonitorSignal` validation to accept 'SILVER_MINI'.\n2. In `portfolio_manager/core/config.py`: Add `InstrumentConfig` for SILVER_MINI (lot_size=5, point_value=5.0, margin_per_lot=200000.0, initial_atr_mult=2.0, trailing_atr_mult=3.0, max_pyramids=5). Add `silver_mini_rollover_days = 8` to `PortfolioConfig`. Add 'SILVER_MINI' to `market_close_times` ('23:30') and `eod_instruments_enabled`.\n3. In `portfolio_manager/core/lot_size_history.py`: Add case to return 5 for 'SILVER_MINI'.",
+        "testStrategy": "Verify `InstrumentType.SILVER_MINI` exists. Test `Signal.from_dict` with a mock SILVER_MINI signal. Validate configuration values via `get_instrument_config('SILVER_MINI')`.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add SILVER_MINI to InstrumentType Enum",
+            "description": "Update the core models definition to include the new instrument type in the primary enumeration.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/core/models.py`, locate the `InstrumentType` class (or Enum). Add the member `SILVER_MINI = 'SILVER_MINI'` to the class definition to establish it as a recognized instrument identifier within the system.",
+            "status": "pending",
+            "testStrategy": "Verify that `InstrumentType.SILVER_MINI` can be imported and accessed without errors."
+          },
+          {
+            "id": 2,
+            "title": "Update Signal Validation Logic in Models",
+            "description": "Modify signal validation methods to accept the new SILVER_MINI instrument type.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/models.py`, update `Signal.from_dict` method to include 'SILVER_MINI' in the allowed instrument checks. similarly, update validation logic within the `EODMonitorSignal` class to ensure it processes the new instrument type correctly.",
+            "status": "pending",
+            "testStrategy": "Create a mock signal dictionary with instrument='SILVER_MINI' and verify `Signal.from_dict` creates a valid object instead of raising a validation error."
+          },
+          {
+            "id": 3,
+            "title": "Define Instrument and Portfolio Configuration",
+            "description": "Add specific configuration parameters for Silver Mini including risk settings and rollover rules.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/config.py`, add an entry to the instrument configuration mapping for `SILVER_MINI` with: lot_size=5, point_value=5.0, margin_per_lot=200000.0, initial_atr_mult=2.0, trailing_atr_mult=3.0, and max_pyramids=5. Also add `silver_mini_rollover_days = 8` to the `PortfolioConfig` class.",
+            "status": "pending",
+            "testStrategy": "Instantiate the configuration object or retrieve the config map and assert that the values for SILVER_MINI match the specified parameters."
+          },
+          {
+            "id": 4,
+            "title": "Update Market Operational Settings",
+            "description": "Configure market close times and enable the instrument for end-of-day monitoring.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/config.py`, add `InstrumentType.SILVER_MINI` (or string 'SILVER_MINI') to the `market_close_times` dictionary with a value of '23:30'. Additionally, add it to the `eod_instruments_enabled` list/set to activate it for EOD processing.",
+            "status": "pending",
+            "testStrategy": "Check `market_close_times['SILVER_MINI']` equals '23:30' and verify the instrument is present in the `eod_instruments_enabled` collection."
+          },
+          {
+            "id": 5,
+            "title": "Update Lot Size History Logic",
+            "description": "Ensure historical lot size calculations return the correct value for Silver Mini.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/lot_size_history.py`, modify the function responsible for determining lot sizes (e.g., `get_lot_size`) to add a case/condition returning 5 when the instrument is `SILVER_MINI`.",
+            "status": "pending",
+            "testStrategy": "Call the lot size function with `InstrumentType.SILVER_MINI` and assert that the returned integer is 5."
+          }
+        ]
+      },
+      {
+        "id": 37,
+        "title": "Update Symbol Mapping and Constants",
+        "description": "Register SILVER_MINI in symbol mapping utilities and define constant lot sizes to ensure consistent handling across the system.",
+        "details": "1. In `portfolio_manager/core/symbol_mapper.py`: Add `SILVER_MINI` to the local `InstrumentType` enum duplicate. Add `'SILVER_MINI': 5` to `LOT_SIZES` dictionary.\n2. Ensure consistency between `models.py` and `symbol_mapper.py` enums.\n3. Update `portfolio_manager/portfolio_manager.py` lot size dictionaries at lines 2605 and 2724 to include Silver Mini.",
+        "testStrategy": "Import `symbol_mapper` and check `LOT_SIZES['SILVER_MINI']` is 5. Verify no import errors due to enum changes.",
+        "priority": "high",
+        "dependencies": [
+          36
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Update InstrumentType Enum in Symbol Mapper",
+            "description": "Add SILVER_MINI to the local InstrumentType enum definition in symbol_mapper.py to ensure it matches the core model definitions.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/core/symbol_mapper.py`, locate the `InstrumentType` class definition (approximately lines 24-28). Add the attribute `SILVER_MINI = 'SILVER_MINI'` to the enum class to support the new instrument type locally.",
+            "status": "pending",
+            "testStrategy": "Verify that `from portfolio_manager.core.symbol_mapper import InstrumentType` succeeds and `InstrumentType.SILVER_MINI` is accessible."
+          },
+          {
+            "id": 2,
+            "title": "Register SILVER_MINI Lot Size in Symbol Mapper",
+            "description": "Define the standard lot size for SILVER_MINI in the LOT_SIZES dictionary within symbol_mapper.py.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/symbol_mapper.py`, locate the `LOT_SIZES` constant dictionary (approximately lines 111-115). Add a new entry `'SILVER_MINI': 5` to define the lot size as 5 units for this instrument.",
+            "status": "pending",
+            "testStrategy": "Import `LOT_SIZES` from `symbol_mapper` and assert that `LOT_SIZES.get('SILVER_MINI')` returns 5."
+          },
+          {
+            "id": 3,
+            "title": "Add Silver Mini to Portfolio Manager Position Sizing (First Instance)",
+            "description": "Update the local lot_sizes dictionary in the portfolio manager's calculation logic to support Silver Mini.",
+            "dependencies": [
+              2
+            ],
+            "details": "Open `portfolio_manager/portfolio_manager.py` and locate the hardcoded `lot_sizes` dictionary around line 2605. Add the key-value pair `'SILVER_MINI': 5` to ensure position calculations utilize the correct multiplier.",
+            "status": "pending",
+            "testStrategy": "Code review to ensure the dictionary at line 2605 includes the new key. Unit test logic that relies on this specific dictionary."
+          },
+          {
+            "id": 4,
+            "title": "Add Silver Mini to Portfolio Manager Position Sizing (Second Instance)",
+            "description": "Update the second occurrence of the lot_sizes dictionary in the portfolio manager to ensure consistency across methods.",
+            "dependencies": [
+              3
+            ],
+            "details": "Open `portfolio_manager/portfolio_manager.py` and locate the second hardcoded `lot_sizes` dictionary around line 2724. Add the key-value pair `'SILVER_MINI': 5` to maintain consistency in position validation or syncing logic.",
+            "status": "pending",
+            "testStrategy": "Code review to ensure the dictionary at line 2724 includes the new key."
+          },
+          {
+            "id": 5,
+            "title": "Verify Symbol Mapping and Constant Consistency",
+            "description": "Run a validation script to ensure that the symbol mapper and portfolio manager correctly recognize the new Silver Mini constants.",
+            "dependencies": [
+              4
+            ],
+            "details": "Create a temporary check or use the interactive shell to import `portfolio_manager.core.symbol_mapper` and verify `InstrumentType.SILVER_MINI` exists and `LOT_SIZES['SILVER_MINI']` is 5. Ensure no `KeyError` is raised when accessing these properties.",
+            "status": "pending",
+            "testStrategy": "Run a python script: `from portfolio_manager.core.symbol_mapper import LOT_SIZES, InstrumentType; assert InstrumentType.SILVER_MINI; assert LOT_SIZES['SILVER_MINI'] == 5`"
+          }
+        ]
+      },
+      {
+        "id": 38,
+        "title": "Implement Portfolio State and Risk Logic for Silver Mini",
+        "description": "Integrate Silver Mini into portfolio state calculations, pyramid gates, stop management, and signal validation logic.",
+        "details": "1. In `portfolio_manager/core/portfolio_state.py`: Add mapping for 'SILVER_MINI' to `InstrumentType`. Implement margin calculation (200k/lot) and P&L calculation (point_value=5.0).\n2. In `portfolio_manager/core/pyramid_gate.py`: Add `SILVER_MINI` case to validation chain.\n3. In `portfolio_manager/core/stop_manager.py`: Add `SILVER_MINI` case in `TomBassoStopManager`.\n4. In `portfolio_manager/core/signal_validator.py` and `strategy_manager.py`: Add point_value=5.0 handling for validation and P&L tracking.",
+        "testStrategy": "Unit test `PortfolioState` updates with a mock SILVER_MINI trade to verify margin usage and P&L computation. Test `PyramidGateController` accepts valid SILVER_MINI pyramids.",
+        "priority": "high",
+        "dependencies": [
+          36
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Update PortfolioState with Silver Mini Instrument and Risk Constants",
+            "description": "Modify portfolio_state.py to add SILVER_MINI to the supported instruments list, define its margin requirement (200k/lot), and set point value (5.0) for P&L calculations.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/core/portfolio_state.py`:\n1. Update `InstrumentType` or supported instruments list to include 'SILVER_MINI'.\n2. In `calculate_margin_used`, add case for 'SILVER_MINI' returning 200000.0.\n3. In `calculate_pnl` and `update_position`, ensure the point value multiplier is 5.0 for this instrument.",
+            "status": "pending",
+            "testStrategy": "Unit test `PortfolioState.calculate_margin_used('SILVER_MINI')` returns 200000. Verify P&L calculation with a mock price movement."
+          },
+          {
+            "id": 2,
+            "title": "Enable Silver Mini in Pyramid Gate Controller",
+            "description": "Register Silver Mini in the pyramid gate logic to allow multiple positions based on defined pyramiding rules.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/pyramid_gate.py`, locate the validation chain or instrument dispatch logic (around lines 51-56 as per context). Add 'SILVER_MINI' to the allowed instruments list or switch case to ensure it passes the `can_open_position` or equivalent check.",
+            "status": "pending",
+            "testStrategy": "Unit test `PyramidGateController` to ensure it returns True for a valid `SILVER_MINI` signal when under the max position limit."
+          },
+          {
+            "id": 3,
+            "title": "Configure Stop Management for Silver Mini",
+            "description": "Update the Tom Basso Stop Manager to handle Silver Mini volatility and stop placement logic.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/stop_manager.py`, specifically within the `TomBassoStopManager` class:\n1. Add 'SILVER_MINI' to the instrument handling logic (around lines 65-73).\n2. Ensure volatility-based stop calculations apply correctly to this instrument's tick size and point value.",
+            "status": "pending",
+            "testStrategy": "Instantiate `TomBassoStopManager` and verify that `calculate_stop` for `SILVER_MINI` produces a stop price at the expected distance based on input volatility."
+          },
+          {
+            "id": 4,
+            "title": "Update Signal Validator for Silver Mini Point Value",
+            "description": "Ensure incoming signals for Silver Mini are validated with the correct point value to prevent risk miscalculations.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/signal_validator.py`:\n1. Locate the validation logic (around lines 294-299).\n2. Add handling for 'SILVER_MINI' to assign or verify `point_value=5.0`.\n3. Ensure risk reward calculations use this specific multiplier.",
+            "status": "pending",
+            "testStrategy": "Pass a raw `SILVER_MINI` signal to `SignalValidator` and assert that the validated signal object contains the correct point value and risk metrics."
+          },
+          {
+            "id": 5,
+            "title": "Integrate Silver Mini into Strategy Manager Execution",
+            "description": "Finalize integration in Strategy Manager to ensure correct P&L tracking and execution parameters for Silver Mini trades.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "details": "In `strategy_manager.py`:\n1. Update execution logic (around lines 415-417) to explicitly handle `SILVER_MINI`.\n2. Ensure `point_value=5` is used when converting points to currency for logging and performance tracking.\n3. Verify integration with the now-updated `PortfolioState`.",
+            "status": "pending",
+            "testStrategy": "Run a full flow integration test: Mock a `SILVER_MINI` trade execution and verify the `StrategyManager` correctly updates the portfolio state with the right margin and P&L."
+          }
+        ]
+      },
+      {
+        "id": 39,
+        "title": "Implement Expiry Utilities for Non-Standard Silver Mini Cycle",
+        "description": "Develop expiry calculation logic for Silver Mini's specific bi-monthly cycle (Feb, Apr, Jun, Aug, Nov) and handling of end-of-year transitions.",
+        "details": "1. In `portfolio_manager/live/expiry_utils.py`: Implement `get_silver_mini_expiry(reference_date)` handling the specific months. Handle edge case: Dec -> Feb next year.\n2. Implement `format_silver_mini_futures_symbol(date)` to output format `SILVERM{DD}{MMM}{YY}FUT`.\n3. Update `get_next_month_expiry` to handle the specific month transitions (e.g., Nov->Feb).\n4. In `portfolio_manager/core/expiry_calendar.py`: Add `SILVER_MINI` to rollover days and exchange mapping.",
+        "testStrategy": "Unit tests for all 5 contract months. Verify Dec 2024 returns Feb 2025 expiry. Verify symbol formatting matches broker expectations (e.g., 'SILVERM28FEB26FUT').",
+        "priority": "high",
+        "dependencies": [
+          36
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Implement Silver Mini Expiry Calculation Logic",
+            "description": "Implement the `get_silver_mini_expiry` function to handle the specific bi-monthly cycle (Feb, Apr, Jun, Aug, Nov) and last-day-of-month logic.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/live/expiry_utils.py`, add `get_silver_mini_expiry(reference_date)`. Logic: Identify current month. If in cycle and before expiry, use current month's last day. If after expiry or not in cycle, move to next cycle month. Handle year transition (Dec -> Feb next year). Use `calendar.monthrange` to find the last day.",
+            "status": "pending",
+            "testStrategy": "Unit test with dates in each cycle month (before/after expiry) and non-cycle months (Jan, Mar, etc.) to ensure correct next expiry selection."
+          },
+          {
+            "id": 2,
+            "title": "Implement Silver Mini Symbol Formatting",
+            "description": "Create a specific formatter for Silver Mini futures symbols conforming to broker requirements.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/live/expiry_utils.py`, add `format_silver_mini_futures_symbol(date)`. Format: `SILVERM{DD}{MMM}{YY}FUT`. DD is 2-digit day, MMM is uppercase 3-char month (e.g., FEB), YY is 2-digit year. Ensure month abbreviations match exchange standards.",
+            "status": "pending",
+            "testStrategy": "Verify output strings like 'SILVERM28FEB25FUT' for given date objects."
+          },
+          {
+            "id": 3,
+            "title": "Integrate Silver Mini into Next Month Expiry Logic",
+            "description": "Update the generic `get_next_month_expiry` function to route Silver Mini requests to its specific handler.",
+            "dependencies": [
+              1
+            ],
+            "details": "Modify `get_next_month_expiry` in `portfolio_manager/live/expiry_utils.py`. Add a check for `symbol == 'SILVERM'` (or equivalent constant). If true, call `get_silver_mini_expiry`. Ensure it handles the 'next' logic correctly (e.g., if currently in Feb, next is Apr).",
+            "status": "pending",
+            "testStrategy": "Test `get_next_month_expiry` with 'SILVERM' ensuring it skips non-cycle months (e.g., input Feb returns Apr expiry)."
+          },
+          {
+            "id": 4,
+            "title": "Update Market Hours and MCX Checks",
+            "description": "Add SILVER_MINI to the market hours configuration to ensure correct trading window validation.",
+            "dependencies": [],
+            "details": "Locate `is_market_hours` (likely in `portfolio_manager/utils/market_hours.py` or `expiry_utils.py`). Add 'SILVERM' (or the constant for Silver Mini) to the list of MCX commodities checked. Ensure it follows MCX trading hours (typically until 11:30 PM/11:55 PM).",
+            "status": "pending",
+            "testStrategy": "Verify `is_market_hours` returns True for SILVERM during evening session and False during holidays or weekends."
+          },
+          {
+            "id": 5,
+            "title": "Update Expiry Calendar Configuration",
+            "description": "Register Silver Mini in the core expiry calendar settings for rollover and exchange mapping.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/core/expiry_calendar.py`: 1. Add `SILVER_MINI` to `DEFAULT_ROLLOVER_DAYS` (e.g., 3-5 days). 2. Add mapping in `EXCHANGE_MAPPING` or equivalent dict to associate `SILVERM` with MCX exchange logic.",
+            "status": "pending",
+            "testStrategy": "Check that the configuration dictionaries contain the new keys and values."
+          }
+        ]
+      },
+      {
+        "id": 40,
+        "title": "Implement Symbol Translation and Order Routing",
+        "description": "Configure symbol translation to MCX format and ensure order executor routes Silver Mini orders correctly.",
+        "details": "1. In `portfolio_manager/core/symbol_mapper.py`: Implement `_translate_silver_mini` method returning `TranslatedSymbol` with MCX exchange. Add dispatch case in `translate()`.\n2. In `portfolio_manager/core/order_executor.py`: Update exchange detection to include 'SILVER'. Add specific symbol translation logic in `SimpleLimitExecutor` and `ProgressiveExecutor` to use the `SILVERM...` format.",
+        "testStrategy": "Call `symbol_mapper.translate('SILVER_MINI', 'BUY')` and assert correct MCX symbol string. Mock `OrderExecutor` to verify generated order object has Exchange='MCX'.",
+        "priority": "high",
+        "dependencies": [
+          39
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Update symbol_mapper.translate dispatch",
+            "description": "Add 'SILVER_MINI' case to the symbol translation dispatch logic in SymbolMapper.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/core/symbol_mapper.py`, locate the `translate()` method. Add a conditional check for `symbol == 'SILVER_MINI'` that calls `self._translate_silver_mini(signal_action)`. This ensures requests for Silver Mini are routed to the correct specific translation handler.",
+            "status": "pending",
+            "testStrategy": "Unit test `symbol_mapper.translate('SILVER_MINI', 'BUY')` to ensure it calls the new method (mocking the method if needed for isolation)."
+          },
+          {
+            "id": 2,
+            "title": "Implement _translate_silver_mini method",
+            "description": "Implement the specific translation logic for Silver Mini contracts.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/core/symbol_mapper.py`, define `_translate_silver_mini(self, action: str) -> TranslatedSymbol`. This method should calculate the correct MCX symbol (e.g., 'SILVERM' + expiry format) and return a `TranslatedSymbol` object with `symbol='SILVERM...'`, `exchange='MCX'`, and appropriate `quantity` and `order_type`.",
+            "status": "pending",
+            "testStrategy": "Unit test calling `_translate_silver_mini` directly to verify the returned object properties, specifically checking the MCX exchange string and symbol format."
+          },
+          {
+            "id": 3,
+            "title": "Update OrderExecutor exchange detection",
+            "description": "Add 'SILVER' to the MCX exchange detection logic in OrderExecutor.",
+            "dependencies": [
+              2
+            ],
+            "details": "In `portfolio_manager/core/order_executor.py` (around line 117), locate the exchange detection logic (likely examining `signal.symbol`). Add a condition to check if `signal.symbol` contains 'SILVER'. If true, set `exchange = 'MCX'`. This ensures the order routing logic identifies the correct exchange destination.",
+            "status": "pending",
+            "testStrategy": "Mock a signal with symbol 'SILVER_MINI' passed to OrderExecutor and verify the internal exchange variable is resolved to 'MCX'."
+          },
+          {
+            "id": 4,
+            "title": "Add Silver Mini translation to SimpleLimitExecutor",
+            "description": "Implement specific symbol formatting for Silver Mini in the SimpleLimitExecutor class.",
+            "dependencies": [
+              3
+            ],
+            "details": "In `portfolio_manager/core/order_executor.py`, inside `SimpleLimitExecutor` (around lines 148-173), add logic to handle 'SILVER_MINI'. Ensure that when constructing the order object/dictionary, the symbol is formatted as the specific MCX contract symbol (e.g., 'SILVERM24FEB') rather than the generic signal name.",
+            "status": "pending",
+            "testStrategy": "Run a test case using SimpleLimitExecutor with a Silver Mini signal and verify the output order contains the correctly formatted MCX symbol string."
+          },
+          {
+            "id": 5,
+            "title": "Add Silver Mini translation to ProgressiveExecutor",
+            "description": "Implement specific symbol formatting for Silver Mini in the ProgressiveExecutor class.",
+            "dependencies": [
+              3
+            ],
+            "details": "In `portfolio_manager/core/order_executor.py`, inside `ProgressiveExecutor` (around lines 733-758), replicate the symbol translation logic for 'SILVER_MINI'. This ensures complex/progressive orders also use the correct MCX contract symbol format when sending orders to the broker adapter.",
+            "status": "pending",
+            "testStrategy": "Run a test case using ProgressiveExecutor with a Silver Mini signal and verify the generated child orders contain the correctly formatted MCX symbol string."
+          }
+        ]
+      },
+      {
+        "id": 41,
+        "title": "Integrate Silver Mini into Trading Engines",
+        "description": "Register Position Sizers for Silver Mini in both live and backtest engines to enable execution.",
+        "details": "1. In `portfolio_manager/live/engine.py`: Add `TomBassoPositionSizer` for `SILVER_MINI` to the `sizers` dictionary.\n2. In `portfolio_manager/backtest/engine.py`: Add corresponding sizer configuration to the backtest `sizers` dictionary.\n3. Ensure sizer configuration uses the parameters defined in `InstrumentConfig`.",
+        "testStrategy": "Run a dry-run of the engine with a SILVER_MINI signal. Verify no KeyError on sizer lookup and that position size is calculated.",
+        "priority": "medium",
+        "dependencies": [
+          36
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 42,
+        "title": "Implement Rollover Scanner and Executor for Silver Mini",
+        "description": "Enable automated rollover handling for Silver Mini futures, respecting the 8-day tender period.",
+        "details": "1. In `portfolio_manager/live/rollover_scanner.py`: Add `SILVER_MINI` case using `silver_mini_rollover_days`. Add to MCX futures group.\n2. In `portfolio_manager/live/rollover_executor.py`: Implement `_rollover_silver_mini_position`. Logic: Close current near-month contract, open next available contract (skipping non-trading months). Update exchange detection.",
+        "testStrategy": "Mock a portfolio state with an expiring Silver Mini position. trigger scanner to verify 'rollover_needed' flag. Trigger executor to verify close/open orders are generated.",
+        "priority": "medium",
+        "dependencies": [
+          39,
+          40
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add Silver Mini Rollover Days Configuration to Scanner",
+            "description": "Configure the specific rollover window for Silver Mini futures in the scanner logic.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/live/rollover_scanner.py`, locate the `_get_rollover_days` method (around line 161). Add a specific case for `SILVER_MINI` or `SILVERM` symbol that returns the configured `silver_mini_rollover_days` value (typically 8 days), distinct from standard Silver or Gold contracts.",
+            "status": "pending",
+            "testStrategy": "Unit test `_get_rollover_days` with 'SILVER_MINI' symbol to verify it returns the correct integer value."
+          },
+          {
+            "id": 2,
+            "title": "Register Silver Mini in MCX Futures Group",
+            "description": "Ensure Silver Mini is recognized as part of the MCX futures group for valid rollover scanning.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/live/rollover_scanner.py` (around line 211), add `SILVER_MINI` (or the appropriate symbol constant) to the list/set of symbols that are treated as MCX futures. This ensures the scanner attempts to check expiration dates for these positions.",
+            "status": "pending",
+            "testStrategy": "Verify that the scanner iterates over a Silver Mini position during a scanning cycle in a test harness."
+          },
+          {
+            "id": 3,
+            "title": "Add Exchange Detection for Silver Contracts",
+            "description": "Update the executor to correctly identify the exchange for Silver-related symbols.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/live/rollover_executor.py` (around line 926), update the exchange detection logic to include `SILVER` and `SILVER_MINI` symbols, ensuring they map to 'MCX'. This is critical for order placement during the rollover execution.",
+            "status": "pending",
+            "testStrategy": "Unit test the exchange detection utility method with 'SILVER_MINI' input to ensure it returns 'MCX'."
+          },
+          {
+            "id": 4,
+            "title": "Implement Silver Mini Rollover Dispatch Logic",
+            "description": "Route Silver Mini rollover requests to the specific handler method within the executor.",
+            "dependencies": [
+              3
+            ],
+            "details": "In `portfolio_manager/live/rollover_executor.py`, inside the main execution method (around lines 185-200), add a conditional check for the symbol `SILVER_MINI`. If matched, call the specific `_rollover_silver_mini_position` method (to be implemented in the next subtask).",
+            "status": "pending",
+            "testStrategy": "Mock the executor call with a Silver Mini position and verify the specific handler method is invoked."
+          },
+          {
+            "id": 5,
+            "title": "Implement Silver Mini Rollover Execution Logic",
+            "description": "Implement the core logic to close the near-month contract and open the next valid contract for Silver Mini.",
+            "dependencies": [
+              4
+            ],
+            "details": "In `portfolio_manager/live/rollover_executor.py`, implement `_rollover_silver_mini_position(position)`. Use the pattern from `_rollover_gold_mini_position`: 1. Identify current expiry. 2. Calculate next valid expiry (skipping non-trading months if applicable). 3. Place MARKET SELL order for current. 4. Place MARKET BUY order for next expiry. 5. Handle errors gracefully.",
+            "status": "pending",
+            "testStrategy": "Integration test with a mock broker: simulate a position with near expiry, run the executor, and verify two orders (sell near, buy far) are generated with correct details."
+          }
+        ]
+      },
+      {
+        "id": 43,
+        "title": "Update External Sync and Utility Scripts",
+        "description": "Ensure external data synchronization (broker sync, CSV import) and voice announcements support Silver Mini.",
+        "details": "1. In `portfolio_manager/sync_from_broker.py`: Add logic to detect `SILVERM` in symbol string and map to `SILVER_MINI`.\n2. In `portfolio_manager/scripts/import_from_csv.py`: Fix hardcoded lot sizes to support 5 for Silver Mini.\n3. In `portfolio_manager/core/voice_announcer.py`: Add pronunciation mapping for \"Silver Mini\".",
+        "testStrategy": "Simulate broker position dict with 'SILVERM28FEB25FUT'. Verify `sync_from_broker` correctly identifies it as `InstrumentType.SILVER_MINI`.",
+        "priority": "medium",
+        "dependencies": [
+          37
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Update Broker Sync Symbol Detection Logic",
+            "description": "Modify the symbol parsing logic in sync_from_broker.py to correctly identify SILVERM ticker symbols and map them to the SILVER_MINI instrument type.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/sync_from_broker.py`, locate the symbol parsing section (around lines 52-57). Add a condition to check if the broker symbol starts with or contains 'SILVERM'. If detected, ensure the instrument type is set to `InstrumentType.SILVER_MINI` instead of defaulting to `SILVER` or `UNKNOWN`.",
+            "status": "pending",
+            "testStrategy": "Create a unit test passing a mock broker position object with symbol 'SILVERM24FUT' and verify that the resulting internal position object has instrument_type='SILVER_MINI'."
+          },
+          {
+            "id": 2,
+            "title": "Update CSV Import Lot Size Logic",
+            "description": "Update the CSV import script to handle the specific lot size calculation for Silver Mini, ensuring imported historical trades have the correct quantity.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/scripts/import_from_csv.py`, locate the lot size determination logic (around line 158). Add a specific check for 'SILVER_MINI' to assign a lot size of 5. This prevents the script from falling back to default lot sizes or incorrect mappings during data migration.",
+            "status": "pending",
+            "testStrategy": "Run the import script with a sample CSV containing a Silver Mini trade. Verify in the database or output logs that the quantity reflects the lot size of 5 (e.g., 1 lot = quantity 5)."
+          },
+          {
+            "id": 3,
+            "title": "Add Voice Announcement Pronunciation",
+            "description": "Configure the voice announcer to pronounce 'SILVER_MINI' in a user-friendly way rather than reading the raw enum string.",
+            "dependencies": [],
+            "details": "In `portfolio_manager/core/voice_announcer.py`, update the pronunciation dictionary or mapping logic. Add an entry mapping the key `SILVER_MINI` (or `InstrumentType.SILVER_MINI`) to the spoken phrase 'Silver Mini'. This ensures audio alerts are clear during trading sessions.",
+            "status": "pending",
+            "testStrategy": "Instantiate the `VoiceAnnouncer` class and call the speak method with a text containing 'SILVER_MINI'. Verify the text-to-speech engine receives 'Silver Mini'."
+          },
+          {
+            "id": 4,
+            "title": "Verify and Update Utility Helper Functions",
+            "description": "Scan and update any shared utility functions used by sync scripts that might rely on hardcoded instrument lists.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Check `portfolio_manager/utils/` for any helper functions used by `sync_from_broker.py` or `import_from_csv.py` that validate instrument names. If a 'valid_instruments' list exists, append 'SILVER_MINI' to it to prevent validation errors during sync processes.",
+            "status": "pending",
+            "testStrategy": "Run a regression test on the utility module to ensure 'SILVER_MINI' is accepted as a valid input for any formatter or validator functions."
+          },
+          {
+            "id": 5,
+            "title": "Integration Test for External Sync Workflows",
+            "description": "Perform an end-to-end test of the synchronization workflow with the new Silver Mini instrument to ensure data flows correctly from external sources.",
+            "dependencies": [
+              1,
+              2,
+              3
+            ],
+            "details": "Create a test script that simulates a broker API response containing a Silver Mini position and triggers `sync_from_broker.py`. Then, export this to a CSV and run `import_from_csv.py`. Finally, trigger a voice alert for the position. Confirm all steps execute without errors and data consistency is limits maintained.",
+            "status": "pending",
+            "testStrategy": "Manual or automated execution of the sync flow with mock data, verifying the final state in the database matches the expected Silver Mini configuration."
+          }
+        ]
+      },
+      {
+        "id": 44,
+        "title": "Create Unit Tests for Logic and Validation",
+        "description": "Add comprehensive unit tests for symbol mapping, signal validation, and configuration integrity.",
+        "details": "1. Create/Update `portfolio_manager/tests/unit/test_symbol_mapper.py`: Test `translate()` for SILVER_MINI.\n2. Create/Update `portfolio_manager/tests/unit/test_signal_validator.py`: Test signal validation rules, ensuring correct point value (5.0) is used in R-multiple calcs.\n3. Create test fixtures for SILVER_MINI signals and positions.",
+        "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_symbol_mapper.py` and `test_signal_validator.py`. Ensure all pass.",
+        "priority": "medium",
+        "dependencies": [
+          38,
+          40
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create Test Fixtures for SILVER_MINI",
+            "description": "Define reusable pytest fixtures for SILVER_MINI signals and positions to be used across unit tests.",
+            "dependencies": [],
+            "details": "Update `portfolio_manager/tests/conftest.py` or create a new fixture file `portfolio_manager/tests/unit/fixtures_silver.py`. Define dictionary objects representing valid `SILVER_MINI` signals for BASE_ENTRY, PYRAMID, and EXIT types, as well as mock Position objects. These fixtures will ensure consistency across mapper and validator tests.",
+            "status": "pending",
+            "testStrategy": "Verify fixtures can be imported and utilized in a dummy test function without errors."
+          },
+          {
+            "id": 2,
+            "title": "Unit Test: Symbol Translation Logic",
+            "description": "Implement unit tests to verify that the SymbolMapper correctly translates the internal SILVER_MINI symbol to the expected broker format.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `portfolio_manager/tests/unit/test_symbol_mapper.py`, create a test function `test_translate_silver_mini`. Use the fixtures or manual inputs to call `SymbolMapper.translate('SILVER_MINI')`. Assert that the returned string matches the expected MCX symbol format (e.g., `SILVERMIC<Date>`), mocking expiry utilities if necessary to ensure deterministic results.",
+            "status": "pending",
+            "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_symbol_mapper.py` and confirm the translation test passes."
+          },
+          {
+            "id": 3,
+            "title": "Unit Test: Lot Size Configuration",
+            "description": "Add tests to ensure the system correctly retrieves the specific lot size configuration for SILVER_MINI.",
+            "dependencies": [
+              2
+            ],
+            "details": "In `portfolio_manager/tests/unit/test_symbol_mapper.py`, add a test case `test_get_lot_size_silver_mini`. Access the `LOT_SIZES` dictionary or the relevant accessor method on the mapper class. Assert that the returned value for `SILVER_MINI` is exactly 5 (representing the contract multiplier/quantity), as required for position sizing.",
+            "status": "pending",
+            "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_symbol_mapper.py` and verify the lot size assertion passes."
+          },
+          {
+            "id": 4,
+            "title": "Unit Test: Signal Validation Rules",
+            "description": "Create tests to verify that the SignalValidator correctly identifies valid and invalid SILVER_MINI signals.",
+            "dependencies": [
+              1
+            ],
+            "details": "Create or update `portfolio_manager/tests/unit/test_signal_validator.py`. Add `test_validate_valid_silver_signal` using the fixtures from Subtask 1. Add negative test cases `test_validate_invalid_silver_signal` by modifying the fixture (e.g., removing price or symbol) and asserting that the validator raises an error or returns False.",
+            "status": "pending",
+            "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_signal_validator.py` and ensure validation logic holds for the new symbol."
+          },
+          {
+            "id": 5,
+            "title": "Unit Test: R-Multiple Calculation Logic",
+            "description": "Implement specific tests to verify that risk calculations use the correct point value (5.0) for SILVER_MINI.",
+            "dependencies": [
+              4
+            ],
+            "details": "In `portfolio_manager/tests/unit/test_signal_validator.py`, add `test_r_multiple_calculation_silver`. Construct a scenario with known entry and stop prices. invoke the R-multiple calculation method. Assert that the result reflects the formula: `(Price_Diff * 5.0) / Risk`, explicitly checking that the point value of 5.0 is applied rather than the default 1.0.",
+            "status": "pending",
+            "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_signal_validator.py` and verify math accuracy for point-value dependent calculations."
+          }
+        ]
+      },
+      {
+        "id": 45,
+        "title": "Create Unit Tests for Expiry and Rollover",
+        "description": "Add specific unit tests for the complex Silver Mini expiry calendar and rollover logic.",
+        "details": "1. Create/Update `portfolio_manager/tests/unit/test_expiry_utils.py`. Test cases: Feb->Apr, Apr->Jun, Jun->Aug, Aug->Nov, Nov->Feb (next year).\n2. Verify `get_next_month_expiry` returns correct date even when crossing calendar years.\n3. Verify rollover date calculation subtracts exactly 8 days from expiry.",
+        "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_expiry_utils.py`. Ensure edge cases (Dec 31st, leap years if applicable) are handled.",
+        "priority": "medium",
+        "dependencies": [
+          39,
+          42
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Set Up Test Infrastructure and Basic Contract Expiry Tests",
+            "description": "Create the test file `portfolio_manager/tests/unit/test_expiry_utils.py` and implement unit tests for standard Silver Mini contract months.",
+            "dependencies": [],
+            "details": "Initialize `portfolio_manager/tests/unit/test_expiry_utils.py`. Import `get_silver_mini_expiry` from the relevant utility module. Create test cases specifically for the February, April, June, and August contract months to ensure they return the last business day of the respective month (or the specific logic defined in requirements). Use `pytest` fixtures if necessary.",
+            "status": "pending",
+            "testStrategy": "Run `pytest portfolio_manager/tests/unit/test_expiry_utils.py` and verify standard months pass."
+          },
+          {
+            "id": 2,
+            "title": "Implement Year Transition and November Contract Tests",
+            "description": "Add specific test cases for the November contract and the critical year-rollover logic where the next contract is in the following year.",
+            "dependencies": [
+              1
+            ],
+            "details": "Extend `test_expiry_utils.py` to test the November contract logic. Crucially, implement the 'December edge case' where calling the function in December or late November should correctly identify February of the *next* year as the target expiry. Verify `get_next_month_expiry` handles year increment correctly.",
+            "status": "pending",
+            "testStrategy": "Run pytest. Ensure that a date input in December YYYY returns a date in February YYYY+1."
+          },
+          {
+            "id": 3,
+            "title": "Develop Unit Tests for Silver Mini Symbol Formatting",
+            "description": "Create tests to verify that the futures symbol string is constructed correctly according to the brokerage format.",
+            "dependencies": [
+              1
+            ],
+            "details": "Add tests for `format_silver_mini_futures_symbol()`. Verify the output matches the pattern `SILVERM{DD}{MMM}{YY}FUT`. Test against various dates to ensure the Day, Month code (e.g., FEB, APR), and Year are formatted correctly (e.g., 29FEB24).",
+            "status": "pending",
+            "testStrategy": "Run pytest. Check string output against expected regex or static strings for known dates."
+          },
+          {
+            "id": 4,
+            "title": "Implement Rollover Window Calculation Tests",
+            "description": "Verify the logic that determines when a position should be rolled over, specifically the 8-day window before expiry.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Create tests for the rollover date calculation. Ensure that the logic subtracts exactly 8 days from the calculated expiry date. Test boundary conditions: what if the 8th day before is a weekend or holiday? (If logic supports business days, test that; otherwise test raw date subtraction). Verify `is_rollover_due` returns True within this window.",
+            "status": "pending",
+            "testStrategy": "Run pytest. Mock current dates to fall exactly on, before, and after the rollover threshold."
+          },
+          {
+            "id": 5,
+            "title": "Finalize Test Suite with Leap Year and Edge Case Validations",
+            "description": "Add comprehensive edge case scenarios including leap years and non-business day expiries to ensure robustness.",
+            "dependencies": [
+              2,
+              4
+            ],
+            "details": "Add test cases for Leap Years (e.g., Feb 29th expiry or calculations involving Feb 29th). Validate behavior when the calculated expiry falls on a weekend (ensure it shifts to the previous business day if that is the business rule, or strictly follows the specific Silver Mini rules). Finalize the test file.",
+            "status": "pending",
+            "testStrategy": "Run full suite `pytest portfolio_manager/tests/unit/test_expiry_utils.py` with coverage reports."
+          }
+        ]
       }
     ],
     "metadata": {
-      "version": "1.0.0",
-      "lastModified": "2025-11-30T02:09:47.166Z",
-      "taskCount": 11,
-      "completedCount": 4,
-      "tags": [
-        "master"
-      ],
       "created": "2025-12-03T18:06:09.300Z",
-      "description": "Tasks for master context",
-      "updated": "2025-12-07T12:54:48.356Z"
+      "updated": "2025-12-24T16:28:49.179Z",
+      "description": "Tasks for master context"
     }
   }
 }

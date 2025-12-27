@@ -444,8 +444,14 @@ class BrokerSyncManager:
         """Map trading symbol to instrument name"""
         symbol_upper = symbol.upper()
 
-        if 'GOLD' in symbol_upper or 'GOLDM' in symbol_upper:
+        # MCX Commodities - check first (COPPER before other checks)
+        if 'COPPER' in symbol_upper:
+            return 'COPPER'
+        elif 'SILVERM' in symbol_upper:
+            return 'SILVER_MINI'
+        elif 'GOLD' in symbol_upper or 'GOLDM' in symbol_upper:
             return 'GOLD_MINI'
+        # NSE/BFO Indices
         elif 'BANKNIFTY' in symbol_upper or 'NIFTYBANK' in symbol_upper:
             return 'BANK_NIFTY'
         elif 'SENSEX' in symbol_upper:
@@ -463,13 +469,15 @@ class BrokerSyncManager:
         """
         Get lot size divisor from symbol for converting broker quantity to lots.
 
-        Note: MCX futures (Gold, Silver, etc.) return quantity as number of contracts/lots
+        Note: MCX futures (Gold, Copper, Silver, etc.) return quantity as number of contracts/lots
         directly, so divisor is 1. NSE/BFO options return quantity in units, so we divide
         by the lot size to get number of lots.
         """
         symbol_upper = symbol.upper()
 
         # MCX futures - broker returns lot count directly, not units
+        if 'COPPER' in symbol_upper and 'FUT' in symbol_upper:
+            return 1  # Copper futures: qty is already in lots (lot size 2500 kg)
         if 'GOLDM' in symbol_upper and 'FUT' in symbol_upper:
             return 1  # Gold Mini futures: qty is already in lots
         if 'SILVERM' in symbol_upper and 'FUT' in symbol_upper:
@@ -477,7 +485,7 @@ class BrokerSyncManager:
 
         # NSE/BFO options - broker returns units, divide by lot size
         if 'BANKNIFTY' in symbol_upper:
-            return 35  # Bank Nifty lot size
+            return 30  # Bank Nifty lot size (Dec 2025 onwards)
         elif 'SENSEX' in symbol_upper:
             return 10
         elif 'FINNIFTY' in symbol_upper:

@@ -94,6 +94,8 @@ class PortfolioStateManager:
         total_risk = 0.0
         gold_risk = 0.0
         bn_risk = 0.0
+        silver_risk = 0.0
+        copper_risk = 0.0
 
         for pos in state.get_open_positions().values():
             # Get instrument config for point value
@@ -102,6 +104,10 @@ class PortfolioStateManager:
                 inst_type = InstrumentType.BANK_NIFTY
             elif instrument == "GOLD_MINI":
                 inst_type = InstrumentType.GOLD_MINI
+            elif instrument == "COPPER":
+                inst_type = InstrumentType.COPPER
+            elif instrument == "SILVER_MINI":
+                inst_type = InstrumentType.SILVER_MINI
             else:
                 logger.warning(f"Unknown instrument: {instrument}")
                 continue
@@ -112,19 +118,27 @@ class PortfolioStateManager:
             total_risk += pos_risk
             if instrument == "GOLD_MINI":
                 gold_risk += pos_risk
-            else:
+            elif instrument == "BANK_NIFTY":
                 bn_risk += pos_risk
+            elif instrument == "SILVER_MINI":
+                silver_risk += pos_risk
+            elif instrument == "COPPER":
+                copper_risk += pos_risk
 
         state.total_risk_amount = total_risk
         state.total_risk_percent = (total_risk / state.equity * 100) if state.equity > 0 else 0
         state.gold_risk_percent = (gold_risk / state.equity * 100) if state.equity > 0 else 0
         state.banknifty_risk_percent = (bn_risk / state.equity * 100) if state.equity > 0 else 0
+        state.silver_risk_percent = (silver_risk / state.equity * 100) if state.equity > 0 else 0
+        state.copper_risk_percent = (copper_risk / state.equity * 100) if state.equity > 0 else 0
 
     def _calculate_volatility_metrics(self, state: PortfolioState):
         """Calculate portfolio volatility metrics"""
         total_vol = 0.0
         gold_vol = 0.0
         bn_vol = 0.0
+        silver_vol = 0.0
+        copper_vol = 0.0
 
         for pos in state.get_open_positions().values():
             # Volatility contribution = ATR × Quantity × Point_Value
@@ -135,14 +149,29 @@ class PortfolioStateManager:
                 atr = pos.atr
             else:
                 # Fallback to typical ATR if not stored (backwards compatibility)
-                atr = 450 if instrument == "GOLD_MINI" else 350
+                if instrument == "GOLD_MINI":
+                    atr = 450
+                elif instrument == "COPPER":
+                    atr = 3.0  # Typical ATR for Copper (in Rs/kg)
+                elif instrument == "SILVER_MINI":
+                    atr = 1500  # Typical ATR for Silver Mini (in Rs/kg)
+                else:
+                    atr = 350  # Bank Nifty
 
             if instrument == "GOLD_MINI":
                 point_val = 10  # Rs 10 per point per lot
                 vol = atr * pos.lots * point_val
                 gold_vol += vol
+            elif instrument == "COPPER":
+                point_val = 2500  # Rs 2500 per Re 1 move per lot
+                vol = atr * pos.lots * point_val
+                copper_vol += vol
+            elif instrument == "SILVER_MINI":
+                point_val = 5  # Rs 5 per Rs 1/kg move per lot (5kg contract)
+                vol = atr * pos.lots * point_val
+                silver_vol += vol
             else:  # BANK_NIFTY
-                point_val = 35  # Rs 35 per point per lot
+                point_val = 30  # Rs 30 per point per lot (Dec 2025 onwards)
                 vol = atr * pos.lots * point_val
                 bn_vol += vol
 
@@ -152,6 +181,8 @@ class PortfolioStateManager:
         state.total_vol_percent = (total_vol / state.equity * 100) if state.equity > 0 else 0
         state.gold_vol_percent = (gold_vol / state.equity * 100) if state.equity > 0 else 0
         state.banknifty_vol_percent = (bn_vol / state.equity * 100) if state.equity > 0 else 0
+        state.silver_vol_percent = (silver_vol / state.equity * 100) if state.equity > 0 else 0
+        state.copper_vol_percent = (copper_vol / state.equity * 100) if state.equity > 0 else 0
 
     def _calculate_margin_metrics(self, state: PortfolioState):
         """Calculate margin utilization metrics"""
@@ -162,6 +193,10 @@ class PortfolioStateManager:
 
             if instrument == "GOLD_MINI":
                 margin_per_lot = 105000.0  # ₹1.05L per lot (conservative)
+            elif instrument == "COPPER":
+                margin_per_lot = 300000.0  # ₹3L per lot
+            elif instrument == "SILVER_MINI":
+                margin_per_lot = 200000.0  # ₹2L per lot
             else:  # BANK_NIFTY
                 margin_per_lot = 270000.0  # ₹2.7L per lot
 
@@ -173,10 +208,43 @@ class PortfolioStateManager:
             (total_margin_used / state.equity * 100) if state.equity > 0 else 0
         )
 
+    def reload_equity_from_db(self) -> float:
+        """
+        Reload closed_equity from database after capital injection
+
+        This should be called after a capital transaction to ensure
+        PortfolioStateManager has the latest equity value.
+
+        Returns:
+            New closed_equity value
+
+        Raises:
+            RuntimeError: If no database manager configured
+        """
+        if not self.db_manager:
+            raise RuntimeError("No database manager configured - cannot reload equity")
+
+        db_state = self.db_manager.get_portfolio_state()
+        if db_state:
+            old_equity = self.closed_equity
+            self.closed_equity = float(db_state['closed_equity'])
+            logger.info(f"Equity reloaded from DB: ₹{old_equity:,.0f} -> ₹{self.closed_equity:,.0f}")
+        else:
+            logger.warning("No portfolio state found in database during reload")
+
+        return self.closed_equity
+
     def add_position(self, position: Position):
         """Add new position to portfolio"""
         self.positions[position.position_id] = position
         logger.info(f"Position added: {position.position_id}, {position.lots} lots @ ₹{position.entry_price}")
+
+        # Save portfolio state to database if db_manager available
+        # This ensures risk/margin are persisted for crash recovery
+        if self.db_manager:
+            state = self.get_current_state()
+            self.db_manager.save_portfolio_state(state, self.initial_capital)
+            logger.debug(f"Portfolio state saved after position add")
 
     def close_position(self, position_id: str, exit_price: float, exit_time: datetime) -> float:
         """
@@ -199,8 +267,12 @@ class PortfolioStateManager:
         # Get point value
         if pos.instrument == "GOLD_MINI":
             point_value = 10.0
-        else:
-            point_value = 35.0
+        elif pos.instrument == "COPPER":
+            point_value = 2500.0
+        elif pos.instrument == "SILVER_MINI":
+            point_value = 5.0  # 5kg × Rs 1/kg
+        else:  # BANK_NIFTY
+            point_value = 30.0  # Dec 2025 onwards
 
         # Calculate realized P&L
         pnl = pos.calculate_pnl(exit_price, point_value)
@@ -245,8 +317,12 @@ class PortfolioStateManager:
         # Get point value
         if pos.instrument == "GOLD_MINI":
             point_value = 10.0
-        else:
-            point_value = 35.0
+        elif pos.instrument == "COPPER":
+            point_value = 2500.0
+        elif pos.instrument == "SILVER_MINI":
+            point_value = 5.0  # 5kg × Rs 1/kg
+        else:  # BANK_NIFTY
+            point_value = 30.0  # Dec 2025 onwards
 
         pos.unrealized_pnl = pos.calculate_pnl(current_price, point_value)
 

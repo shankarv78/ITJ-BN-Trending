@@ -289,7 +289,14 @@ class VoiceAnnouncer:
             risk_percent: Risk as percentage of equity
         """
         # Format instrument name for speech
-        instrument_name = "Gold Mini" if instrument == "GOLD_MINI" else "Bank Nifty"
+        if instrument == "GOLD_MINI":
+            instrument_name = "Gold Mini"
+        elif instrument == "COPPER":
+            instrument_name = "Copper"
+        elif instrument == "SILVER_MINI":
+            instrument_name = "Silver Mini"
+        else:
+            instrument_name = "Bank Nifty"
 
         # Format position
         pos_parts = position.split("_")
@@ -348,7 +355,14 @@ class VoiceAnnouncer:
             order_id: Broker order ID
             pnl: P&L for exits
         """
-        instrument_name = "Gold Mini" if instrument == "GOLD_MINI" else "Bank Nifty"
+        if instrument == "GOLD_MINI":
+            instrument_name = "Gold Mini"
+        elif instrument == "COPPER":
+            instrument_name = "Copper"
+        elif instrument == "SILVER_MINI":
+            instrument_name = "Silver Mini"
+        else:
+            instrument_name = "Bank Nifty"
 
         if signal_type == "EXIT" and pnl is not None:
             pnl_word = "profit" if pnl >= 0 else "loss"

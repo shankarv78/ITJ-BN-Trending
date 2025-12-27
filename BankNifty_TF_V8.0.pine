@@ -133,8 +133,8 @@ getBankNiftyLotSize(barTime) =>
     // Period 10: Apr 25, 2025 - Increased to 35 lots (NSE/FAOP/67372)
     t_apr2025 = timestamp(2025, 4, 25, 0, 0)
 
-    // Period 11: Dec 31, 2025 - Reduced to 30 lots (NSE/FAOP/70616) - Scheduled future change
-    t_dec2025 = timestamp(2025, 12, 31, 0, 0)
+    // Period 11: Dec 30, 2025 - Reduced to 30 lots (NSE/FAOP/70616) - Per Zerodha circular
+    t_dec2025 = timestamp(2025, 12, 30, 0, 0)
 
     // Determine lot size based on bar time (newest to oldest for efficiency)
     lotSize :=
@@ -326,7 +326,8 @@ is_eod_candle = hour(time) >= 14 and minute(time) >= 15  // After 2:15 PM
 is_market_close = hour(time) == 15 and minute(time) >= 15  // After 3:15 PM (near close)
 // EOD Alert Window: Last 5 minutes before close (15:25-15:30)
 // Used for EOD_MONITOR alerts - fires every tick, Python handles precise timing
-is_eod_alert_window = hour(time) == 15 and minute(time) >= 25
+// NOTE: Uses timenow (real-time) not time (bar open) - requires "On every tick" in strategy properties
+is_eod_alert_window = hour(timenow) == 15 and minute(timenow) >= 25
 
 // ========================================
 // STRATEGY CONDITIONS
@@ -464,7 +465,8 @@ total_risk_exposure = risk_long1 + risk_long2 + risk_long3 + risk_long4 + risk_l
 base_risk = risk_long1
 
 // INITIAL ENTRY: When all conditions are met and no position exists
-if long_entry and strategy.position_size == 0
+// ONLY execute at confirmed bar close (consistent with exit logic)
+if long_entry and strategy.position_size == 0 and barstate.isconfirmed
     // V2: Calculate risk amount (1.5% of CURRENT equity - includes unrealized)
     risk_amount = current_equity * (risk_percent / 100)
 
@@ -523,6 +525,11 @@ float initial_risk_points = not na(initial_entry_price) and not na(initial_stop_
 float price_move_from_entry = not na(initial_entry_price) ? close - initial_entry_price : 0.0
 float price_move_in_r = initial_risk_points > 0 ? price_move_from_entry / initial_risk_points : 0.0
 
+// Global scope definitions for plotshape access
+bool pyramid_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_points) : (accumulated_profit > base_risk)
+bool roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
+float atr_moves_from_last = not na(last_pyramid_price) and atr_pyramid > 0 ? (close - last_pyramid_price) / atr_pyramid : 0.0
+
 // PYRAMIDING: V2 Triple-Constraint System (✨ v5: Extended to 5 pyramids)
 // Only pyramid when meaningful profit exists beyond base risk coverage
 if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyramids
@@ -530,19 +537,8 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
     price_move_from_last = close - last_pyramid_price
     atr_moves = price_move_from_last / atr_pyramid
 
-    // ========================================
-    // V2 PYRAMID GATE CHECK (v7.0: 1R-based or profit-based)
-    // ========================================
-    // v7.0: Pyramid gate - 1R-based (capital-independent) or profit-based (capital-dependent)
-    // When use_1r_gate = true: Gate based on price movement (1R) - capital-independent
-    // When use_1r_gate = false: Gate based on accumulated profit - capital-dependent (original behavior)
-    bool pyramid_gate_open = use_1r_gate ? (price_move_from_entry > initial_risk_points) : (accumulated_profit > base_risk)
-
     // Calculate profit after base risk coverage (for lot-c calculation)
     profit_after_base_risk = accumulated_profit - base_risk
-
-    // ROC momentum check (optional filter for pyramids)
-    roc_ok_for_pyramid = use_roc_for_pyramids ? roc > roc_threshold : true
 
     // ========================================
     // V2 TRIPLE CONSTRAINT CALCULATION
@@ -578,7 +574,8 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
     // Trigger: Gate open AND price moved AND ROC OK AND >= 1 lot
     pyramid_trigger = pyramid_gate_open and atr_moves >= atr_pyramid_threshold and roc_ok_for_pyramid and pyramid_lots >= 1
 
-    if pyramid_trigger
+    // ONLY execute at confirmed bar close (consistent with exit logic)
+    if pyramid_trigger and barstate.isconfirmed
 
         // Update tracking
         pyramid_count := pyramid_count + 1
@@ -874,6 +871,7 @@ plotshape(long_entry and strategy.position_size == 0,
      style=shape.arrowup,
      size=size.tiny,
      text="",
+     textcolor=color.white,
      force_overlay=true)
 
 // Special marker for EOD entries (captures gap-ups)
@@ -884,6 +882,7 @@ plotshape(long_entry and strategy.position_size == 0 and is_eod_candle,
      style=shape.circle,
      size=size.tiny,
      text="EOD",
+     textcolor=color.black,
      force_overlay=true)
 
 plotshape(long_exit and strategy.position_size > 0,
@@ -893,6 +892,7 @@ plotshape(long_exit and strategy.position_size > 0,
      style=shape.arrowdown,
      size=size.tiny,
      text="",
+     textcolor=color.white,
      force_overlay=true)
 
 // ========================================

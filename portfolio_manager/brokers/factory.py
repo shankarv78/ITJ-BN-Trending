@@ -127,6 +127,10 @@ class AnalyzerBrokerWrapper:
         return self.real_broker.cancel_order(order_id)
 
     # Pass-through methods that use real broker (read-only operations)
+    def check_connection(self) -> Dict:
+        """Check broker connection status - pass through to real broker"""
+        return self.real_broker.check_connection()
+
     def get_funds(self) -> Dict:
         """Get real account funds from broker"""
         logger.info("[ANALYZER] Fetching real account funds from broker")

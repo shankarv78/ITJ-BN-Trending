@@ -21,6 +21,8 @@ from live.expiry_utils import (
     get_rollover_strike,
     format_banknifty_option_symbol,
     format_gold_mini_futures_symbol,
+    format_copper_futures_symbol,
+    format_silver_mini_futures_symbol,
     is_market_hours
 )
 
@@ -185,6 +187,10 @@ class RolloverExecutor:
                     result = self._rollover_banknifty_position(candidate, dry_run)
                 elif candidate.instrument == "GOLD_MINI":
                     result = self._rollover_gold_mini_position(candidate, dry_run)
+                elif candidate.instrument == "COPPER":
+                    result = self._rollover_copper_position(candidate, dry_run)
+                elif candidate.instrument == "SILVER_MINI":
+                    result = self._rollover_silver_mini_position(candidate, dry_run)
                 else:
                     result = RolloverResult(
                         position_id=candidate.position.position_id,
@@ -430,14 +436,25 @@ class RolloverExecutor:
             # Update position with new contract details
             position.expiry = candidate.next_expiry
             position.strike = new_strike
-            position.entry_price = float(new_strike)  # Update entry price to new ATM strike
+            # Calculate synthetic futures entry price: Strike + CE - PE
+            # For ENTRY: SELL PE (receive premium), BUY CE (pay premium)
+            synthetic_entry_price = float(new_strike) + ce_open.fill_price - pe_open.fill_price
+            position.entry_price = synthetic_entry_price
             position.pe_symbol = new_pe_symbol
             position.ce_symbol = new_ce_symbol
             position.pe_order_id = pe_open.order_id
             position.ce_order_id = ce_open.order_id
+            # Update PE/CE entry prices for the new position (needed for next rollover P&L)
+            position.pe_entry_price = pe_open.fill_price
+            position.ce_entry_price = ce_open.fill_price
             position.rollover_status = RolloverStatus.ROLLED.value
             position.rollover_timestamp = datetime.now()
             position.rollover_count += 1
+
+            logger.info(
+                f"[ROLLOVER] Updated position entry price: ₹{synthetic_entry_price:,.2f} "
+                f"(strike={new_strike}, PE={pe_open.fill_price}, CE={ce_open.fill_price})"
+            )
 
             # Update highest_close if new entry is higher
             if position.entry_price > position.highest_close:
@@ -652,6 +669,305 @@ class RolloverExecutor:
             position.rollover_status = RolloverStatus.FAILED.value
             return result
 
+    def _rollover_copper_position(
+        self,
+        candidate: RolloverCandidate,
+        dry_run: bool = False
+    ) -> RolloverResult:
+        """
+        Rollover a Copper futures position
+
+        Steps:
+        1. Close current month futures
+        2. Open next month futures
+        3. Update position state
+
+        Args:
+            candidate: Position to roll
+            dry_run: Simulate without orders
+
+        Returns:
+            RolloverResult
+        """
+        position = candidate.position
+        result = RolloverResult(
+            position_id=position.position_id,
+            instrument="COPPER",
+            success=False,
+            old_expiry=candidate.current_expiry,
+            new_expiry=candidate.next_expiry,
+            start_time=datetime.now()
+        )
+
+        try:
+            # Old and new symbols
+            old_symbol = position.futures_symbol or format_copper_futures_symbol(
+                candidate.current_expiry, self.broker
+            )
+            new_symbol = format_copper_futures_symbol(
+                candidate.next_expiry, self.broker
+            )
+            quantity = position.quantity
+
+            logger.info(
+                f"Rolling {position.position_id}: "
+                f"{old_symbol} -> {new_symbol}"
+            )
+
+            if dry_run:
+                logger.info(f"[DRY RUN] Would close: {old_symbol}")
+                logger.info(f"[DRY RUN] Would open: {new_symbol}")
+                result.success = True
+                result.end_time = datetime.now()
+                return result
+
+            # Mark position as in-progress
+            position.rollover_status = RolloverStatus.IN_PROGRESS.value
+
+            # Step 1: Close old futures (SELL)
+            close_result = self._execute_order_with_retry(
+                old_symbol, "SELL", quantity, "Futures close"
+            )
+            result.close_results.append(LegResult(
+                leg_type="FUTURES", action="SELL", symbol=old_symbol,
+                quantity=quantity, order_result=close_result
+            ))
+
+            if not close_result.success:
+                result.error = f"Failed to close futures: {close_result.error}"
+                position.rollover_status = RolloverStatus.FAILED.value
+                return result
+
+            logger.info(f"Old futures closed @ {close_result.fill_price}")
+
+            # Step 2: Open new futures (BUY)
+            open_result = self._execute_order_with_retry(
+                new_symbol, "BUY", quantity, "Futures open"
+            )
+            result.open_results.append(LegResult(
+                leg_type="FUTURES", action="BUY", symbol=new_symbol,
+                quantity=quantity, order_result=open_result
+            ))
+
+            if not open_result.success:
+                result.error = f"Failed to open new futures: {open_result.error}"
+                logger.critical(
+                    f"CRITICAL: Old futures closed but new open failed for {position.position_id}! "
+                    f"Position is now FLAT. Manual re-entry required."
+                )
+                position.rollover_status = RolloverStatus.FAILED.value
+                return result
+
+            logger.info(f"New futures opened @ {open_result.fill_price}")
+
+            # Step 3: Update position state
+            # Store original values before updating
+            position.original_expiry = candidate.current_expiry
+            position.original_entry_price = position.entry_price
+
+            # Update position with new contract details
+            position.expiry = candidate.next_expiry
+            position.contract_month = candidate.next_expiry[2:5] + candidate.next_expiry[:2]  # DEC25
+            position.futures_symbol = new_symbol
+            position.futures_order_id = open_result.order_id
+            position.entry_price = open_result.fill_price  # Update entry price to new futures price
+            position.rollover_status = RolloverStatus.ROLLED.value
+            position.rollover_timestamp = datetime.now()
+            position.rollover_count += 1
+
+            # Update highest_close if new entry is higher
+            if position.entry_price > position.highest_close:
+                position.highest_close = position.entry_price
+
+            # Calculate rollover cost (actual P&L from closing old position + spread cost)
+            from core.config import get_instrument_config
+            from core.models import InstrumentType
+            inst_config = get_instrument_config(InstrumentType.COPPER)
+            point_value = inst_config.point_value  # Rs 2500 per Re 1 move per lot
+
+            # P&L from closing old futures position
+            # For futures: BUY at entry, SELL at close -> profit if close > entry
+            lots = position.lots
+            close_pnl = (close_result.fill_price - position.original_entry_price) * lots * point_value
+
+            # Cost of opening new position (spread + slippage)
+            spread_cost = abs(open_result.fill_price - close_result.fill_price) * lots * point_value
+
+            result.close_pnl = close_pnl
+            result.spread_cost = spread_cost
+            result.total_rollover_cost = close_pnl + spread_cost
+            position.rollover_pnl += result.total_rollover_cost
+
+            # Update portfolio closed equity with rollover P&L
+            if close_pnl != 0:
+                self.portfolio.closed_equity += close_pnl
+                logger.info(f"Rollover P&L: Close P&L=₹{close_pnl:,.2f}, Spread cost=₹{spread_cost:,.2f}, Total=₹{result.total_rollover_cost:,.2f}")
+
+            # Reconcile position with broker
+            reconciliation = self.reconcile_position_after_rollover(position, result)
+            if reconciliation['status'] != 'success':
+                logger.warning(f"Rollover reconciliation issues: {reconciliation.get('mismatches', [])}")
+
+            result.success = True
+            result.end_time = datetime.now()
+            result.duration_seconds = (result.end_time - result.start_time).total_seconds()
+
+            return result
+
+        except Exception as e:
+            result.error = str(e)
+            result.end_time = datetime.now()
+            position.rollover_status = RolloverStatus.FAILED.value
+            return result
+
+    def _rollover_silver_mini_position(
+        self,
+        candidate: RolloverCandidate,
+        dry_run: bool = False
+    ) -> RolloverResult:
+        """
+        Roll Silver Mini futures position to next contract.
+
+        Silver Mini has bimonthly contracts (Feb, Apr, Jun, Aug, Nov).
+
+        Args:
+            candidate: Rollover candidate
+            dry_run: If True, don't execute actual orders
+
+        Returns:
+            RolloverResult
+        """
+        position = candidate.position
+        result = RolloverResult(
+            position_id=position.position_id,
+            instrument="SILVER_MINI",
+            success=False,
+            old_expiry=candidate.current_expiry,
+            new_expiry=candidate.next_expiry,
+            start_time=datetime.now()
+        )
+
+        try:
+            # Old and new symbols
+            old_symbol = position.futures_symbol or format_silver_mini_futures_symbol(
+                candidate.current_expiry, self.broker
+            )
+            new_symbol = format_silver_mini_futures_symbol(
+                candidate.next_expiry, self.broker
+            )
+            quantity = position.quantity
+
+            logger.info(
+                f"Rolling {position.position_id}: "
+                f"{old_symbol} -> {new_symbol}"
+            )
+
+            if dry_run:
+                logger.info(f"[DRY RUN] Would close: {old_symbol}")
+                logger.info(f"[DRY RUN] Would open: {new_symbol}")
+                result.success = True
+                result.end_time = datetime.now()
+                return result
+
+            # Mark position as in-progress
+            position.rollover_status = RolloverStatus.IN_PROGRESS.value
+
+            # Step 1: Close old futures (SELL)
+            close_result = self._execute_order_with_retry(
+                old_symbol, "SELL", quantity, "Futures close"
+            )
+            result.close_results.append(LegResult(
+                leg_type="FUTURES", action="SELL", symbol=old_symbol,
+                quantity=quantity, order_result=close_result
+            ))
+
+            if not close_result.success:
+                result.error = f"Failed to close futures: {close_result.error}"
+                position.rollover_status = RolloverStatus.FAILED.value
+                return result
+
+            logger.info(f"Old futures closed @ {close_result.fill_price}")
+
+            # Step 2: Open new futures (BUY)
+            open_result = self._execute_order_with_retry(
+                new_symbol, "BUY", quantity, "Futures open"
+            )
+            result.open_results.append(LegResult(
+                leg_type="FUTURES", action="BUY", symbol=new_symbol,
+                quantity=quantity, order_result=open_result
+            ))
+
+            if not open_result.success:
+                result.error = f"Failed to open new futures: {open_result.error}"
+                logger.critical(
+                    f"CRITICAL: Old futures closed but new open failed for {position.position_id}! "
+                    f"Position is now FLAT. Manual re-entry required."
+                )
+                position.rollover_status = RolloverStatus.FAILED.value
+                return result
+
+            logger.info(f"New futures opened @ {open_result.fill_price}")
+
+            # Step 3: Update position state
+            # Store original values before updating
+            position.original_expiry = candidate.current_expiry
+            position.original_entry_price = position.entry_price
+
+            # Update position with new contract details
+            position.expiry = candidate.next_expiry
+            position.contract_month = candidate.next_expiry[2:5] + candidate.next_expiry[:2]  # FEB26
+            position.futures_symbol = new_symbol
+            position.futures_order_id = open_result.order_id
+            position.entry_price = open_result.fill_price  # Update entry price to new futures price
+            position.rollover_status = RolloverStatus.ROLLED.value
+            position.rollover_timestamp = datetime.now()
+            position.rollover_count += 1
+
+            # Update highest_close if new entry is higher
+            if position.entry_price > position.highest_close:
+                position.highest_close = position.entry_price
+
+            # Calculate rollover cost (actual P&L from closing old position + spread cost)
+            from core.config import get_instrument_config
+            from core.models import InstrumentType
+            inst_config = get_instrument_config(InstrumentType.SILVER_MINI)
+            point_value = inst_config.point_value  # Rs 5 per Rs 1/kg move per lot
+
+            # P&L from closing old futures position
+            # For futures: BUY at entry, SELL at close -> profit if close > entry
+            lots = position.lots
+            close_pnl = (close_result.fill_price - position.original_entry_price) * lots * point_value
+
+            # Cost of opening new position (spread + slippage)
+            spread_cost = abs(open_result.fill_price - close_result.fill_price) * lots * point_value
+
+            result.close_pnl = close_pnl
+            result.spread_cost = spread_cost
+            result.total_rollover_cost = close_pnl + spread_cost
+            position.rollover_pnl += result.total_rollover_cost
+
+            # Update portfolio closed equity with rollover P&L
+            if close_pnl != 0:
+                self.portfolio.closed_equity += close_pnl
+                logger.info(f"Rollover P&L: Close P&L=₹{close_pnl:,.2f}, Spread cost=₹{spread_cost:,.2f}, Total=₹{result.total_rollover_cost:,.2f}")
+
+            # Reconcile position with broker
+            reconciliation = self.reconcile_position_after_rollover(position, result)
+            if reconciliation['status'] != 'success':
+                logger.warning(f"Rollover reconciliation issues: {reconciliation.get('mismatches', [])}")
+
+            result.success = True
+            result.end_time = datetime.now()
+            result.duration_seconds = (result.end_time - result.start_time).total_seconds()
+
+            return result
+
+        except Exception as e:
+            result.error = str(e)
+            result.end_time = datetime.now()
+            position.rollover_status = RolloverStatus.FAILED.value
+            return result
+
     def _execute_order_with_retry(
         self,
         symbol: str,
@@ -756,8 +1072,9 @@ class RolloverExecutor:
                 else:
                     new_limit = min(mid_price, round(ltp * (1 - buffer_pct), 2))
 
-                # Determine exchange from symbol (MCX for Gold, NFO for others)
-                exchange = "MCX" if "GOLD" in symbol.upper() else "NFO"
+                # Determine exchange from symbol (MCX for Gold/Copper/Silver, NFO for others)
+                symbol_upper = symbol.upper()
+                exchange = "MCX" if ("GOLD" in symbol_upper or "COPPER" in symbol_upper or "SILVER" in symbol_upper) else "NFO"
 
                 # Modify order with full params required by OpenAlgo
                 modify_response = self.openalgo.modify_order(
@@ -882,13 +1199,18 @@ class RolloverExecutor:
                 if not new_ce_open:
                     reconciliation['mismatches'].append(f"New CE {position.ce_symbol} not found in broker")
 
-            elif position.instrument == "GOLD_MINI":
+            elif position.instrument in ("GOLD_MINI", "COPPER", "SILVER_MINI"):
                 # Check that old futures is closed
                 # Reconstruct old symbol from original expiry
                 old_futures_symbol = None
                 if position.original_expiry:
                     try:
-                        old_futures_symbol = format_gold_mini_futures_symbol(position.original_expiry, self.broker)
+                        if position.instrument == "GOLD_MINI":
+                            old_futures_symbol = format_gold_mini_futures_symbol(position.original_expiry, self.broker)
+                        elif position.instrument == "COPPER":
+                            old_futures_symbol = format_copper_futures_symbol(position.original_expiry, self.broker)
+                        else:  # SILVER_MINI
+                            old_futures_symbol = format_silver_mini_futures_symbol(position.original_expiry, self.broker)
                     except Exception as e:
                         logger.debug(f"Could not reconstruct old futures symbol: {e}")
                         pass
