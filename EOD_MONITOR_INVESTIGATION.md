@@ -109,3 +109,54 @@ Triggered: Fri 26 Dec 2025 23:41:xx
 ...
 Triggered: Fri 26 Dec 2025 23:54:xx
 ```
+
+---
+
+## STATUS: UNRESOLVED (2025-12-27)
+
+### What We Verified
+1. ✅ TradingView UI "On every tick" is ENABLED (screenshot confirmed)
+2. ✅ Alert configured with "Order fills and alert() function" trigger
+3. ✅ `enable_eod_monitoring` input is TRUE
+4. ✅ timenow returns IST correctly (verified in prior session)
+5. ✅ Alert fires at bar close (23:55:02) - proves alert mechanism works
+
+### The Problem
+- EOD_MONITOR only fires ONCE at bar close (23:55)
+- Does NOT fire continuously during 23:40-23:55 window
+- Python needs continuous signals to execute at T-30 seconds
+
+### Confirmed Root Cause
+```pine
+// Line 85 in SilverMini_TF_V8.0.pine
+calc_on_every_tick=false,  // <-- THIS PREVENTS REAL-TIME ALERTS
+```
+
+The TradingView UI "On every tick" setting only affects chart display.
+For ALERTS, TradingView respects the script's `calc_on_every_tick` setting.
+
+### Fix Required (NOT YET APPLIED)
+Change in ALL v8.0 Pine scripts:
+```pine
+calc_on_every_tick=true,
+```
+
+Files to modify:
+- `SilverMini_TF_V8.0.pine` (line 85)
+- `GoldMini_TF_V8.0.pine` (line 85)
+- `BankNifty_TF_V8.0.pine` (line 83)
+- `Copper_TF_V8.0.pine` (line 33)
+
+### Why This is Safe
+Entry/Pyramid/Exit logic already has `barstate.isconfirmed` guards:
+- Line 381: `if long_entry and strategy.position_size == 0 and barstate.isconfirmed`
+- Line 496: `if pyramid_trigger and barstate.isconfirmed`
+- All exit blocks have `barstate.isconfirmed`
+
+Only EOD_MONITOR (line 1155) has no guard - it SHOULD fire on every tick.
+
+### Next Session Action
+1. Apply `calc_on_every_tick=true` fix to all v8.0 scripts
+2. Update script in TradingView
+3. Test during next trading session (verify alerts fire during 23:40-23:55)
+4. Confirm Python receives continuous EOD_MONITOR signals
