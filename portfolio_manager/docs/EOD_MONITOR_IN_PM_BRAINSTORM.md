@@ -366,5 +366,402 @@ From Pine Script analysis:
 
 ---
 
+## Option E: Cloud Signal Generator (RECOMMENDED)
+
+**Status:** SELECTED - User has paid KiteConnect subscription
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CLOUD (AWS/GCP/DigitalOcean)                         │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    Signal Generator Service                            │  │
+│  │                                                                        │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────┐  │  │
+│  │  │ KiteConnect  │  │  Indicator   │  │  Condition   │  │  Webhook  │  │  │
+│  │  │  Data Feed   │─▶│  Calculator  │─▶│  Evaluator   │─▶│  Sender   │──┼──┼─┐
+│  │  │              │  │              │  │              │  │           │  │  │ │
+│  │  │ - Historical │  │ - RSI        │  │ - 7 conds    │  │ - JSON    │  │  │ │
+│  │  │ - WebSocket  │  │ - EMA        │  │ - Entry/Exit │  │ - Retry   │  │  │ │
+│  │  │ - 75m/1h TF  │  │ - SuperTrend │  │ - Pyramid    │  │ - Logging │  │  │ │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └───────────┘  │  │ │
+│  └───────────────────────────────────────────────────────────────────────┘  │ │
+└─────────────────────────────────────────────────────────────────────────────┘ │
+                                                                                │
+     ┌──────────────────────────────────────────────────────────────────────────┘
+     │  webhook (same format as TradingView)
+     ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           LOCAL (Your Machine)                               │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                      Portfolio Manager (Existing)                      │  │
+│  │                                                                        │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────┐  │  │
+│  │  │   Webhook    │  │  Position    │  │    Order     │  │  OpenAlgo │  │  │
+│  │  │   Handler    │─▶│    Sizer     │─▶│   Executor   │─▶│   Client  │  │  │
+│  │  │  (existing)  │  │  (existing)  │  │  (existing)  │  │ (existing)│  │  │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └───────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Architecture?
+
+1. **Zero changes to PM** - Uses existing webhook format
+2. **Cloud reliability** - 99.9% uptime vs local machine
+3. **Redundancy** - Can run alongside TradingView
+4. **Single source of truth** - Indicators calculated once
+5. **Easier debugging** - Cloud logs, monitoring, alerts
+
+### Signal Generator Service Components
+
+```
+signal_generator/
+├── main.py                  # FastAPI app, health checks
+├── config.py                # Instrument configs, thresholds
+├── core/
+│   ├── kite_client.py       # KiteConnect wrapper
+│   ├── data_manager.py      # Historical + real-time OHLC
+│   ├── indicators.py        # RSI, EMA, SuperTrend, etc.
+│   ├── condition_checker.py # 7-condition evaluator
+│   └── webhook_sender.py    # HTTP POST to PM
+├── strategies/
+│   ├── bank_nifty.py        # BN-specific params
+│   └── gold_mini.py         # Gold-specific params
+└── tests/
+    ├── test_indicators.py   # Parity tests vs Pine
+    └── test_conditions.py   # Condition logic tests
+```
+
+### Data Source Options: KiteConnect vs Dhan
+
+**User has both KiteConnect and Dhan subscriptions!**
+
+| Feature | KiteConnect | Dhan |
+|---------|-------------|------|
+| **Historical Data** | ✅ chart_data API | ✅ historical API |
+| **WebSocket** | ✅ KiteTicker | ✅ DhanFeed |
+| **75-min candles** | ❌ (need to aggregate) | ❌ (need to aggregate) |
+| **60-min candles** | ✅ Native | ✅ Native |
+| **Rate Limits** | 3 req/sec historical | 5 req/sec historical |
+| **Python SDK** | `kiteconnect` | `dhanhq` |
+| **MCX Support** | ✅ | ✅ |
+| **Daily Login** | Required | Required |
+| **Documentation** | Excellent | Good |
+
+**Recommendation:** Use **Dhan** for data (slightly higher rate limits, modern API) or use both for redundancy.
+
+### Dhan Integration
+
+```python
+from dhanhq import dhanhq
+
+class DhanDataManager:
+    """Manages historical and real-time data from Dhan"""
+
+    def __init__(self, client_id: str, access_token: str):
+        self.dhan = dhanhq(client_id, access_token)
+
+    def get_historical_data(self, symbol: str, exchange: str,
+                            from_date: str, to_date: str, interval: str = "60"):
+        """
+        Fetch historical OHLC data
+
+        Args:
+            symbol: Security ID (e.g., "25" for Bank Nifty FUT)
+            exchange: "NSE_FNO" or "MCX"
+            from_date: "2025-01-01" format
+            to_date: "2025-12-27" format
+            interval: "1", "5", "15", "25", "60" (minutes)
+        """
+        data = self.dhan.historical_minute_charts(
+            security_id=symbol,
+            exchange_segment=exchange,
+            instrument_type="FUT",
+            from_date=from_date,
+            to_date=to_date
+        )
+        return pd.DataFrame(data['data'])
+
+    def subscribe_realtime(self, instruments: list, callback):
+        """Subscribe to real-time data via DhanFeed WebSocket"""
+        # DhanFeed for real-time streaming
+        from dhanhq import marketfeed
+        feed = marketfeed.DhanFeed(
+            client_id=self.client_id,
+            access_token=self.access_token,
+            instruments=instruments,
+            on_message=callback
+        )
+        feed.connect()
+```
+
+### KiteConnect Integration
+
+```python
+from kiteconnect import KiteConnect, KiteTicker
+
+class KiteDataManager:
+    """Manages historical and real-time data from KiteConnect"""
+
+    def __init__(self, api_key: str, access_token: str):
+        self.kite = KiteConnect(api_key=api_key)
+        self.kite.set_access_token(access_token)
+        self.ticker = KiteTicker(api_key, access_token)
+
+    def get_historical_data(self, instrument: str, timeframe: str, days: int = 30):
+        """
+        Fetch historical OHLC data
+
+        Args:
+            instrument: "BANKNIFTY" or "GOLDM"
+            timeframe: "75minute" (BN) or "60minute" (MCX)
+            days: Number of days of history (need ~15 for 250 bars of 75min)
+        """
+        # KiteConnect historical data API
+        # Returns: [{'date': ..., 'open': ..., 'high': ..., 'low': ..., 'close': ..., 'volume': ...}]
+        instrument_token = self.get_instrument_token(instrument)
+        from_date = datetime.now() - timedelta(days=days)
+        to_date = datetime.now()
+
+        data = self.kite.historical_data(
+            instrument_token=instrument_token,
+            from_date=from_date,
+            to_date=to_date,
+            interval=timeframe
+        )
+        return pd.DataFrame(data)
+
+    def subscribe_realtime(self, instruments: list, callback):
+        """Subscribe to real-time ticks via WebSocket"""
+        tokens = [self.get_instrument_token(i) for i in instruments]
+        self.ticker.on_ticks = callback
+        self.ticker.subscribe(tokens)
+        self.ticker.set_mode(self.ticker.MODE_FULL, tokens)
+        self.ticker.connect(threaded=True)
+```
+
+### Webhook Format (Compatible with Existing PM)
+
+```json
+{
+  "type": "EOD_MONITOR",
+  "instrument": "BANK_NIFTY",
+  "source": "kite_signal_generator",
+  "timestamp": "2025-12-27T15:28:00+05:30",
+  "price": 52150.50,
+  "conditions": {
+    "rsi_condition": true,
+    "ema_condition": true,
+    "dc_condition": true,
+    "adx_condition": true,
+    "er_condition": true,
+    "st_condition": true,
+    "not_doji": true
+  },
+  "indicators": {
+    "rsi": 72.5,
+    "ema": 51800.0,
+    "dc_upper": 52000.0,
+    "adx": 22.3,
+    "er": 0.85,
+    "supertrend": 51500.0,
+    "atr": 350.0,
+    "roc": 1.2
+  },
+  "position_status": {
+    "in_position": true,
+    "pyramid_count": 2
+  }
+}
+```
+
+### Cloud Deployment Options
+
+| Platform | Cost/Month | Pros | Cons |
+|----------|------------|------|------|
+| **AWS EC2 t3.micro** | ~₹800 | Free tier eligible, reliable | Complex setup |
+| **DigitalOcean Droplet** | ~₹400 | Simple, good docs | Less features |
+| **Google Cloud e2-micro** | Free | Always free tier | Limited to 1 instance |
+| **Railway.app** | ~₹400 | Easy deploy, auto-SSL | Less control |
+| **Render.com** | Free (750h) | GitHub integration | Sleep on inactivity |
+
+**Recommendation:** Start with DigitalOcean or Railway for simplicity.
+
+### Authentication Flow
+
+```
+Daily Flow:
+1. Morning: Login to Zerodha Kite (generates access_token)
+2. Access token valid for 1 day
+3. Signal generator uses token for data access
+4. No execution happens in cloud - just data + signals
+
+Options for token management:
+A) Manual: Copy token to cloud config daily (simple)
+B) Semi-auto: Use Zerodha's login URL, paste token via API
+C) Full-auto: Selenium/Playwright for auto-login (complex, fragile)
+```
+
+### Redundancy: Run Both TradingView + Kite
+
+```
+┌──────────────────┐     ┌──────────────────┐
+│    TradingView   │     │  Kite Signal Gen │
+│  (Primary now)   │     │    (Cloud)       │
+└────────┬─────────┘     └────────┬─────────┘
+         │                        │
+         │  webhook               │  webhook
+         ▼                        ▼
+     ┌───────────────────────────────────────┐
+     │         Portfolio Manager              │
+     │                                        │
+     │  Signal Deduplication (existing):      │
+     │  - Memory LRU cache                    │
+     │  - Redis distributed lock              │
+     │  - DB fingerprint unique constraint    │
+     │                                        │
+     │  First signal wins, duplicates ignored │
+     └───────────────────────────────────────┘
+```
+
+**Benefit:** If TradingView fails, Kite signal generator provides backup.
+
+### Implementation Plan
+
+#### Phase 1: Core Signal Generator (3-4 days)
+- [ ] KiteConnect client wrapper
+- [ ] Historical data fetcher
+- [ ] OHLC candle aggregation (build 75m/60m from ticks)
+- [ ] pandas-ta indicator calculations
+- [ ] Unit tests for indicator parity
+
+#### Phase 2: Condition Evaluation (2 days)
+- [ ] 7-condition checker matching Pine Script
+- [ ] Entry/Exit/Pyramid signal generation
+- [ ] EOD window detection
+
+#### Phase 3: Webhook & Deployment (2-3 days)
+- [ ] Webhook sender with retry logic
+- [ ] FastAPI health endpoints
+- [ ] Docker container
+- [ ] Cloud deployment (DigitalOcean/Railway)
+- [ ] Monitoring & alerts
+
+#### Phase 4: Testing & Go-Live (2-3 days)
+- [ ] Paper trading mode (log signals, don't send)
+- [ ] Parallel run with TradingView
+- [ ] Compare signals for discrepancies
+- [ ] Gradual cutover
+
+**Total: 9-12 days**
+
+### Key Technical Challenges
+
+1. **75-minute timeframe for Bank Nifty**
+   - KiteConnect doesn't support 75-min directly
+   - Solution: Fetch 15-min data, aggregate to 75-min
+   - Must align with market hours (9:15 AM - 3:30 PM)
+
+2. **MCX session handling**
+   - MCX has day + evening sessions
+   - Summer/Winter timing changes
+   - Must handle session breaks correctly
+
+3. **SuperTrend state persistence**
+   - SuperTrend is stateful (direction persists)
+   - Need Redis/file cache to survive restarts
+   - Or recalculate from sufficient history
+
+4. **KiteConnect rate limits**
+   - Historical API: 3 requests/second
+   - Real-time: Unlimited via WebSocket
+   - Strategy: Fetch history once, then use WebSocket
+
+### Dual-Source Architecture (Maximum Reliability)
+
+Since you have both KiteConnect and Dhan, we can implement failover:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                Signal Generator Service                     │
+│                                                             │
+│  ┌─────────────┐     ┌─────────────┐                       │
+│  │    Dhan     │     │ KiteConnect │                       │
+│  │  (Primary)  │     │  (Backup)   │                       │
+│  └──────┬──────┘     └──────┬──────┘                       │
+│         │                   │                              │
+│         ▼                   ▼                              │
+│  ┌──────────────────────────────────────────────────┐     │
+│  │           Data Manager (Failover Logic)          │     │
+│  │                                                  │     │
+│  │  1. Try Dhan first (higher rate limits)          │     │
+│  │  2. If Dhan fails → fallback to KiteConnect      │     │
+│  │  3. Cross-validate on startup (both sources)     │     │
+│  │  4. Alert if sources diverge > 0.1%              │     │
+│  └──────────────────────────────────────────────────┘     │
+│                           │                                │
+│                           ▼                                │
+│               ┌─────────────────────┐                      │
+│               │ Indicator Calculator │                      │
+│               └─────────────────────┘                      │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- Zero downtime if one broker API is down
+- Cross-validation catches data errors
+- Can switch primary based on performance
+
+### Cost Analysis
+
+| Item | Monthly Cost | Notes |
+|------|-------------|-------|
+| KiteConnect API | ₹2000 | Already paid |
+| Dhan API | ₹0-500 | Check your plan |
+| Cloud hosting | ₹400-800 | DigitalOcean/Railway |
+| **Total** | ₹2400-3300 | |
+
+**ROI:** For ₹50L capital, this is ~0.06% - trivial cost for reliability.
+
+### Why Cloud + Webhook is Better Than Embedded
+
+| Aspect | Cloud Signal Gen + Webhook | Embedded in PM |
+|--------|---------------------------|----------------|
+| **PM Changes** | Zero | Significant |
+| **Deployment** | Independent | Coupled |
+| **Testing** | Isolated | Complex |
+| **Failure isolation** | Separate | Cascading |
+| **Scaling** | Easy (multiple instances) | Hard |
+| **Monitoring** | Cloud tools | Custom |
+
+**Verdict:** Cloud with webhook is the cleaner architecture.
+
+---
+
+## Updated Recommendation
+
+### Immediate (This Week)
+1. ~~Fix Pine Script `calc_on_every_tick=true`~~ (still useful as backup)
+2. **Start building Cloud Signal Generator** (Option E)
+
+### Week 1-2
+- Complete Phase 1 + 2 (Core + Conditions)
+- Deploy to cloud in paper mode
+
+### Week 3
+- Parallel run with TradingView
+- Validate signal parity
+- Go live with redundant setup
+
+### Long Term
+- Phase out TradingView dependency
+- Keep TradingView for charting only
+- All signals from Kite Signal Generator
+
+---
+
 *Document created: 2025-12-27*
-*Next review: After testing Pine Script fix*
+*Updated: 2025-12-27 - Added Cloud Signal Generator architecture (Option E)*
+*Next review: After Phase 1 implementation*
