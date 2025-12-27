@@ -126,37 +126,27 @@ Triggered: Fri 26 Dec 2025 23:54:xx
 - Does NOT fire continuously during 23:40-23:55 window
 - Python needs continuous signals to execute at T-30 seconds
 
-### Confirmed Root Cause
+### Hypothesis (UNCONFIRMED)
+One theory was that `calc_on_every_tick=false` in Pine Script prevents real-time alerts.
+However, this is NOT confirmed as the fix - further investigation needed.
+
+### Current Pine Script Settings
 ```pine
 // Line 85 in SilverMini_TF_V8.0.pine
-calc_on_every_tick=false,  // <-- THIS PREVENTS REAL-TIME ALERTS
+calc_on_every_tick=false,
 ```
 
-The TradingView UI "On every tick" setting only affects chart display.
-For ALERTS, TradingView respects the script's `calc_on_every_tick` setting.
+TradingView UI has "On every tick" ENABLED, which should override this for chart display.
+The interaction between UI setting and script setting for ALERTS is unclear.
 
-### Fix Required (NOT YET APPLIED)
-Change in ALL v8.0 Pine scripts:
-```pine
-calc_on_every_tick=true,
-```
-
-Files to modify:
-- `SilverMini_TF_V8.0.pine` (line 85)
-- `GoldMini_TF_V8.0.pine` (line 85)
-- `BankNifty_TF_V8.0.pine` (line 83)
-- `Copper_TF_V8.0.pine` (line 33)
-
-### Why This is Safe
-Entry/Pyramid/Exit logic already has `barstate.isconfirmed` guards:
-- Line 381: `if long_entry and strategy.position_size == 0 and barstate.isconfirmed`
-- Line 496: `if pyramid_trigger and barstate.isconfirmed`
-- All exit blocks have `barstate.isconfirmed`
-
-Only EOD_MONITOR (line 1155) has no guard - it SHOULD fire on every tick.
+### Open Questions
+1. Does TradingView UI "On every tick" affect alert firing, or only chart display?
+2. Is there something else preventing EOD_MONITOR from firing during the window?
+3. Is the `is_eod_alert_window` condition evaluating correctly during 23:40-23:54?
+4. Could there be a TradingView server-side limitation on alert frequency?
 
 ### Next Session Action
-1. Apply `calc_on_every_tick=true` fix to all v8.0 scripts
-2. Update script in TradingView
-3. Test during next trading session (verify alerts fire during 23:40-23:55)
-4. Confirm Python receives continuous EOD_MONITOR signals
+1. Further investigate why EOD_MONITOR doesn't fire during 23:40-23:54
+2. Consider adding debug output to info panel showing `is_eod_alert_window` status
+3. Check TradingView documentation on alert behavior with strategies
+4. Test with a simple indicator (not strategy) to isolate the issue
