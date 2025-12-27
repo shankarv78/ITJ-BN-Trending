@@ -333,7 +333,7 @@ def supertrend(high, low, close, period=10, multiplier=1.5):
 3. Extensive testing against Pine Script values
 
 ### Long Term (Full Independence)
-1. **Option A with KiteConnect** - Most reliable, worth the cost for ₹50L capital
+1. **Option A with KiteConnect** - Most reliable, worth the cost for ₹1 crore capital
 2. Remove TradingView dependency entirely
 3. Keep TradingView only for charting/visualization
 
@@ -344,7 +344,7 @@ def supertrend(high, low, close, period=10, multiplier=1.5):
 1. **Is the Pine Script fix sufficient?** Test `calc_on_every_tick=true` first
 2. **How often does TradingView webhook fail?** Track reliability metrics
 3. **Is Shoonya data quality acceptable?** Compare against TradingView
-4. **Can we tolerate ₹2000/month for KiteConnect?** Small cost vs ₹50L capital
+4. **Can we tolerate ₹2000/month for KiteConnect?** Small cost vs ₹1 crore capital
 
 ---
 
@@ -723,7 +723,7 @@ Since you have both KiteConnect and Dhan, we can implement failover:
 | Cloud hosting | ₹400-800 | DigitalOcean/Railway |
 | **Total** | ₹2400-3300 | |
 
-**ROI:** For ₹50L capital, this is ~0.06% - trivial cost for reliability.
+**ROI:** For ₹1 crore capital, this is ~0.03% - trivial cost for reliability.
 
 ### Why Cloud + Webhook is Better Than Embedded
 
@@ -767,7 +767,7 @@ Since you have both KiteConnect and Dhan, we can implement failover:
 ## Mission-Critical EOD System Requirements
 
 **Added: 2025-12-27**
-**Priority: HIGHEST - ₹50L capital at risk**
+**Priority: HIGHEST - ₹1 crore capital at risk**
 
 ### Core Requirements
 
@@ -2069,7 +2069,7 @@ Timeline:
 
 ### Verdict
 
-**For mission-critical EOD with ₹50L capital:**
+**For mission-critical EOD with ₹1 crore capital:**
 
 **Option F (Direct Execution)** is recommended because:
 1. Eliminates PM as single point of failure during critical window

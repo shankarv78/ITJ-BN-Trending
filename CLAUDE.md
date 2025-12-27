@@ -41,7 +41,7 @@ A multi-component trading system for Bank Nifty and Gold Mini trend following:
 2. **Portfolio Manager** (`portfolio_manager/`) - Python live trading engine with Tom Basso position sizing
 3. **Frontend** (`frontend/`) - React/TypeScript dashboard (local dev, formerly Lovable AI)
 
-**Capital at Risk:** ₹50L (~$60K USD). This is a production trading system.
+**Capital at Risk:** ₹1 crore (~$120K USD). This is a production trading system.
 
 ---
 
@@ -329,7 +329,7 @@ ALL conditions must be TRUE simultaneously:
 ### Critical TradingView Settings
 
 **Properties Tab:**
-- Initial capital: 5000000 (₹50L)
+- Initial capital: 10000000 (₹1 crore)
 - Pyramiding: 5 orders (6 total positions)
 - Commission: 0.05%
 - "On every tick": UNCHECKED
