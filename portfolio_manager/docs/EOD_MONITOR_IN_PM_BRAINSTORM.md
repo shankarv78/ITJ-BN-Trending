@@ -1565,7 +1565,531 @@ class PreEODValidator:
 
 ---
 
+## Option F: Direct Broker Execution from Signal Generator
+
+**Added: 2025-12-27**
+**Status:** UNDER CONSIDERATION - Alternative to webhook-based execution
+
+### The Question
+
+Instead of Signal Generator → Webhook → PM → Broker, why not:
+**Signal Generator → Broker (direct) → Sync to PM (later)**
+
+### Architecture Comparison
+
+```
+OPTION E: Webhook-Based (Current Plan)
+┌─────────────────┐     webhook      ┌─────────────────┐     order      ┌──────────┐
+│  Signal Gen     │ ───────────────▶ │  Portfolio Mgr  │ ─────────────▶ │  Broker  │
+│  (Cloud)        │     ~100ms       │  (Local)        │    ~2-3s       │          │
+└─────────────────┘                  └─────────────────┘                └──────────┘
+     Total latency: ~2-3 seconds
+
+
+OPTION F: Direct Execution (New Proposal)
+┌─────────────────┐     order (direct)      ┌──────────┐
+│  Signal Gen     │ ──────────────────────▶ │  Broker  │
+│  (Cloud)        │         ~2s             │          │
+└────────┬────────┘                         └──────────┘
+         │
+         │ sync positions (async, after execution)
+         ▼
+┌─────────────────┐
+│  Portfolio Mgr  │
+│  (Local)        │
+└─────────────────┘
+     Total latency: ~2 seconds (saves ~100ms webhook + eliminates PM as SPOF)
+```
+
+### Why This Makes Sense for EOD
+
+| Factor | Webhook to PM | Direct Execution |
+|--------|---------------|------------------|
+| **Latency** | +100-500ms extra | Direct to broker |
+| **Points of failure** | 2 (webhook + PM) | 1 (Signal Gen only) |
+| **PM dependency** | Critical during EOD | Not needed during EOD |
+| **Position sizing** | PM calculates | Signal Gen calculates |
+| **State sync** | Real-time | Post-execution |
+| **Complexity** | Lower | Higher (dual state) |
+
+### Detailed Architecture: Direct Execution
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    CLOUD - EOD Signal Generator + Executor                       │
+│                                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐ │
+│  │                         PARALLEL INSTRUMENT ENGINES                         │ │
+│  │                                                                             │ │
+│  │  ┌─────────────────────┐  ┌─────────────────────┐                          │ │
+│  │  │     Bank Nifty      │  │     Gold Mini       │  ... (Copper, Silver)   │ │
+│  │  │                     │  │                     │                          │ │
+│  │  │  ┌───────────────┐  │  │  ┌───────────────┐  │                          │ │
+│  │  │  │ Data Manager  │  │  │  │ Data Manager  │  │                          │ │
+│  │  │  │ (Dhan/Kite)   │  │  │  │ (Dhan/Kite)   │  │                          │ │
+│  │  │  └───────┬───────┘  │  │  └───────┬───────┘  │                          │ │
+│  │  │          │          │  │          │          │                          │ │
+│  │  │  ┌───────▼───────┐  │  │  ┌───────▼───────┐  │                          │ │
+│  │  │  │  Indicators   │  │  │  │  Indicators   │  │                          │ │
+│  │  │  │  (pandas-ta)  │  │  │  │  (pandas-ta)  │  │                          │ │
+│  │  │  └───────┬───────┘  │  │  └───────┬───────┘  │                          │ │
+│  │  │          │          │  │          │          │                          │ │
+│  │  │  ┌───────▼───────┐  │  │  ┌───────▼───────┐  │                          │ │
+│  │  │  │  Condition    │  │  │  │  Condition    │  │                          │ │
+│  │  │  │  Evaluator    │  │  │  │  Evaluator    │  │                          │ │
+│  │  │  └───────┬───────┘  │  │  └───────┬───────┘  │                          │ │
+│  │  │          │          │  │          │          │                          │ │
+│  │  │  ┌───────▼───────┐  │  │  ┌───────▼───────┐  │                          │ │
+│  │  │  │ Position Sizer│  │  │  │ Position Sizer│  │  ◀── Tom Basso logic    │ │
+│  │  │  │ (Tom Basso)   │  │  │  │ (Tom Basso)   │  │      duplicated here    │ │
+│  │  │  └───────┬───────┘  │  │  └───────┬───────┘  │                          │ │
+│  │  │          │          │  │          │          │                          │ │
+│  │  │  ┌───────▼───────┐  │  │  ┌───────▼───────┐  │                          │ │
+│  │  │  │ Order Executor│  │  │  │ Order Executor│  │  ◀── Direct to broker   │ │
+│  │  │  │ (Kite/Dhan)   │  │  │  │ (Kite/Dhan)   │  │                          │ │
+│  │  │  └───────────────┘  │  │  └───────────────┘  │                          │ │
+│  │  └─────────────────────┘  └─────────────────────┘                          │ │
+│  └────────────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                             │
+│                                    │ After execution, sync to PM                 │
+│                                    ▼                                             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     │  POST /api/position_update (async)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                  LOCAL - Portfolio Manager (State Keeper)                        │
+│                                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐ │
+│  │                    POSITION STATE RECEIVER                                  │ │
+│  │                                                                             │ │
+│  │  • Receives position updates from Signal Generator                         │ │
+│  │  • Updates local state (DB, Redis)                                         │ │
+│  │  • Handles bar-close signals (non-EOD) as before                          │ │
+│  │  • Provides portfolio state to Signal Gen on startup                       │ │
+│  │  • Serves frontend dashboard                                               │ │
+│  └────────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Details
+
+#### 1. Signal Generator Needs Position Sizing Logic
+
+```python
+class CloudPositionSizer:
+    """
+    Tom Basso position sizing - duplicated from PM for EOD execution.
+    Must stay in sync with PM's TomBassoPositionSizer.
+    """
+
+    def __init__(self, config: PortfolioConfig):
+        self.config = config
+
+    def calculate_lots(self, signal: dict, portfolio_state: dict) -> int:
+        """
+        Calculate position size using Tom Basso methodology.
+
+        Args:
+            signal: Contains price, atr, er, supertrend
+            portfolio_state: Synced from PM - equity, positions, margin
+
+        Returns:
+            Number of lots to trade
+        """
+        equity = portfolio_state['equity_high']
+        risk_pct = self.config.risk_percent
+        atr = signal['indicators']['atr']
+        er = signal['indicators']['er']
+
+        # Risk-based lots
+        stop_distance = atr * self.config.stop_multiplier
+        risk_lots = (equity * risk_pct / 100) / (stop_distance * self.config.point_value)
+
+        # Volatility-based lots
+        vol_lots = (equity * self.config.vol_percent / 100) / (atr * self.config.point_value)
+
+        # Margin-based lots
+        available_margin = portfolio_state['available_margin']
+        margin_lots = available_margin / self.config.margin_per_lot
+
+        # Take minimum (most conservative)
+        lots = min(risk_lots, vol_lots, margin_lots)
+
+        # Apply ER scaling
+        lots = lots * er
+
+        # Round down to whole lots
+        return max(0, int(lots))
+```
+
+#### 2. Direct Broker Execution
+
+```python
+class CloudOrderExecutor:
+    """
+    Executes orders directly from cloud using Kite/Dhan APIs.
+    """
+
+    def __init__(self, kite: KiteConnect, dhan: dhanhq):
+        self.kite = kite
+        self.dhan = dhan
+        self.primary = 'kite'  # or 'dhan'
+
+    async def execute_order(self, instrument: str, action: str,
+                           lots: int, order_type: str = 'LIMIT',
+                           price: float = None) -> OrderResult:
+        """
+        Execute order with failover.
+
+        Order flow:
+        1. Try primary broker (Kite)
+        2. If fails, try backup (Dhan)
+        3. Track until filled or timeout
+        """
+        # Map instrument to broker symbol
+        symbol = self._get_symbol(instrument)
+        exchange = self._get_exchange(instrument)
+        quantity = lots * self._get_lot_size(instrument)
+
+        # Try primary broker
+        try:
+            if self.primary == 'kite':
+                order_id = self.kite.place_order(
+                    variety=self.kite.VARIETY_REGULAR,
+                    exchange=exchange,
+                    tradingsymbol=symbol,
+                    transaction_type=action,
+                    quantity=quantity,
+                    product=self.kite.PRODUCT_NRML,
+                    order_type=order_type,
+                    price=price
+                )
+                return await self._track_order_kite(order_id)
+        except Exception as e:
+            logger.error(f"Kite order failed: {e}, trying Dhan")
+
+        # Failover to backup
+        try:
+            order_id = self.dhan.place_order(
+                security_id=self._get_dhan_security_id(instrument),
+                exchange_segment=exchange,
+                transaction_type=action,
+                quantity=quantity,
+                order_type=order_type,
+                product_type='NRML',
+                price=price
+            )
+            return await self._track_order_dhan(order_id)
+        except Exception as e:
+            logger.critical(f"Both brokers failed for {instrument}: {e}")
+            raise
+```
+
+#### 3. Post-Execution Sync to PM
+
+```python
+class PMSyncService:
+    """
+    Syncs execution results back to Portfolio Manager.
+    """
+
+    def __init__(self, pm_url: str):
+        self.pm_url = pm_url
+
+    async def sync_execution(self, result: ExecutionResult):
+        """
+        Send execution result to PM for state update.
+        Called AFTER order is filled - not time critical.
+        """
+        payload = {
+            'type': 'EOD_EXECUTION_SYNC',
+            'timestamp': datetime.now().isoformat(),
+            'source': 'cloud_signal_generator',
+            'execution': {
+                'instrument': result.instrument,
+                'signal_type': result.signal_type,  # ENTRY, PYRAMID, EXIT
+                'order_id': result.order_id,
+                'fill_price': result.fill_price,
+                'quantity': result.quantity,
+                'lots': result.lots,
+                'broker': result.broker,  # 'kite' or 'dhan'
+                'execution_time_ms': result.execution_time_ms,
+                'indicators_at_execution': result.indicators
+            }
+        }
+
+        # Retry logic - this is async, not time critical
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.pm_url}/api/position_update",
+                        json=payload,
+                        timeout=30.0
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"Synced {result.instrument} execution to PM")
+                        return
+            except Exception as e:
+                logger.warning(f"Sync attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+        # If all retries fail, queue for later
+        await self._queue_for_retry(payload)
+
+
+# New PM endpoint to receive execution sync
+@app.post("/api/position_update")
+async def handle_eod_execution_sync(request: Request):
+    """
+    Receives position updates from Cloud Signal Generator.
+    Updates local state to match actual broker positions.
+    """
+    payload = await request.json()
+
+    if payload.get('type') != 'EOD_EXECUTION_SYNC':
+        return {"status": "error", "message": "Invalid sync type"}
+
+    execution = payload.get('execution', {})
+    instrument = execution['instrument']
+
+    # Update position in database
+    await db_state_manager.update_position_from_execution(
+        instrument=instrument,
+        signal_type=execution['signal_type'],
+        fill_price=execution['fill_price'],
+        quantity=execution['quantity'],
+        lots=execution['lots'],
+        order_id=execution['order_id'],
+        indicators=execution['indicators_at_execution']
+    )
+
+    # Update in-memory state
+    portfolio_state.apply_execution(execution)
+
+    logger.info(f"Applied EOD execution sync for {instrument}")
+    return {"status": "ok"}
+```
+
+### Pros and Cons
+
+#### Pros of Direct Execution
+
+| Benefit | Impact |
+|---------|--------|
+| **Eliminates PM as SPOF** | If PM is down, EOD still executes |
+| **Lower latency** | ~100-500ms saved (no webhook round-trip) |
+| **Cloud reliability** | 99.9% uptime vs local machine |
+| **Simpler EOD flow** | One system handles data → decision → execution |
+| **Parallel execution native** | Already has threads per instrument |
+
+#### Cons of Direct Execution
+
+| Concern | Mitigation |
+|---------|------------|
+| **Duplicated logic** | Share code via Python package |
+| **Position sizing drift** | Automated parity tests |
+| **Dual state management** | PM is source of truth, cloud syncs TO it |
+| **Broker credentials in cloud** | Use secure secrets management (AWS Secrets Manager) |
+| **Double execution risk** | Clear ownership: EOD = cloud, bar-close = PM |
+| **Sync failures** | Queue + retry + reconciliation job |
+
+### Ownership Model: Clear Separation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     EXECUTION OWNERSHIP                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  CLOUD SIGNAL GENERATOR owns:                                   │
+│  ├── EOD window execution (last 5-30 minutes before close)     │
+│  ├── Multi-instrument parallel execution                        │
+│  └── Emergency/time-critical orders                             │
+│                                                                  │
+│  PORTFOLIO MANAGER owns:                                         │
+│  ├── Normal bar-close signals (from TradingView webhooks)       │
+│  ├── Position state (source of truth)                           │
+│  ├── P&L tracking and reporting                                 │
+│  ├── Frontend dashboard                                         │
+│  └── Stop-loss monitoring during market hours                   │
+│                                                                  │
+│  HANDOFF PROTOCOL:                                               │
+│  ├── T-30 min: Cloud takes over (PM stops processing signals)  │
+│  ├── T-0 (close): Cloud syncs all executions to PM             │
+│  └── T+5 min: PM reconciles with broker positions               │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation: EOD Mode Flag
+
+```python
+# In Portfolio Manager
+class EODModeController:
+    """
+    Controls handoff between PM and Cloud Signal Generator.
+    """
+
+    def __init__(self):
+        self.eod_mode_active = False
+        self.eod_owner = 'pm'  # 'pm' or 'cloud'
+
+    async def enter_eod_mode(self, instrument: str):
+        """
+        Called by Cloud Signal Generator at T-30 minutes.
+        PM stops processing signals for this instrument.
+        """
+        self.eod_mode_active = True
+        self.eod_owner = 'cloud'
+        logger.info(f"EOD mode activated for {instrument} - Cloud is owner")
+
+    async def exit_eod_mode(self, instrument: str):
+        """
+        Called by Cloud Signal Generator after market close.
+        PM resumes ownership.
+        """
+        self.eod_mode_active = False
+        self.eod_owner = 'pm'
+        logger.info(f"EOD mode deactivated for {instrument} - PM is owner")
+
+    def should_process_signal(self, signal: dict) -> bool:
+        """
+        Determines if PM should process a signal.
+        Returns False during EOD window (cloud handles it).
+        """
+        if self.eod_mode_active and self.eod_owner == 'cloud':
+            logger.debug(f"Ignoring signal - EOD mode active, cloud is owner")
+            return False
+        return True
+```
+
+### Reconciliation: Safety Net
+
+```python
+class PositionReconciler:
+    """
+    Runs after market close to ensure PM state matches broker.
+    """
+
+    async def reconcile(self):
+        """
+        Compare PM positions with actual broker positions.
+        Alert on any discrepancy.
+        """
+        # Get PM's view
+        pm_positions = await db_state_manager.get_all_positions()
+
+        # Get broker's view
+        broker_positions = await broker_client.get_positions()
+
+        # Compare
+        discrepancies = []
+        for instrument in set(pm_positions.keys()) | set(broker_positions.keys()):
+            pm_qty = pm_positions.get(instrument, {}).get('quantity', 0)
+            broker_qty = broker_positions.get(instrument, {}).get('quantity', 0)
+
+            if pm_qty != broker_qty:
+                discrepancies.append({
+                    'instrument': instrument,
+                    'pm_quantity': pm_qty,
+                    'broker_quantity': broker_qty,
+                    'difference': broker_qty - pm_qty
+                })
+
+        if discrepancies:
+            send_alert(f"POSITION DISCREPANCY DETECTED:\n{json.dumps(discrepancies, indent=2)}")
+            # Option: Auto-correct PM state to match broker
+            for disc in discrepancies:
+                await db_state_manager.force_update_quantity(
+                    disc['instrument'],
+                    disc['broker_quantity']
+                )
+
+        return discrepancies
+```
+
+### Recommendation: Hybrid Approach
+
+**Best of Both Worlds:**
+
+1. **Normal hours (9:15 - T-30):** PM handles signals via webhooks
+2. **EOD window (T-30 to close):** Cloud Signal Generator executes directly
+3. **After close:** Cloud syncs to PM, reconciliation runs
+
+```
+Timeline:
+──────────────────────────────────────────────────────────────────▶
+
+9:15 AM              15:00              15:30         15:35
+│                    │                  │             │
+│◀── PM handles ────▶│◀── Cloud EOD ──▶│◀── Sync ───▶│
+│   bar-close        │   direct exec    │   + recon   │
+│   webhooks         │   to broker      │             │
+```
+
+### Updated Implementation Plan (With Option F)
+
+#### Phase 1: Signal Generator + Direct Execution (5-6 days)
+- [ ] Parallel instrument monitoring (4 threads)
+- [ ] Dhan + Kite data managers with failover
+- [ ] Indicator calculations (pandas-ta)
+- [ ] **Position sizing logic (Tom Basso - ported)**
+- [ ] **Direct order execution via Kite/Dhan APIs**
+- [ ] Position sync service to PM
+
+#### Phase 2: PM Modifications (2-3 days)
+- [ ] EOD mode controller (handoff logic)
+- [ ] `/api/position_update` endpoint for sync
+- [ ] Reconciliation job (post-close)
+- [ ] Dashboard updates for EOD mode status
+
+#### Phase 3: Fail-Safe & Testing (3-4 days)
+- [ ] Multi-source data redundancy
+- [ ] Multi-broker execution failover
+- [ ] Position sizing parity tests
+- [ ] End-to-end dry run
+- [ ] Paper trading week
+
+**Total: 10-13 days**
+
+---
+
+## Final Architecture Decision Matrix
+
+| Criteria | Option E (Webhook) | Option F (Direct) | Recommendation |
+|----------|-------------------|-------------------|----------------|
+| **Latency** | ~2-3s | ~2s | F slightly better |
+| **Reliability** | PM is SPOF | Cloud-only | F better |
+| **Complexity** | Lower | Higher | E simpler |
+| **Code duplication** | None | Position sizing | Manageable |
+| **State sync** | Real-time | Post-execution | E simpler |
+| **Risk of errors** | Lower | Higher (dual state) | E safer |
+| **Scalability** | Good | Better | F more scalable |
+
+### Verdict
+
+**For mission-critical EOD with ₹50L capital:**
+
+**Option F (Direct Execution)** is recommended because:
+1. Eliminates PM as single point of failure during critical window
+2. Lower latency for time-sensitive execution
+3. Cloud reliability (99.9%) vs local machine
+4. Position sizing duplication is manageable with shared package
+
+**But implement incrementally:**
+1. Start with Option E (webhook) - simpler, faster to build
+2. Monitor reliability for 2-4 weeks
+3. If PM/webhook proves problematic, upgrade to Option F
+4. Keep Option E as fallback
+
+---
+
 *Document created: 2025-12-27*
+*Updated: 2025-12-27 - Added Cloud Signal Generator architecture (Option E)*
+*Updated: 2025-12-27 - Added Mission-Critical requirements: parallel monitoring, PM sync, parallel execution, fail-safe mechanisms*
+*Updated: 2025-12-27 - Added Option F: Direct Broker Execution from Signal Generator*
+*Next review: After Phase 1 implementation*
 *Updated: 2025-12-27 - Added Cloud Signal Generator architecture (Option E)*
 *Updated: 2025-12-27 - Added Mission-Critical requirements: parallel monitoring, PM sync, parallel execution, fail-safe mechanisms*
 *Next review: After Phase 1 implementation*
