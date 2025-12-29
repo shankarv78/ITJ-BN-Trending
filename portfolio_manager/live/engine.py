@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 from datetime import datetime
-from core.models import Signal, SignalType, Position, InstrumentType, EODMonitorSignal
+from core.models import Signal, SignalType, Position, InstrumentType, EODMonitorSignal, EODPositionStatus
 from core.portfolio_state import PortfolioStateManager
 from core.eod_monitor import EODMonitor
 from core.eod_executor import EODExecutor, EODExecutionContext, EODExecutionPhase
@@ -1875,20 +1875,30 @@ class LiveTradingEngine:
             db_in_position = len(db_positions) > 0
             db_pyramid_count = len(db_positions) - 1 if db_in_position else 0
 
-            # Log if there's a mismatch (useful for debugging)
-            signal_in_position = state.latest_signal.position_status.in_position
-            signal_pyramid_count = state.latest_signal.position_status.pyramid_count
-            if db_in_position != signal_in_position or db_pyramid_count != signal_pyramid_count:
-                logger.warning(
-                    f"[LIVE-EOD] Position state mismatch for {instrument}: "
-                    f"Signal says in_position={signal_in_position}, pyramid_count={signal_pyramid_count}; "
-                    f"Database says in_position={db_in_position}, pyramid_count={db_pyramid_count}. "
-                    f"Using DATABASE values (PM is the authority)."
+            # Handle Scout mode (no position_status from TradingView)
+            if state.latest_signal.position_status is None:
+                # Create position_status from database (Scout mode)
+                logger.info(
+                    f"[LIVE-EOD] Scout mode: Creating position_status from database for {instrument}"
                 )
-
-            # Override signal's position_status with database truth
-            state.latest_signal.position_status.in_position = db_in_position
-            state.latest_signal.position_status.pyramid_count = db_pyramid_count
+                state.latest_signal.position_status = EODPositionStatus(
+                    in_position=db_in_position,
+                    pyramid_count=db_pyramid_count
+                )
+            else:
+                # V8 compatibility: Log mismatch and override
+                signal_in_position = state.latest_signal.position_status.in_position
+                signal_pyramid_count = state.latest_signal.position_status.pyramid_count
+                if db_in_position != signal_in_position or db_pyramid_count != signal_pyramid_count:
+                    logger.warning(
+                        f"[LIVE-EOD] Position state mismatch for {instrument}: "
+                        f"Signal says in_position={signal_in_position}, pyramid_count={signal_pyramid_count}; "
+                        f"Database says in_position={db_in_position}, pyramid_count={db_pyramid_count}. "
+                        f"Using DATABASE values (PM is the authority)."
+                    )
+                # Override signal's position_status with database truth
+                state.latest_signal.position_status.in_position = db_in_position
+                state.latest_signal.position_status.pyramid_count = db_pyramid_count
 
             logger.info(
                 f"[LIVE-EOD] Database position state for {instrument}: "
@@ -1998,9 +2008,17 @@ class LiveTradingEngine:
             f"in_position={db_in_position}, pyramid_count={db_pyramid_count}"
         )
 
-        # Override signal's position_status with fresh database truth
-        eod_signal.position_status.in_position = db_in_position
-        eod_signal.position_status.pyramid_count = db_pyramid_count
+        # Override signal's position_status with fresh database truth (null-safe)
+        if eod_signal.position_status is None:
+            # Scout mode: create position_status from database
+            eod_signal.position_status = EODPositionStatus(
+                in_position=db_in_position,
+                pyramid_count=db_pyramid_count
+            )
+        else:
+            # V8 mode: override existing
+            eod_signal.position_status.in_position = db_in_position
+            eod_signal.position_status.pyramid_count = db_pyramid_count
         # ============================================================
 
         # Get signal and action type (now uses corrected position state)

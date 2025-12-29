@@ -323,10 +323,11 @@ def validate_eod_json_structure(data: dict) -> Tuple[bool, Optional[str]]:
 
     # Check for required top-level fields
     # NOTE: 'sizing' is NOT required - Python calculates position sizing using real portfolio equity
-    # TradingView sends raw data (conditions, indicators, price, position_status)
+    # NOTE: 'position_status' is OPTIONAL in V9 Scout mode - PM gets state from database
+    # TradingView Scout sends raw data (conditions, indicators, price) - no position awareness
     # Python Portfolio Manager uses Tom Basso methodology with SHARED capital across instruments
     required_fields = ['type', 'instrument', 'timestamp', 'price',
-                       'conditions', 'indicators', 'position_status']
+                       'conditions', 'indicators']  # position_status optional (Scout mode)
     missing = [f for f in required_fields if f not in data]
     if missing:
         return False, f"EOD_MONITOR missing required fields: {', '.join(missing)}"
@@ -359,13 +360,15 @@ def validate_eod_json_structure(data: dict) -> Tuple[bool, Optional[str]]:
     if missing_indicators:
         return False, f"indicators missing fields: {', '.join(missing_indicators)}"
 
-    # Validate position_status dict
-    position_status = data.get('position_status', {})
-    if not isinstance(position_status, dict):
-        return False, "position_status must be a dictionary"
-
-    if 'in_position' not in position_status:
-        return False, "position_status missing 'in_position' field"
+    # Validate position_status dict (OPTIONAL in V9 Scout mode)
+    # Scout indicators don't track positions - PM gets state from database
+    position_status = data.get('position_status')
+    if position_status is not None:
+        if not isinstance(position_status, dict):
+            return False, "position_status must be a dictionary if provided"
+        if 'in_position' not in position_status:
+            return False, "position_status missing 'in_position' field"
+    # If position_status is None/missing, PM will use database state (Scout mode)
 
     # NOTE: 'sizing' is OPTIONAL - if present, validate structure but not required
     # Python calculates position sizing using real portfolio equity (shared across instruments)
