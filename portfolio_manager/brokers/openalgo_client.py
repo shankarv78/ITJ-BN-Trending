@@ -190,6 +190,117 @@ class OpenAlgoClient:
             logger.error(f"Failed to get order status: {e}")
             return None
 
+    def get_orderbook(self) -> List[Dict]:
+        """
+        Get full orderbook (all orders for today)
+
+        Returns:
+            List of order dicts or empty list on failure
+        """
+        url = f"{self.base_url}/api/v1/orderbook"
+        try:
+            payload = {"apikey": self.api_key}
+            response = self.session.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+
+            # Handle both formats: {"data": [...]} and {"data": {"orders": [...]}}
+            data = result.get('data', [])
+            if isinstance(data, dict):
+                orders = data.get('orders', [])
+            else:
+                orders = data if isinstance(data, list) else []
+
+            logger.debug(f"Retrieved {len(orders)} orders from orderbook")
+            return orders if isinstance(orders, list) else []
+        except Exception as e:
+            logger.error(f"Failed to get orderbook: {e}")
+            return []
+
+    def find_recent_filled_order(
+        self,
+        symbol: str,
+        action: str,
+        quantity: int,
+        max_age_seconds: int = 120
+    ) -> Optional[Dict]:
+        """
+        Find a recently filled order matching criteria.
+
+        This is used to detect orders that were placed but the response was lost
+        (e.g., due to HTTP timeout). When order placement times out, the order
+        might have actually been executed at the broker.
+
+        Args:
+            symbol: Trading symbol to match (e.g., SILVERM27FEB26FUT)
+            action: BUY or SELL
+            quantity: Expected quantity
+            max_age_seconds: Only consider orders placed within this window
+
+        Returns:
+            Order dict if found and filled, None otherwise
+        """
+        from datetime import datetime, timedelta
+
+        orders = self.get_orderbook()
+        if not orders:
+            return None
+
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=max_age_seconds)
+
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+
+            # Check symbol and action match
+            order_symbol = order.get('symbol', '')
+            order_action = order.get('action', '').upper()
+            order_qty = int(order.get('quantity', 0) or order.get('filledshares', 0) or 0)
+
+            if order_symbol != symbol or order_action != action.upper():
+                continue
+
+            # Check quantity matches (for partial fills, check filledshares)
+            filled_qty = int(order.get('filledshares', 0) or 0)
+            if order_qty != quantity and filled_qty != quantity:
+                continue
+
+            # Check if order is filled/complete
+            status = (order.get('order_status') or order.get('status') or '').upper()
+            if status not in ['COMPLETE', 'FILLED']:
+                continue
+
+            # Check order timestamp if available
+            timestamp_str = order.get('timestamp') or order.get('order_timestamp') or ''
+            if timestamp_str:
+                order_too_old = False
+                try:
+                    # Parse various timestamp formats
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%d-%m-%Y %H:%M:%S', '%Y-%m-%dT%H:%M:%S']:
+                        try:
+                            order_time = datetime.strptime(timestamp_str[:19], fmt)
+                            if order_time < cutoff:
+                                order_too_old = True
+                            break  # Successfully parsed
+                        except ValueError:
+                            continue  # Try next format
+                except Exception:
+                    pass  # Can't parse timestamp, include order anyway
+
+                if order_too_old:
+                    continue  # Skip this order - it's too old
+
+            # Found a matching filled order
+            logger.info(
+                f"[RECOVERY] Found filled order matching criteria: "
+                f"{order_symbol} {order_action} {filled_qty} lots, "
+                f"order_id={order.get('orderid')}"
+            )
+            return order
+
+        return None
+
     def get_trade_fill_price(self, order_id: str) -> Optional[float]:
         """
         Get actual fill price from tradebook for a completed order.

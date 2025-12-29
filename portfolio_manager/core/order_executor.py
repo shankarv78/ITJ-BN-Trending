@@ -1002,11 +1002,80 @@ class ProgressiveExecutor(OrderExecutor):
                     order_id = None
                 continue
 
-        # All attempts failed - cancel order
-        if order_id:
-            logger.warning(
-                f"[ProgressiveExecutor] All {self.max_attempts} attempts failed, cancelling order"
+        # All attempts failed - but FIRST check if any order actually went through
+        # This handles the case where HTTP timeout occurred but order was executed at broker
+        logger.warning(
+            f"[ProgressiveExecutor] All {self.max_attempts} attempts failed, "
+            f"checking orderbook for orphaned fills..."
+        )
+
+        # Determine the actual symbol we were trying to trade
+        # Uses ExpiryCalendar for dynamic symbol construction (no hardcoded expiries)
+        recovery_symbol = None
+        try:
+            from core.expiry_calendar import ExpiryCalendar
+            from datetime import date
+            expiry_cal = ExpiryCalendar()
+
+            if signal.instrument == "GOLD_MINI":
+                expiry = expiry_cal.get_expiry_after_rollover("GOLD_MINI", date.today())
+                recovery_symbol = f"GOLDM{expiry.strftime('%d%b%y').upper()}FUT"
+            elif signal.instrument == "COPPER":
+                expiry = expiry_cal.get_expiry_after_rollover("COPPER", date.today())
+                recovery_symbol = f"COPPER{expiry.strftime('%d%b%y').upper()}FUT"
+            elif signal.instrument == "SILVER_MINI":
+                expiry = expiry_cal.get_expiry_after_rollover("SILVER_MINI", date.today())
+                recovery_symbol = f"SILVERM{expiry.strftime('%d%b%y').upper()}FUT"
+            # Note: BANK_NIFTY uses synthetic futures (options), not recovered here
+        except Exception as e:
+            logger.error(
+                f"[ProgressiveExecutor] Cannot determine symbol for recovery - "
+                f"ExpiryCalendar error: {e}. Skipping orphan order check."
             )
+
+        if recovery_symbol:
+            # Check if order was actually filled despite our timeout/failures
+            recovered_order = self.openalgo.find_recent_filled_order(
+                symbol=recovery_symbol,
+                action=action,
+                quantity=lots,
+                max_age_seconds=120  # Look for orders placed in last 2 minutes
+            )
+
+            if recovered_order:
+                # Order was actually filled! Recovery successful.
+                recovered_order_id = recovered_order.get('orderid')
+                fill_price = (
+                    recovered_order.get('averageprice') or
+                    recovered_order.get('average_price') or
+                    recovered_order.get('tradedprice') or
+                    recovered_order.get('price') or
+                    limit_price
+                )
+                filled_lots = int(
+                    recovered_order.get('filledshares') or
+                    recovered_order.get('filled_quantity') or
+                    lots
+                )
+
+                logger.warning(
+                    f"[ProgressiveExecutor] ⚠️ RECOVERY: Found orphaned filled order! "
+                    f"Order {recovered_order_id} was filled despite timeout. "
+                    f"{filled_lots} lots @ ₹{float(fill_price):,.2f}"
+                )
+
+                result = ExecutionResult(
+                    status=ExecutionStatus.EXECUTED,
+                    execution_price=float(fill_price),
+                    lots_filled=int(filled_lots),
+                    order_id=str(recovered_order_id),
+                    attempts=self.max_attempts
+                )
+                result.calculate_slippage(signal_price)
+                return result
+
+        # Cancel any pending order we might have
+        if order_id:
             try:
                 self.cancel_order(order_id)
             except Exception as e:

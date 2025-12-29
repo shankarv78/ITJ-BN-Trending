@@ -349,6 +349,9 @@ class BrokerSyncManager:
             logger.error(f"[SYNC] Failed to fetch broker positions: {e}")
             return None
 
+    # ITJ Trend Follow instruments - only these are checked for sync discrepancies
+    ITJ_INSTRUMENTS = {'SILVER_MINI', 'GOLD_MINI', 'BANK_NIFTY', 'COPPER'}
+
     def _compare_positions(
         self,
         pm_positions: Dict,
@@ -359,8 +362,8 @@ class BrokerSyncManager:
         Compare PM positions with broker positions (strategy-aware)
 
         Only compares positions belonging to the specified strategy.
-        Positions in broker but not in PM are logged as info (manual trades),
-        not flagged as discrepancies.
+        Only checks ITJ instruments (SILVER_MINI, GOLD_MINI, BANK_NIFTY, COPPER).
+        Other instruments (SENSEX, NIFTY, etc.) are ignored as they belong to other strategies.
 
         Args:
             pm_positions: Positions from PortfolioStateManager
@@ -420,22 +423,33 @@ class BrokerSyncManager:
                     details=f"PM: {pm_lots} lots, Broker: {broker_lots} lots (strategy {strategy_id})"
                 ))
 
-        # NOTE: We intentionally do NOT flag "missing_in_pm" discrepancies
-        # When broker has more positions than PM's ITJ strategy, these are likely:
-        # - Manual trades
-        # - Positions from other strategies
-        # - Positions from external systems
-        # These should be handled by the strategy framework (assign to 'unknown' strategy)
-        # rather than flagged as sync errors.
-        #
-        # Only log as info for visibility:
+        # Check for positions in broker but not fully tracked in PM
+        # ONLY for ITJ instruments (SILVER_MINI, GOLD_MINI, BANK_NIFTY, COPPER)
+        # Other instruments (SENSEX, NIFTY, etc.) are ignored as manual/other strategies
         for instrument, broker_lots in broker_by_instrument.items():
+            # Skip non-ITJ instruments
+            if instrument not in self.ITJ_INSTRUMENTS:
+                logger.debug(
+                    f"[SYNC] Ignoring {instrument} (not an ITJ instrument) - "
+                    f"broker has {broker_lots} lots"
+                )
+                continue
+
             pm_lots = pm_by_instrument.get(instrument, 0)
             if broker_lots > pm_lots:
                 extra_lots = broker_lots - pm_lots
-                logger.info(
-                    f"[SYNC] Broker has {extra_lots} extra {instrument} lots "
-                    f"(likely manual trades or other strategies)"
+                # This is flagged as a discrepancy - could be orphaned order from timeout
+                discrepancies.append(SyncDiscrepancy(
+                    discrepancy_type='extra_in_broker',
+                    instrument=instrument,
+                    pm_lots=pm_lots,
+                    broker_lots=broker_lots,
+                    details=f"Broker has {extra_lots} extra lots. PM: {pm_lots}, Broker: {broker_lots}. "
+                            f"May be orphaned order from timeout."
+                ))
+                logger.warning(
+                    f"[SYNC] ⚠️ Broker has {extra_lots} extra {instrument} lots - "
+                    f"check if this is an orphaned order!"
                 )
 
         return discrepancies

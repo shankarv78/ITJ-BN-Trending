@@ -508,14 +508,8 @@ def run_live(args):
             voice_announcer=voice_announcer,
             sync_interval_seconds=300  # 5 minutes
         )
-        # Perform startup reconciliation
-        logger.info("Performing startup reconciliation with broker...")
-        sync_result = broker_sync.startup_reconciliation()
-        if sync_result.discrepancies:
-            logger.warning(f"Startup reconciliation found {len(sync_result.discrepancies)} discrepancies!")
-        # Start background sync
-        broker_sync.start_background_sync()
-        logger.info("Broker sync started (interval: 5 minutes)")
+        # Note: Startup reconciliation moved to AFTER crash recovery
+        # to ensure positions are loaded before comparing with broker
     except Exception as e:
         logger.warning(f"Failed to initialize broker sync: {e}")
 
@@ -598,6 +592,19 @@ def run_live(args):
             return 1  # Exit with error code
     else:
         logger.info("Crash recovery skipped (database persistence disabled)")
+
+    # Perform startup reconciliation AFTER crash recovery has loaded positions
+    if broker_sync:
+        try:
+            logger.info("Performing startup reconciliation with broker...")
+            sync_result = broker_sync.startup_reconciliation()
+            if sync_result.discrepancies:
+                logger.warning(f"Startup reconciliation found {len(sync_result.discrepancies)} discrepancies!")
+            # Start background sync
+            broker_sync.start_background_sync()
+            logger.info("Broker sync started (interval: 5 minutes)")
+        except Exception as e:
+            logger.warning(f"Failed to perform startup reconciliation: {e}")
 
     # Initialize rollover scheduler
     rollover_scheduler = None
@@ -2770,12 +2777,12 @@ def run_live(args):
             if lots == 0:
                 return jsonify({'error': f'Quantity {quantity} is less than 1 lot ({lot_size})'}), 400
 
-            # Generate position ID
+            # Generate position ID (format: INSTRUMENT_Long_N)
             existing_positions = engine.portfolio.get_current_state().get_open_positions()
             existing_for_instrument = [p for p in existing_positions.values()
                                        if p.instrument == instrument]
             position_num = len(existing_for_instrument) + 1
-            position_id = f"Long_{position_num}"
+            position_id = f"{instrument}_Long_{position_num}"
 
             # Use provided stop or calculate default (2% below entry)
             stop_loss = data.get('stop_loss', entry_price * 0.98)
