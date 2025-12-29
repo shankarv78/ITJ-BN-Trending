@@ -1010,34 +1010,28 @@ class ProgressiveExecutor(OrderExecutor):
         )
 
         # Determine the actual symbol we were trying to trade
+        # Uses ExpiryCalendar for dynamic symbol construction (no hardcoded expiries)
         recovery_symbol = None
-        if signal.instrument == "GOLD_MINI":
-            try:
-                from core.expiry_calendar import ExpiryCalendar
-                from datetime import date
-                expiry_cal = ExpiryCalendar()
+        try:
+            from core.expiry_calendar import ExpiryCalendar
+            from datetime import date
+            expiry_cal = ExpiryCalendar()
+
+            if signal.instrument == "GOLD_MINI":
                 expiry = expiry_cal.get_expiry_after_rollover("GOLD_MINI", date.today())
                 recovery_symbol = f"GOLDM{expiry.strftime('%d%b%y').upper()}FUT"
-            except Exception:
-                recovery_symbol = "GOLDM05JAN26FUT"
-        elif signal.instrument == "COPPER":
-            try:
-                from core.expiry_calendar import ExpiryCalendar
-                from datetime import date
-                expiry_cal = ExpiryCalendar()
+            elif signal.instrument == "COPPER":
                 expiry = expiry_cal.get_expiry_after_rollover("COPPER", date.today())
                 recovery_symbol = f"COPPER{expiry.strftime('%d%b%y').upper()}FUT"
-            except Exception:
-                recovery_symbol = "COPPER31DEC25FUT"
-        elif signal.instrument == "SILVER_MINI":
-            try:
-                from core.expiry_calendar import ExpiryCalendar
-                from datetime import date
-                expiry_cal = ExpiryCalendar()
+            elif signal.instrument == "SILVER_MINI":
                 expiry = expiry_cal.get_expiry_after_rollover("SILVER_MINI", date.today())
                 recovery_symbol = f"SILVERM{expiry.strftime('%d%b%y').upper()}FUT"
-            except Exception:
-                recovery_symbol = "SILVERM27FEB26FUT"
+            # Note: BANK_NIFTY uses synthetic futures (options), not recovered here
+        except Exception as e:
+            logger.error(
+                f"[ProgressiveExecutor] Cannot determine symbol for recovery - "
+                f"ExpiryCalendar error: {e}. Skipping orphan order check."
+            )
 
         if recovery_symbol:
             # Check if order was actually filled despite our timeout/failures

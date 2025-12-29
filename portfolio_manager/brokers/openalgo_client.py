@@ -274,18 +274,22 @@ class OpenAlgoClient:
             # Check order timestamp if available
             timestamp_str = order.get('timestamp') or order.get('order_timestamp') or ''
             if timestamp_str:
+                order_too_old = False
                 try:
                     # Parse various timestamp formats
                     for fmt in ['%Y-%m-%d %H:%M:%S', '%d-%m-%Y %H:%M:%S', '%Y-%m-%dT%H:%M:%S']:
                         try:
                             order_time = datetime.strptime(timestamp_str[:19], fmt)
                             if order_time < cutoff:
-                                continue  # Order too old
-                            break
+                                order_too_old = True
+                            break  # Successfully parsed
                         except ValueError:
-                            continue
+                            continue  # Try next format
                 except Exception:
                     pass  # Can't parse timestamp, include order anyway
+
+                if order_too_old:
+                    continue  # Skip this order - it's too old
 
             # Found a matching filled order
             logger.info(
