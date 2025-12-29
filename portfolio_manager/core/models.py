@@ -20,6 +20,7 @@ class SignalType(Enum):
     PYRAMID = "PYRAMID"
     EXIT = "EXIT"
     EOD_MONITOR = "EOD_MONITOR"  # Pre-close monitoring signal with indicator values
+    MARKET_DATA = "MARKET_DATA"  # Bar close data for PM-side stop monitoring
 
 class PositionLayer(Enum):
     """Position layers for pyramiding"""
@@ -581,4 +582,82 @@ class EODMonitorSignal:
             indicators=indicators,
             position_status=position_status,
             sizing=sizing  # May be None - Python calculates its own sizing
+        )
+
+
+@dataclass
+class MarketDataSignal:
+    """
+    Market Data Signal from Scout Indicator
+
+    PURPOSE:
+    - Sent on every bar close (1H for Gold/Silver, 75m for BankNifty/Copper)
+    - PM uses this to independently monitor trailing stops
+    - Prevents orphaned positions if strategy loses state
+
+    ARCHITECTURE:
+    - Scout indicator is STATELESS (can't lose position tracking)
+    - PM uses price/ATR to update trailing stops
+    - PM checks if price < stop for any position
+    - PM executes exit directly if stop hit
+
+    JSON Format:
+    {
+        "type": "MARKET_DATA",
+        "instrument": "SILVER_MINI",
+        "timestamp": "2025-12-29T14:00:00",
+        "price": 238000.0,
+        "atr": 1500.0,
+        "supertrend": 235000.0
+    }
+    """
+    timestamp: datetime
+    instrument: str
+    price: float
+    atr: float
+    supertrend: float
+
+    def __post_init__(self):
+        """Validate market data signal"""
+        if self.price <= 0:
+            raise ValueError(f"Invalid price: {self.price}")
+        if self.atr < 0:
+            raise ValueError(f"Invalid ATR: {self.atr}")
+        if self.supertrend <= 0:
+            raise ValueError(f"Invalid supertrend: {self.supertrend}")
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'MarketDataSignal':
+        """
+        Parse MARKET_DATA webhook JSON
+
+        Args:
+            data: Dictionary with MARKET_DATA webhook JSON
+
+        Returns:
+            MarketDataSignal instance
+        """
+        # Validate signal type
+        if data.get('type', '').upper() != 'MARKET_DATA':
+            raise ValueError(f"Expected MARKET_DATA signal, got: {data.get('type')}")
+
+        # Validate required fields
+        required_fields = ['instrument', 'price', 'atr', 'supertrend', 'timestamp']
+        missing = [f for f in required_fields if f not in data]
+        if missing:
+            raise ValueError(f"MARKET_DATA missing required fields: {missing}")
+
+        # Parse timestamp
+        timestamp_str = data['timestamp']
+        try:
+            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        except (ValueError, TypeError):
+            timestamp = datetime.now()
+
+        return cls(
+            timestamp=timestamp,
+            instrument=data['instrument'].upper(),
+            price=float(data['price']),
+            atr=float(data['atr']),
+            supertrend=float(data['supertrend'])
         )

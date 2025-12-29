@@ -246,9 +246,10 @@ def run_live(args):
     from psycopg2.extras import RealDictCursor
     from core.webhook_parser import (
         DuplicateDetector, validate_json_structure, parse_webhook_signal,
-        is_eod_monitor_signal, parse_eod_monitor_signal, parse_any_signal
+        is_eod_monitor_signal, parse_eod_monitor_signal, parse_any_signal,
+        is_market_data_signal, parse_market_data_signal
     )
-    from core.models import Signal, EODMonitorSignal
+    from core.models import Signal, EODMonitorSignal, MarketDataSignal
     from core.eod_scheduler import EODScheduler
     import json
 
@@ -786,6 +787,40 @@ def run_live(args):
                 return jsonify({
                     'status': 'processed',
                     'signal_type': 'eod_monitor',
+                    'request_id': request_id,
+                    'result': result
+                }), 200
+
+            # Check if this is a MARKET_DATA signal (PM stop monitoring)
+            if is_market_data_signal(data):
+                logger.debug(f"[{request_id}] MARKET_DATA signal detected")
+
+                # Parse MARKET_DATA signal
+                market_signal, market_error = parse_market_data_signal(data)
+                if market_signal is None:
+                    webhook_logger.warning(f"[{request_id}] MARKET_DATA parsing failed: {market_error}")
+                    return jsonify({
+                        'status': 'error',
+                        'error_type': 'validation_error',
+                        'message': market_error,
+                        'request_id': request_id
+                    }), 400
+
+                # Leadership check for MARKET_DATA signals
+                if coordinator and not coordinator.is_leader:
+                    logger.debug(f"[{request_id}] Ignoring MARKET_DATA signal - not leader")
+                    return jsonify({
+                        'status': 'ignored',
+                        'reason': 'not_leader',
+                        'request_id': request_id
+                    }), 200
+
+                # Process MARKET_DATA signal through engine
+                result = engine.process_market_data_signal(market_signal)
+
+                return jsonify({
+                    'status': 'processed',
+                    'signal_type': 'market_data',
                     'request_id': request_id,
                     'result': result
                 }), 200

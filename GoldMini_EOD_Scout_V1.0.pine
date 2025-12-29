@@ -176,6 +176,21 @@ if should_fire
     alert(eod_json, alert.freq_all)
 
 // ========================================
+// MARKET_DATA ALERT (Bar Close - For PM Stop Monitoring)
+// ========================================
+// This fires on EVERY bar close (not just EOD window)
+// PM uses this to independently monitor trailing stops
+// Prevents orphaned positions if strategy loses state
+
+group_market_data = "Market Data Settings"
+enable_market_data = input.bool(true, "Enable MARKET_DATA Alerts", group=group_market_data, tooltip="Send price/ATR on every bar close for PM stop monitoring")
+
+if enable_market_data and barstate.isconfirmed
+    string md_timestamp = getTimestamp()
+    string market_data_json = '{"type":"MARKET_DATA","instrument":"GOLD_MINI","timestamp":"' + md_timestamp + '","price":' + str.tostring(close, "#.##") + ',"atr":' + str.tostring(atr_value, "#.##") + ',"supertrend":' + str.tostring(supertrend, "#.##") + '}'
+    alert(market_data_json, alert.freq_once_per_bar_close)
+
+// ========================================
 // MINIMAL VISUALS (Optional Debug)
 // ========================================
 // Scout is invisible by default - no plots to avoid chart clutter
