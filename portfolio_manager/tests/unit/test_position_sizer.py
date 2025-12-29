@@ -248,11 +248,12 @@ class TestTomBassoPositionSizer:
             equity=5200000.0,
             available_margin=1000000.0,  # Rs 10L available
             base_position_size=10,  # Base entry was 10 lots
-            profit_after_base_risk=150000.0  # Rs 1.5L profit beyond base risk
+            profit_after_base_risk=150000.0,  # Rs 1.5L profit beyond base risk
+            pyramid_count=0  # First pyramid (PYR1)
         )
 
         # Lot-A (margin): 1000000 / 270000 = 3.7 → 3 lots
-        # Lot-B (50% rule): 10 × 0.5 = 5 lots
+        # Lot-B (geometric): 10 × 0.5^1 = 5 lots
         # Lot-C (risk budget): (150000 × 0.5) / (500 × 30) = 5.0 lots
         # MIN = 3 lots (margin limited)
 
@@ -369,23 +370,80 @@ class TestTomBassoPositionSizer:
         )
 
         # Base was 10 lots
-        # Lot-B = 10 × 0.5 = 5 lots
+        # Lot-B (geometric) = 10 × 0.5^1 = 5 lots for first pyramid
 
         result = sizer.calculate_pyramid_size(
             pyramid_signal,
             equity=5200000.0,
             available_margin=2000000.0,  # Plenty of margin
             base_position_size=10,
-            profit_after_base_risk=500000.0  # Plenty of profit
+            profit_after_base_risk=500000.0,  # Plenty of profit
+            pyramid_count=0  # First pyramid (PYR1)
         )
 
         # Lot-A (margin): 2M / 270k = 7.4 lots
-        # Lot-B (50%): 10 × 0.5 = 5 lots ← Should limit
+        # Lot-B (geometric): 10 × 0.5^1 = 5 lots ← Should limit
         # Lot-C (risk): (500k × 0.5) / (500 × 30) = 16.67 lots
 
         assert result.lot_v == 5.0  # Lot-B constraint
         assert result.final_lots == 5
-        assert result.limiter == "50%_rule"
+        assert result.limiter == "geometric_0.5^1"
+
+    def test_geometric_pyramid_scaling(self, bank_nifty_config):
+        """Test that pyramid lot_b uses geometric scaling: base * 0.5^(pyramid_count+1)"""
+        sizer = TomBassoPositionSizer(bank_nifty_config)
+
+        pyramid_signal = Signal(
+            signal_type=SignalType.PYRAMID,
+            instrument="BANK_NIFTY",
+            position="Long_2",
+            timestamp="2025-01-15T10:00:00",
+            price=53000.0,  # Entry price
+            stop=52500.0,   # Stop price (500 point risk)
+            suggested_lots=5,
+            atr=360.0,
+            er=0.85,
+            supertrend=52000.0
+        )
+
+        base_position_size = 10  # Base was 10 lots
+        # Test with plenty of margin and profit so lot_b is the limiter
+
+        # PYR1 (pyramid_count=0): lot_b = 10 * 0.5^1 = 5 lots
+        result_pyr1 = sizer.calculate_pyramid_size(
+            pyramid_signal, equity=5200000.0, available_margin=5000000.0,
+            base_position_size=base_position_size, profit_after_base_risk=5000000.0,
+            pyramid_count=0
+        )
+        assert result_pyr1.lot_v == 5.0  # lot_b
+        assert result_pyr1.limiter == "geometric_0.5^1"
+
+        # PYR2 (pyramid_count=1): lot_b = 10 * 0.5^2 = 2 lots
+        result_pyr2 = sizer.calculate_pyramid_size(
+            pyramid_signal, equity=5200000.0, available_margin=5000000.0,
+            base_position_size=base_position_size, profit_after_base_risk=5000000.0,
+            pyramid_count=1
+        )
+        assert result_pyr2.lot_v == 2.0  # lot_b
+        assert result_pyr2.limiter == "geometric_0.5^2"
+
+        # PYR3 (pyramid_count=2): lot_b = 10 * 0.5^3 = 1 lot
+        result_pyr3 = sizer.calculate_pyramid_size(
+            pyramid_signal, equity=5200000.0, available_margin=5000000.0,
+            base_position_size=base_position_size, profit_after_base_risk=5000000.0,
+            pyramid_count=2
+        )
+        assert result_pyr3.lot_v == 1.0  # lot_b
+        assert result_pyr3.limiter == "geometric_0.5^3"
+
+        # PYR4 (pyramid_count=3): lot_b = 10 * 0.5^4 = 0 lots (rounds down)
+        result_pyr4 = sizer.calculate_pyramid_size(
+            pyramid_signal, equity=5200000.0, available_margin=5000000.0,
+            base_position_size=base_position_size, profit_after_base_risk=5000000.0,
+            pyramid_count=3
+        )
+        assert result_pyr4.lot_v == 0.0  # lot_b (geometric scaled to 0)
+        assert result_pyr4.final_lots == 0
 
     def test_edge_case_zero_available_margin(self, bank_nifty_config, base_entry_signal_bn):
         """Test edge case: zero available margin"""

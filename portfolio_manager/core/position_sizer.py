@@ -133,7 +133,8 @@ class TomBassoPositionSizer:
         equity: float,
         available_margin: float,
         base_position_size: int,
-        profit_after_base_risk: float
+        profit_after_base_risk: float,
+        pyramid_count: int = 0
     ) -> TomBassoConstraints:
         """
         Calculate pyramid size using triple constraint
@@ -144,6 +145,7 @@ class TomBassoPositionSizer:
             available_margin: Available margin
             base_position_size: Size of initial entry (lots)
             profit_after_base_risk: Profit beyond base risk coverage
+            pyramid_count: Current number of pyramids BEFORE this one (0 for first pyramid)
 
         Returns:
             TomBassoConstraints for pyramid
@@ -157,8 +159,15 @@ class TomBassoPositionSizer:
         # CONSTRAINT A: Margin safety
         lot_a = math.floor(available_margin / self.margin_per_lot)
 
-        # CONSTRAINT B: Discipline (50% of base)
-        lot_b = math.floor(base_position_size * 0.5)
+        # CONSTRAINT B: Discipline - GEOMETRIC scaling
+        # Each pyramid adds geometrically decreasing lots:
+        # PYR1 (pyramid_count=0): base * 0.5^1 = 50% of base
+        # PYR2 (pyramid_count=1): base * 0.5^2 = 25% of base
+        # PYR3 (pyramid_count=2): base * 0.5^3 = 12.5% of base
+        # etc.
+        geometric_multiplier = 0.5 ** (pyramid_count + 1)
+        lot_b = math.floor(base_position_size * geometric_multiplier)
+        logger.debug(f"Geometric lot_b: base={base_position_size} * 0.5^{pyramid_count+1} = {lot_b}")
 
         # CONSTRAINT C: Risk budget (50% of excess profit)
         available_risk_budget = profit_after_base_risk * 0.5
@@ -182,7 +191,7 @@ class TomBassoPositionSizer:
         if min_constraint == lot_a:
             limiter = "margin"
         elif min_constraint == lot_b:
-            limiter = "50%_rule"
+            limiter = f"geometric_0.5^{pyramid_count+1}"
         else:
             limiter = "risk_budget"
 

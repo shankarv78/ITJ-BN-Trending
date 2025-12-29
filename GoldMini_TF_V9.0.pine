@@ -27,8 +27,10 @@
 // 1. ✨ BARSTATE.ISCONFIRMED ON ENTRIES
 //    - Ensures entries only execute at confirmed bar close
 //
-// 2. ✨ GEOMETRIC LOT_B SCALING
-//    - lot_b = initial_position_size * 0.5^(pyramid_count+1)
+// 2. ✨ FIXED 50% LOT_B FOR TRIGGERING (v9.0 Fix)
+//    - lot_b uses FIXED 50% of base (not geometric) for signal triggering
+//    - Ensures pyramid signals ALWAYS fire to PM for all levels
+//    - PM calculates actual sizing using Tom Basso methodology
 //
 // ========================================
 // Inherited from v7.0:
@@ -452,9 +454,10 @@ if enable_pyramiding and strategy.position_size > 0 and pyramid_count < max_pyra
         lot_a := free_margin > 0 ? math.floor(free_margin / margin_per_lot) : 0
 
         // CONSTRAINT 2: lot-b (Discipline Safety)
-        // v8.5: TRUE geometric scaling - each pyramid halves previous size
-        // pyramid_count=0 → 0.5^1 = 0.5, pyramid_count=1 → 0.5^2 = 0.25, etc.
-        lot_b := math.floor(initial_position_size * math.pow(pyramid_size_ratio, pyramid_count + 1))
+        // v9.0 FIX: Use FIXED 50% of base for TRIGGERING (not geometric)
+        // This ensures pyramid signals ALWAYS fire to PM for all pyramid levels
+        // PM calculates its own sizing using Tom Basso methodology
+        lot_b := math.floor(initial_position_size * pyramid_size_ratio)
 
         // CONSTRAINT 3: lot-c (Profit Safety)
         // Only risk 50% of excess profit (profit beyond base risk)

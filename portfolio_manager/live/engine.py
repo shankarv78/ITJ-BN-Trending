@@ -967,12 +967,24 @@ class LiveTradingEngine:
         # Profit after covering base risk
         profit_after_base_risk = max(0, unrealized_pnl - base_risk)
 
+        # Calculate pyramid_count from signal.position (e.g., "Long_2" → PYR1 → pyramid_count=0)
+        # Long_2 = PYR1 (first pyramid, pyramid_count=0 before this add)
+        # Long_3 = PYR2 (second pyramid, pyramid_count=1 before this add)
+        try:
+            position_num = int(signal.position.split('_')[-1])
+            pyramid_count = position_num - 2  # Long_2 → 0, Long_3 → 1, etc.
+            pyramid_count = max(0, pyramid_count)
+        except (ValueError, IndexError):
+            pyramid_count = 0
+            logger.warning(f"Could not parse pyramid count from position '{signal.position}', defaulting to 0")
+
         constraints = sizer.calculate_pyramid_size(
             signal=signal,
             equity=live_equity,
             available_margin=available_margin,
             base_position_size=base_pos.lots,
-            profit_after_base_risk=profit_after_base_risk
+            profit_after_base_risk=profit_after_base_risk,
+            pyramid_count=pyramid_count
         )
 
         if constraints.final_lots == 0:
