@@ -18,9 +18,13 @@ The system uses a **two-tier architecture** separating signal generation from ex
 │  │ • NO position state     │         │ • BASE_ENTRY            │            │
 │  │ • Throttled (varip)     │         │ • PYRAMID               │            │
 │  │ • EOD window only       │         │ • EXIT                  │            │
+│  │                         │         │                         │            │
+│  │ + MARKET_DATA (v9.1)    │         │                         │            │
+│  │   Every bar close       │         │                         │            │
 │  └─────────────────────────┘         └─────────────────────────┘            │
 │           │                                    │                             │
 │           │ EOD_MONITOR                        │ Order Alerts                │
+│           │ MARKET_DATA                        │                             │
 │           ▼                                    ▼                             │
 └─────────────────────────────────────────────────────────────────────────────┘
                               │
@@ -37,9 +41,18 @@ The system uses a **two-tier architecture** separating signal generation from ex
 │  │ • Pyramid count         │    │ • Overrides TradingView │                 │
 │  │ • Entry prices          │    │ • Makes decisions       │                 │
 │  │ • P&L tracking          │    │ • Places orders         │                 │
+│  │ • Trailing stops        │    │                         │                 │
 │  └─────────────────────────┘    └─────────────────────────┘                 │
+│                   ▲                                                          │
+│                   │              ┌─────────────────────────┐                 │
+│                   └──────────────│   MARKET_DATA Handler   │                 │
+│                                  ├─────────────────────────┤                 │
+│                                  │ • Updates trailing stop │                 │
+│                                  │ • Checks stop hit       │                 │
+│                                  │ • PM-initiated exits    │                 │
+│                                  └─────────────────────────┘                 │
 │                                                                              │
-│  KEY PRINCIPLE: PM is the AUTHORITY on position state                       │
+│  KEY PRINCIPLE: PM is the AUTHORITY on position state + exits                │
 │  TradingView is BLIND - it only sends raw indicator data                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -60,6 +73,86 @@ The system uses a **two-tier architecture** separating signal generation from ex
 | EOD Scout | TradingView Indicator | Send raw conditions during EOD window | ❌ None (dumb) |
 | Strategy V9 | TradingView Strategy | Fire alerts on trade execution | Own trades only |
 | PM | Python Application | Make all decisions, execute orders | ✅ Full (database) |
+
+---
+
+## PM-Side Stop Monitoring (V9.1)
+
+### Problem: Orphaned Positions (PR #6)
+
+When TradingView Strategy loses state (due to script edits, chart refresh, or reconnection),
+it may fail to send EXIT alerts for some positions:
+
+| Date | Issue | Impact |
+|------|-------|--------|
+| Dec 29, 2025 | TV lost `varip` state for Long_3 | Position orphaned, no exit signal |
+
+**Key insight:** Both PM and broker had the position, so broker sync saw no mismatch.
+The problem is that TV didn't *know* about the position anymore.
+
+### Solution: Scout MARKET_DATA + PM Stop Monitoring
+
+Scout indicators now send `MARKET_DATA` on every bar close:
+
+```json
+{
+  "type": "MARKET_DATA",
+  "instrument": "SILVER_MINI",
+  "timestamp": "2025-12-29T14:00:00",
+  "price": 238000.0,
+  "atr": 1500.0,
+  "supertrend": 235000.0
+}
+```
+
+PM uses this to independently monitor stops:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SCOUT INDICATOR (Stateless)                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Every bar close (1H/75m):                                                  │
+│    → MARKET_DATA { price, atr, supertrend }                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               PM process_market_data_signal()                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  For each open position:                                                    │
+│    1. Update trailing stop using ATR                                        │
+│    2. Check: price < current_stop?                                          │
+│    3. If YES → _execute_pm_initiated_exit()                                 │
+│       - MCX: ProgressiveExecutor (single leg)                               │
+│       - BANK_NIFTY: SyntheticFuturesExecutor (2-leg options)                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Signal Flow Summary
+
+| Signal Type | Source | Frequency | Handler | Purpose |
+|-------------|--------|-----------|---------|---------|
+| BASE_ENTRY | Strategy V9 | On trade | `_handle_base_entry_live()` | New position |
+| PYRAMID | Strategy V9 | On trade | `_handle_pyramid_live()` | Add to position |
+| EXIT | Strategy V9 | On trade | `_handle_exit_live()` | Close position |
+| EOD_MONITOR | Scout | Every 15s (EOD) | `process_eod_monitor_signal()` | EOD execution |
+| **MARKET_DATA** | **Scout** | **Every bar** | **`process_market_data_signal()`** | **PM stop monitoring** |
+
+### Deduplication
+
+If TradingView recovers state and sends EXIT while PM also triggers exit:
+
+```python
+def _execute_pm_initiated_exit(self, position, ...):
+    # Check if already closing/closed
+    if position.status in ['closing', 'closed']:
+        return {'status': 'skipped', 'reason': 'already_closing'}
+
+    # Mark as closing BEFORE placing order
+    position.status = 'closing'
+    self.db_manager.save_position(position)
+    # ... execute order
+```
 
 ---
 

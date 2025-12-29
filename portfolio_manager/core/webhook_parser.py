@@ -471,21 +471,135 @@ def parse_eod_monitor_signal(data: dict) -> Tuple[Optional[EODMonitorSignal], Op
         return None, error_msg
 
 
-def parse_any_signal(data: dict) -> Tuple[Optional[Union[Signal, EODMonitorSignal]], Optional[str], str]:
+# ============================================================
+# MARKET_DATA Signal Parsing (PM Stop Monitoring)
+# ============================================================
+
+def is_market_data_signal(data: dict) -> bool:
     """
-    Parse any webhook signal (regular or EOD_MONITOR).
+    Check if the incoming data is a MARKET_DATA signal.
+
+    Args:
+        data: JSON data dictionary from webhook
+
+    Returns:
+        True if this is a MARKET_DATA signal
+    """
+    if not isinstance(data, dict):
+        return False
+
+    signal_type = data.get('type', '').upper()
+    return signal_type == 'MARKET_DATA'
+
+
+def validate_market_data_structure(data: dict) -> Tuple[bool, Optional[str]]:
+    """
+    Validate JSON structure for MARKET_DATA signals.
+
+    MARKET_DATA signals are simple:
+    - type: "MARKET_DATA"
+    - instrument: "SILVER_MINI", "GOLD_MINI", "BANK_NIFTY", "COPPER"
+    - timestamp: ISO format datetime
+    - price: Current bar close price
+    - atr: ATR value
+    - supertrend: SuperTrend value (used as stop reference)
+
+    Args:
+        data: JSON data dictionary
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    required_fields = ['type', 'instrument', 'timestamp', 'price', 'atr', 'supertrend']
+    missing = [f for f in required_fields if f not in data]
+    if missing:
+        return False, f"MARKET_DATA missing required fields: {', '.join(missing)}"
+
+    # Validate type
+    if data.get('type', '').upper() != 'MARKET_DATA':
+        return False, f"Invalid signal type for MARKET_DATA: {data.get('type')}"
+
+    # Validate instrument
+    instrument = data.get('instrument', '').upper()
+    valid_instruments = {'BANK_NIFTY', 'GOLD_MINI', 'SILVER_MINI', 'COPPER'}
+    if instrument not in valid_instruments:
+        return False, f"Invalid instrument: {instrument}"
+
+    # Validate numeric fields
+    try:
+        float(data['price'])
+        float(data['atr'])
+        float(data['supertrend'])
+    except (ValueError, TypeError) as e:
+        return False, f"Invalid numeric value: {e}"
+
+    return True, None
+
+
+def parse_market_data_signal(data: dict) -> Tuple[Optional['MarketDataSignal'], Optional[str]]:
+    """
+    Parse webhook JSON data into MarketDataSignal object.
+
+    MARKET_DATA signals are used for PM-side stop monitoring:
+    - Scout indicator sends price/ATR on every bar close
+    - PM uses this to update trailing stops
+    - PM checks if price < stop and executes exit directly
+
+    This prevents orphaned positions when TradingView strategy loses state.
+
+    Args:
+        data: Dictionary with MARKET_DATA webhook JSON
+
+    Returns:
+        Tuple of (MarketDataSignal, None) on success
+        Tuple of (None, error_message) on failure
+    """
+    from core.models import MarketDataSignal
+
+    # First validate structure
+    is_valid, structure_error = validate_market_data_structure(data)
+    if not is_valid:
+        logger.warning(f"[MARKET_DATA] Invalid structure: {structure_error}")
+        return None, structure_error
+
+    # Try to parse using MarketDataSignal.from_dict()
+    try:
+        signal = MarketDataSignal.from_dict(data)
+
+        logger.debug(
+            f"[MARKET_DATA] Parsed: {signal.instrument}, "
+            f"price={signal.price:.2f}, atr={signal.atr:.2f}, "
+            f"supertrend={signal.supertrend:.2f}"
+        )
+
+        return signal, None
+
+    except ValueError as e:
+        error_msg = f"Validation error: {str(e)}"
+        logger.warning(f"[MARKET_DATA] {error_msg}")
+        return None, error_msg
+
+    except Exception as e:
+        error_msg = f"Unexpected error parsing MARKET_DATA signal: {str(e)}"
+        logger.error(f"[MARKET_DATA] {error_msg}", exc_info=True)
+        return None, error_msg
+
+
+def parse_any_signal(data: dict) -> Tuple[Optional[Union[Signal, EODMonitorSignal, 'MarketDataSignal']], Optional[str], str]:
+    """
+    Parse any webhook signal (regular, EOD_MONITOR, or MARKET_DATA).
 
     This is the main entry point for webhook signal parsing that handles
-    both regular trading signals and EOD_MONITOR signals.
+    all signal types.
 
     Args:
         data: JSON data dictionary from webhook
 
     Returns:
         Tuple of (signal, error_message, signal_type)
-        - signal: Signal or EODMonitorSignal object if successful, None otherwise
+        - signal: Signal, EODMonitorSignal, or MarketDataSignal if successful
         - error_message: None if successful, error description if failed
-        - signal_type: 'regular', 'eod_monitor', or 'unknown'
+        - signal_type: 'regular', 'eod_monitor', 'market_data', or 'unknown'
 
     Example:
         signal, error, sig_type = parse_any_signal(webhook_data)
@@ -493,6 +607,8 @@ def parse_any_signal(data: dict) -> Tuple[Optional[Union[Signal, EODMonitorSigna
             log_error(error)
         elif sig_type == 'eod_monitor':
             handle_eod_signal(signal)
+        elif sig_type == 'market_data':
+            handle_market_data_signal(signal)
         else:
             handle_regular_signal(signal)
     """
@@ -503,6 +619,11 @@ def parse_any_signal(data: dict) -> Tuple[Optional[Union[Signal, EODMonitorSigna
     if is_eod_monitor_signal(data):
         signal, error = parse_eod_monitor_signal(data)
         return signal, error, 'eod_monitor'
+
+    # Check if this is a MARKET_DATA signal
+    if is_market_data_signal(data):
+        signal, error = parse_market_data_signal(data)
+        return signal, error, 'market_data'
 
     # Regular signal
     signal, error = parse_webhook_signal(data)

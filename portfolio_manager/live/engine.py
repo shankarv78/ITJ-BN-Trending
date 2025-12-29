@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 from datetime import datetime
-from core.models import Signal, SignalType, Position, InstrumentType, EODMonitorSignal, EODPositionStatus
+from core.models import Signal, SignalType, Position, InstrumentType, EODMonitorSignal, EODPositionStatus, MarketDataSignal
 from core.portfolio_state import PortfolioStateManager
 from core.eod_monitor import EODMonitor
 from core.eod_executor import EODExecutor, EODExecutionContext, EODExecutionPhase
@@ -2196,6 +2196,238 @@ class LiveTradingEngine:
             # Close position(s)
             logger.info(f"[LIVE-EOD] Closing positions for {instrument}")
             # Portfolio update would go here
+
+    # ============================================================
+    # MARKET_DATA Signal Processing (PM-Side Stop Monitoring)
+    # ============================================================
+
+    def process_market_data_signal(self, signal: MarketDataSignal) -> Dict:
+        """
+        Process MARKET_DATA signal from Scout indicator for PM-side stop monitoring.
+
+        This enables PM to independently monitor and execute stops without
+        relying on TradingView strategy state (which can be lost).
+
+        Steps:
+        1. Get all open positions for the instrument
+        2. Update trailing stops using ATR from signal
+        3. Check if price < stop for any position
+        4. Execute exit directly if stop hit (with deduplication)
+
+        Args:
+            signal: MarketDataSignal with price, ATR, supertrend
+
+        Returns:
+            Dict with processing result
+        """
+        instrument = signal.instrument
+        logger.debug(
+            f"[PM-STOP] Processing MARKET_DATA for {instrument}: "
+            f"price={signal.price:.2f}, atr={signal.atr:.2f}, supertrend={signal.supertrend:.2f}"
+        )
+
+        # Get all open positions for this instrument
+        portfolio_state = self.portfolio.get_current_state()
+        positions = portfolio_state.get_positions_for_instrument(instrument)
+
+        if not positions:
+            return {
+                'status': 'no_positions',
+                'instrument': instrument
+            }
+
+        exits_triggered = []
+        stops_updated = []
+
+        for position in positions:
+            # Skip if position is already closing or closed
+            if position.status in ['closing', 'closed']:
+                logger.debug(f"[PM-STOP] {position.position_id} already {position.status}, skipping")
+                continue
+
+            # Update trailing stop using ATR from signal
+            old_stop = position.current_stop
+            new_stop = self.stop_manager.update_trailing_stop(
+                position, signal.price, signal.atr
+            )
+
+            if new_stop > old_stop:
+                stops_updated.append({
+                    'position_id': position.position_id,
+                    'old_stop': old_stop,
+                    'new_stop': new_stop
+                })
+                # Persist updated stop to database
+                if self.db_manager:
+                    self.db_manager.save_position(position)
+
+            # Check if stop is hit
+            if signal.price < position.current_stop:
+                logger.warning(
+                    f"[PM-STOP] STOP HIT: {position.position_id} - "
+                    f"price {signal.price:.2f} < stop {position.current_stop:.2f}"
+                )
+
+                # Execute PM-initiated exit
+                exit_result = self._execute_pm_initiated_exit(
+                    position, signal.price, "PM_STOP_HIT"
+                )
+                exits_triggered.append({
+                    'position_id': position.position_id,
+                    'stop': position.current_stop,
+                    'price': signal.price,
+                    'result': exit_result
+                })
+
+        return {
+            'status': 'processed',
+            'instrument': instrument,
+            'positions_checked': len(positions),
+            'stops_updated': stops_updated,
+            'exits_triggered': exits_triggered
+        }
+
+    def _execute_pm_initiated_exit(
+        self,
+        position: Position,
+        exit_price: float,
+        reason: str = "PM_STOP_HIT"
+    ) -> Dict:
+        """
+        Execute a PM-initiated exit (bypasses TradingView).
+
+        Used when PM detects stop hit via MARKET_DATA signal.
+        Includes deduplication to prevent double exits if TV also sends exit.
+
+        Args:
+            position: Position to exit
+            exit_price: Price at which stop was hit
+            reason: Exit reason for logging
+
+        Returns:
+            Dict with exit result
+        """
+        position_id = position.position_id
+        instrument = position.instrument
+
+        # Deduplication: Check if already closing/closed
+        if position.status in ['closing', 'closed']:
+            logger.info(f"[PM-EXIT] {position_id} already {position.status}, skipping")
+            return {'status': 'skipped', 'reason': 'already_closing'}
+
+        # Mark as closing BEFORE placing order (prevents race condition)
+        position.status = 'closing'
+        if self.db_manager:
+            self.db_manager.save_position(position)
+
+        # Voice announcement
+        announcer = get_announcer()
+        if announcer:
+            announcer.announce_error(
+                f"{instrument} PM stop hit for {position_id}. Executing exit.",
+                error_type="pm_stop"
+            )
+
+        logger.info(
+            f"[PM-EXIT] Executing exit for {position_id}: "
+            f"{position.lots} lots @ ₹{exit_price:,.2f}, reason={reason}"
+        )
+
+        # Route to appropriate executor based on instrument
+        if instrument == "BANK_NIFTY":
+            # BANK_NIFTY uses synthetic futures (2-leg options)
+            result = self._execute_pm_exit_synthetic(position, exit_price)
+        else:
+            # MCX futures (Gold, Silver, Copper) - simple exit
+            result = self._execute_pm_exit_mcx(position, exit_price)
+
+        if result.get('status') == 'success':
+            # Update position as closed
+            actual_exit_price = result.get('exit_price', exit_price)
+            pnl = self.portfolio.close_position(position_id, actual_exit_price, datetime.now())
+
+            position.status = 'closed'
+            position.exit_reason = reason
+            if self.db_manager:
+                self.db_manager.save_position(position)
+
+            # Clear base_positions if this was a base position
+            if position.is_base_position and instrument in self.base_positions:
+                del self.base_positions[instrument]
+
+            # Voice announcement for successful exit
+            if announcer:
+                announcer.announce_trade_executed(
+                    instrument=instrument,
+                    position=position_id.split('_')[-1] if '_' in position_id else 'Long_1',
+                    signal_type="PM_EXIT",
+                    lots=position.lots,
+                    price=actual_exit_price,
+                    pnl=pnl
+                )
+
+            logger.info(f"[PM-EXIT] {position_id} closed with P&L: ₹{pnl:,.2f}")
+
+            return {
+                'status': 'success',
+                'position_id': position_id,
+                'exit_price': actual_exit_price,
+                'pnl': pnl,
+                'reason': reason
+            }
+        else:
+            # Exit failed - revert status
+            position.status = 'open'
+            if self.db_manager:
+                self.db_manager.save_position(position)
+
+            error_msg = result.get('reason', 'unknown_error')
+            logger.error(f"[PM-EXIT] Failed to exit {position_id}: {error_msg}")
+
+            if announcer:
+                announcer.announce_error(
+                    f"{instrument} PM exit failed for {position_id}. {error_msg}",
+                    error_type="execution"
+                )
+
+            return {
+                'status': 'error',
+                'position_id': position_id,
+                'reason': error_msg
+            }
+
+    def _execute_pm_exit_mcx(self, position: Position, exit_price: float) -> Dict:
+        """
+        Execute PM-initiated exit for MCX futures (Gold, Silver, Copper).
+
+        Simple single-leg exit using ProgressiveExecutor.
+
+        Args:
+            position: Position to exit
+            exit_price: Reference price for exit
+
+        Returns:
+            Dict with execution result
+        """
+        return self._execute_exit_openalgo(position)
+
+    def _execute_pm_exit_synthetic(self, position: Position, exit_price: float) -> Dict:
+        """
+        Execute PM-initiated exit for BANK_NIFTY synthetic futures.
+
+        Uses SyntheticFuturesExecutor for 2-leg options exit:
+        - BUY PE (close short put)
+        - SELL CE (close long call)
+
+        Args:
+            position: Position to exit
+            exit_price: Reference price for exit
+
+        Returns:
+            Dict with execution result
+        """
+        # Reuse existing synthetic exit logic
+        return self._execute_exit_openalgo(position)
 
     def get_eod_status(self) -> Dict:
         """
