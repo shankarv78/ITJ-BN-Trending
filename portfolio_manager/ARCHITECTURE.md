@@ -1,6 +1,69 @@
 # Tom Basso Portfolio Manager - Architecture
 
-## System Overview
+## System Overview: Dumb Scout / Smart General (V9.0)
+
+The system uses a **two-tier architecture** separating signal generation from execution authority:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        TRADINGVIEW (The Scout)                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────────────┐         ┌─────────────────────────┐            │
+│  │   EOD Scout Indicator   │         │   Strategy V9           │            │
+│  │   (Dumb - no state)     │         │   (Executor)            │            │
+│  ├─────────────────────────┤         ├─────────────────────────┤            │
+│  │ • Sends raw conditions  │         │ • Fires only on trade   │            │
+│  │   every 15 seconds      │         │   execution             │            │
+│  │ • NO position state     │         │ • BASE_ENTRY            │            │
+│  │ • Throttled (varip)     │         │ • PYRAMID               │            │
+│  │ • EOD window only       │         │ • EXIT                  │            │
+│  └─────────────────────────┘         └─────────────────────────┘            │
+│           │                                    │                             │
+│           │ EOD_MONITOR                        │ Order Alerts                │
+│           ▼                                    ▼                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│               PYTHON PORTFOLIO MANAGER (The General - Smart)                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌─────────────────────────┐    ┌─────────────────────────┐                 │
+│  │   PostgreSQL Database   │◄───│   EOD Monitor           │                 │
+│  │   (Source of Truth)     │    │   + Executor            │                 │
+│  ├─────────────────────────┤    ├─────────────────────────┤                 │
+│  │ • Position TRUTH        │    │ • Receives signals      │                 │
+│  │ • Pyramid count         │    │ • Overrides TradingView │                 │
+│  │ • Entry prices          │    │ • Makes decisions       │                 │
+│  │ • P&L tracking          │    │ • Places orders         │                 │
+│  └─────────────────────────┘    └─────────────────────────┘                 │
+│                                                                              │
+│  KEY PRINCIPLE: PM is the AUTHORITY on position state                       │
+│  TradingView is BLIND - it only sends raw indicator data                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why This Architecture? (PR #4)
+
+| Problem (V8) | Solution (V9) |
+|--------------|---------------|
+| TradingView position state can become stale | PM uses DATABASE as source of truth |
+| EOD_MONITOR fired on every tick → rate limiting | Scout throttles to every 15 seconds |
+| Single script handled both monitoring + execution | Separated into Indicator + Strategy |
+| PM trusted TradingView's position_status | PM overrides with its own database |
+
+### Component Roles
+
+| Component | Type | Role | State Awareness |
+|-----------|------|------|-----------------|
+| EOD Scout | TradingView Indicator | Send raw conditions during EOD window | ❌ None (dumb) |
+| Strategy V9 | TradingView Strategy | Fire alerts on trade execution | Own trades only |
+| PM | Python Application | Make all decisions, execute orders | ✅ Full (database) |
+
+---
+
+## Legacy Overview (Pre-V9)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -59,6 +122,36 @@
 │   reports      │  │ • Track fills  │
 └────────────────┘  └────────────────┘
 ```
+
+## TradingView Scripts (V9.0)
+
+### EOD Scout Indicators
+| File | Instrument | EOD Window |
+|------|------------|------------|
+| `BankNifty_EOD_Scout_V1.0.pine` | Bank Nifty | 15:15-15:30 IST |
+| `GoldMini_EOD_Scout_V1.0.pine` | Gold Mini | 23:15-23:30 IST |
+| `SilverMini_EOD_Scout_V1.0.pine` | Silver Mini | 23:15-23:30 IST |
+
+**Features:**
+- Uses `indicator()` not `strategy()`
+- `varip` throttling → fires every 15 seconds (prevents rate limiting)
+- NO position_status field → PM is authority
+- Sends raw conditions + indicators only
+
+### V9 Strategies
+| File | Instrument |
+|------|------------|
+| `BankNifty_TF_V9.0.pine` | Bank Nifty |
+| `GoldMini_TF_V9.0.pine` | Gold Mini |
+| `SilverMini_TF_V9.0.pine` | Silver Mini |
+
+**V9 Changes from V8:**
+- ❌ Removed EOD_MONITOR logic entirely (moved to Scout)
+- ✅ Only fires ORDER FILL alerts (BASE_ENTRY/PYRAMID/EXIT)
+- ✅ `barstate.isconfirmed` on entries (prevents duplicates)
+- ✅ Fixed 50% lot_b for signal triggering (PM does geometric sizing)
+
+---
 
 ## Core Components
 
@@ -392,7 +485,7 @@ def calculate_base_entry_size(...):
     lot_v = ...
     lot_m = ...
     lot_d = ...  # NEW: Drawdown-based constraint
-    
+
     final = min(lot_r, lot_v, lot_m, lot_d)  # Add to MIN
 ```
 
@@ -473,4 +566,3 @@ python portfolio_manager.py live \
    - Multiple strategies per instrument
    - Strategy allocation logic
    - Strategy correlation analysis
-
