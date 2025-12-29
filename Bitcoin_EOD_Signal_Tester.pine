@@ -1,0 +1,360 @@
+//@version=6
+// ========================================
+// BITCOIN EOD SIGNAL TESTER v2.3
+// ========================================
+// Standalone INDICATOR for testing EOD continuous signal generation
+// Tests all signal types: EOD_MONITOR, BASE_ENTRY, PYRAMID, EXIT
+//
+// Use with: BINANCE:BTCUSDT.P (perpetual) or BINANCE:BTCUSDT (spot)
+//
+// HOW IT WORKS:
+// - Pine executes on every tick
+// - Uses VARIP (not var) to persist timestamp BETWEEN ticks
+// - var resets to bar-open value on each tick (broken for our use case)
+// - varip = "var intrabar persist" - remembers updates between ticks
+//
+// v2.3 CHANGES:
+// - CRITICAL FIX: Changed var to varip for last_eod_alert_ms
+// - This fixes the "fires every tick" bug
+// - var resets on each tick, varip persists between ticks
+// ========================================
+
+indicator("Bitcoin EOD Signal Tester v2.3", overlay=true)
+
+// ========================================
+// PARAMETERS
+// ========================================
+
+group_indicators = "Indicator Settings"
+rsi_period = input.int(6, "RSI Period", group=group_indicators)
+rsi_threshold = input.float(70.0, "RSI Threshold", group=group_indicators)
+ema_period = input.int(200, "EMA Period", group=group_indicators)
+dc_period = input.int(20, "Donchian Period", group=group_indicators)
+adx_period = input.int(14, "ADX Period", group=group_indicators)
+adx_threshold = input.float(25.0, "ADX Threshold", group=group_indicators, tooltip="Entry when ADX < threshold")
+er_period = input.int(5, "Efficiency Ratio Period", group=group_indicators)
+er_threshold = input.float(0.5, "Efficiency Ratio Threshold", group=group_indicators, tooltip="Lower for crypto due to noise")
+st_period = input.int(10, "SuperTrend Period", group=group_indicators)
+st_multiplier = input.float(2.0, "SuperTrend Multiplier", group=group_indicators)
+atr_period = input.int(14, "ATR Period", group=group_indicators)
+doji_threshold = input.float(0.1, "Doji Threshold", group=group_indicators, tooltip="Body/Range ratio below this = Doji")
+
+// EOD Testing Settings
+group_eod = "EOD Testing Settings"
+enable_eod_monitoring = input.bool(true, "Enable EOD Monitoring", group=group_eod)
+// For testing: Use any hour/minute to simulate EOD window
+eod_hour = input.int(-1, "EOD Hour (-1 = Any)", minval=-1, maxval=23, group=group_eod, tooltip="-1 means always in EOD window (for testing)")
+eod_minute_start = input.int(0, "EOD Window Start (minute)", minval=0, maxval=59, group=group_eod)
+continuous_eod_mode = input.bool(true, "Continuous EOD Mode (Always Fire)", group=group_eod, tooltip="Fire EOD signals continuously for testing")
+show_eod_window = input.bool(true, "Show EOD Window on Chart", group=group_eod)
+
+// Signal Testing Settings
+group_signals = "Signal Testing"
+enable_entry_alerts = input.bool(true, "Enable Entry Alerts", group=group_signals)
+enable_pyramid_alerts = input.bool(true, "Enable Pyramid Alerts", group=group_signals)
+enable_exit_alerts = input.bool(true, "Enable Exit Alerts", group=group_signals)
+enable_eod_alerts = input.bool(true, "Enable EOD Monitor Alerts", group=group_signals)
+eod_only_on_entry = input.bool(false, "EOD Only When Entry Valid", group=group_signals, tooltip="Only fire EOD when all 7 conditions met (matches Gold/BN behavior)")
+// SIMPLE: Use chart timeframe to control alert frequency
+// - 15 second chart = alert every 15 seconds
+// - 1 minute chart = alert every 1 minute
+// TradingView rate limits "Every Tick" mode aggressively
+eod_min_interval = input.int(15, "Min Seconds Between EOD Alerts", minval=1, maxval=300, group=group_signals, tooltip="Minimum seconds between EOD_MONITOR alerts\nSet to 15 for ~4 alerts per minute")
+
+// Position Simulation Settings (for testing pyramid signals)
+group_position = "Position Simulation"
+simulate_position = input.bool(false, "Simulate Position", group=group_position, tooltip="Enable to test pyramid and exit signals")
+sim_pyramid_count = input.int(0, "Simulated Pyramid Count", minval=0, maxval=5, group=group_position)
+
+// ========================================
+// INDICATOR CALCULATIONS
+// ========================================
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// EMA
+ema = ta.ema(close, ema_period)
+
+// Donchian Channel (Use [1] offset for breakout, not current bar)
+dc_upper = ta.highest(high[1], dc_period)
+dc_lower = ta.lowest(low[1], dc_period)
+dc_middle = (dc_upper + dc_lower) / 2
+
+// ADX Calculation
+[diPlus, diMinus, adx] = ta.dmi(adx_period, adx_period)
+
+// Efficiency Ratio
+change_abs = math.abs(close - close[er_period])
+volatility_sum = math.sum(math.abs(close - close[1]), er_period)
+er = volatility_sum != 0 ? change_abs / volatility_sum : 0
+
+// SuperTrend
+[supertrend, direction] = ta.supertrend(st_multiplier, st_period)
+
+// ATR
+atr_value = ta.atr(atr_period)
+
+// Doji Detection
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) <= doji_threshold : false
+
+// ========================================
+// ENTRY/EXIT CONDITIONS (Same as Bank Nifty/Gold)
+// ========================================
+
+// 7 Entry Conditions
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+not_doji = not is_doji
+
+// Combined entry condition (ALL 7 must be true)
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and not_doji
+
+// Exit condition: Close below SuperTrend
+long_exit = close < supertrend
+
+// ========================================
+// EOD WINDOW DETECTION
+// ========================================
+
+// Flexible EOD window for testing
+// If eod_hour = -1, always in window (for continuous testing)
+// Otherwise, follow hour/minute configuration
+is_eod_alert_window = continuous_eod_mode or (eod_hour == -1) or (hour(time) == eod_hour and minute(time) >= eod_minute_start)
+
+// ========================================
+// POSITION STATE (Simulated for Indicator)
+// ========================================
+// Indicators can't track actual position like strategies
+// Use input.bool to simulate position state for testing
+
+in_position = simulate_position
+pyramid_count = sim_pyramid_count
+
+// ========================================
+// TIMESTAMP HELPER
+// ========================================
+// Generate ISO format timestamp
+getTimestamp() =>
+    // Use timenow for real-time accuracy
+    str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow)
+
+// ========================================
+// EOD_MONITOR ALERT (Time-Based Throttle)
+// ========================================
+// Fires alert every N seconds using timenow tracking
+
+// Use varip (var intrabar persist) so updates persist BETWEEN ticks on the same bar
+// Regular var resets to bar-open value on each tick, which breaks our throttle
+varip float last_eod_alert_ms = na
+
+// Current time and interval in milliseconds
+float current_ms = timenow
+float interval_ms = eod_min_interval * 1000
+
+// Calculate time since last alert (handle na for first run)
+float time_since_last = na(last_eod_alert_ms) ? interval_ms : (current_ms - last_eod_alert_ms)
+
+// Throttle check - fire if first run (na) or enough time passed
+bool throttle_ok = na(last_eod_alert_ms) or (time_since_last >= interval_ms)
+
+// Check entry condition if required
+bool entry_ok = eod_only_on_entry ? long_entry : true
+
+// Master condition: all checks must pass
+bool should_fire_eod = enable_eod_monitoring and enable_eod_alerts and is_eod_alert_window and throttle_ok and entry_ok
+
+// Build the JSON outside the if block (Pine Script quirk - helps with var updates)
+string json_conditions = '"conditions":{"rsi_condition":' + str.tostring(rsi_condition) + ',"ema_condition":' + str.tostring(ema_condition) + ',"dc_condition":' + str.tostring(dc_condition) + ',"adx_condition":' + str.tostring(adx_condition) + ',"er_condition":' + str.tostring(er_condition) + ',"st_condition":' + str.tostring(st_condition) + ',"not_doji":' + str.tostring(not_doji) + ',"long_entry":' + str.tostring(long_entry) + ',"long_exit":' + str.tostring(long_exit) + '}'
+string json_indicators = '"indicators":{"rsi":' + str.tostring(rsi, "#.##") + ',"ema":' + str.tostring(ema, "#.##") + ',"dc_upper":' + str.tostring(dc_upper, "#.##") + ',"adx":' + str.tostring(adx, "#.##") + ',"er":' + str.tostring(er, "#.####") + ',"supertrend":' + str.tostring(supertrend, "#.##") + ',"atr":' + str.tostring(atr_value, "#.##") + '}'
+string json_position = '"position_status":{"in_position":' + str.tostring(in_position) + ',"pyramid_count":' + str.tostring(pyramid_count) + '}'
+string timestamp_str = getTimestamp()
+string eod_json = '{"type":"EOD_MONITOR","instrument":"BTCUSDT","timestamp":"' + timestamp_str + '","price":' + str.tostring(close, "#.##") + ',' + json_conditions + ',' + json_indicators + ',' + json_position + '}'
+
+// Fire the alert and update timestamp
+if should_fire_eod
+    last_eod_alert_ms := current_ms
+    alert(eod_json, alert.freq_all)
+
+// ========================================
+// BASE_ENTRY ALERT (Once per bar at close)
+// ========================================
+// Simulates entry signal when all conditions are met
+
+if enable_entry_alerts and long_entry and not in_position and barstate.isconfirmed
+    // Calculate simulated position sizing values
+    stop_price = supertrend
+    timestamp_str = getTimestamp()
+
+    json_entry = '{"type":"BASE_ENTRY","instrument":"BTCUSDT","position":"Long_1","price":' + str.tostring(close, "#.##") + ',"stop":' + str.tostring(stop_price, "#.##") + ',"lots":1,"atr":' + str.tostring(atr_value, "#.##") + ',"er":' + str.tostring(er, "#.####") + ',"supertrend":' + str.tostring(supertrend, "#.##") + ',"timestamp":"' + timestamp_str + '"}'
+
+    alert(json_entry, alert.freq_once_per_bar_close)
+
+// ========================================
+// PYRAMID ALERT (When in position)
+// ========================================
+// Simulates pyramid signal for testing
+
+if enable_pyramid_alerts and in_position and long_entry and pyramid_count < 3 and barstate.isconfirmed
+    // Simulate pyramid entry
+    next_pyr = pyramid_count + 1
+    stop_price = supertrend
+    timestamp_str = getTimestamp()
+
+    json_pyramid = '{"type":"PYRAMID","instrument":"BTCUSDT","position":"Long_' + str.tostring(next_pyr + 1) + '","price":' + str.tostring(close, "#.##") + ',"stop":' + str.tostring(stop_price, "#.##") + ',"lots":1,"atr":' + str.tostring(atr_value, "#.##") + ',"er":' + str.tostring(er, "#.####") + ',"supertrend":' + str.tostring(supertrend, "#.##") + ',"timestamp":"' + timestamp_str + '"}'
+
+    alert(json_pyramid, alert.freq_once_per_bar_close)
+
+// ========================================
+// EXIT ALERT (When exit condition met)
+// ========================================
+
+if enable_exit_alerts and in_position and long_exit and barstate.isconfirmed
+    timestamp_str = getTimestamp()
+
+    json_exit = '{"type":"EXIT","instrument":"BTCUSDT","position":"ALL","price":' + str.tostring(close, "#.##") + ',"stop":' + str.tostring(supertrend, "#.##") + ',"entry_price":0,"lots":1,"reason":"SuperTrend","atr":' + str.tostring(atr_value, "#.##") + ',"er":' + str.tostring(er, "#.####") + ',"supertrend":' + str.tostring(supertrend, "#.##") + ',"timestamp":"' + timestamp_str + '"}'
+
+    alert(json_exit, alert.freq_once_per_bar_close)
+
+// ========================================
+// VISUAL INDICATORS
+// ========================================
+
+// SuperTrend
+plot(supertrend, "SuperTrend", color=direction < 0 ? color.green : color.red, linewidth=2)
+
+// EMA
+plot(ema, "EMA 200", color=color.blue, linewidth=1)
+
+// Donchian Channel
+plot(dc_upper, "DC Upper", color=color.new(color.green, 50), linewidth=1)
+plot(dc_lower, "DC Lower", color=color.new(color.red, 50), linewidth=1)
+
+// EOD Window highlight
+bgcolor(show_eod_window and is_eod_alert_window ? color.new(color.orange, 90) : na, title="EOD Window")
+
+// Entry signal markers
+plotshape(long_entry and not in_position, title="Entry Signal", location=location.belowbar, style=shape.triangleup, size=size.small, color=color.green)
+plotshape(long_exit and in_position, title="Exit Signal", location=location.abovebar, style=shape.triangledown, size=size.small, color=color.red)
+
+// ========================================
+// INFO TABLE
+// ========================================
+
+var table infoTable = table.new(position.top_right, 2, 16, bgcolor=color.new(color.black, 80), border_width=1)
+
+// Count conditions met
+conditions_met = (rsi_condition ? 1 : 0) + (ema_condition ? 1 : 0) + (dc_condition ? 1 : 0) + (adx_condition ? 1 : 0) + (er_condition ? 1 : 0) + (st_condition ? 1 : 0) + (not_doji ? 1 : 0)
+
+// Will EOD alert fire?
+will_eod_fire = should_fire_eod
+
+// Time until next alert
+seconds_until_next = math.max(0, (interval_ms - time_since_last) / 1000)
+
+if barstate.islast
+    row = 0
+
+    // Header
+    table.cell(infoTable, 0, row, "BTC EOD Tester", bgcolor=color.new(color.orange, 50), text_color=color.white)
+    table.cell(infoTable, 1, row, "v2.3", bgcolor=color.new(color.orange, 50), text_color=color.white)
+    row := row + 1
+
+    // EOD Monitor Status
+    table.cell(infoTable, 0, row, "EOD Monitor", text_color=color.gray)
+    table.cell(infoTable, 1, row, enable_eod_monitoring ? "ENABLED" : "DISABLED", bgcolor=enable_eod_monitoring ? color.new(color.green, 70) : color.new(color.red, 70), text_color=color.white)
+    row := row + 1
+
+    // EOD Window Status
+    table.cell(infoTable, 0, row, "EOD Window", text_color=color.gray)
+    table.cell(infoTable, 1, row, is_eod_alert_window ? "IN WINDOW" : "Outside", bgcolor=is_eod_alert_window ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+    row := row + 1
+
+    // EOD Alert Firing
+    table.cell(infoTable, 0, row, "EOD Alert", text_color=color.gray)
+    table.cell(infoTable, 1, row, will_eod_fire ? "FIRING ⚡" : "Not firing", bgcolor=will_eod_fire ? color.new(color.green, 50) : color.new(color.gray, 70), text_color=color.white)
+    row := row + 1
+
+    // Throttle countdown
+    throttle_text = throttle_ok ? "Ready ✓" : str.tostring(seconds_until_next, "#.0") + "s"
+    table.cell(infoTable, 0, row, "Next Alert", text_color=color.gray)
+    table.cell(infoTable, 1, row, throttle_text + " (" + str.tostring(eod_min_interval) + "s interval)", bgcolor=throttle_ok ? color.new(color.green, 70) : color.new(color.yellow, 70), text_color=color.white)
+    row := row + 1
+
+    // Separator
+    table.cell(infoTable, 0, row, "───────────", text_color=color.gray)
+    table.cell(infoTable, 1, row, "───────────", text_color=color.gray)
+    row := row + 1
+
+    // Conditions
+    table.cell(infoTable, 0, row, "Conditions", text_color=color.gray)
+    table.cell(infoTable, 1, row, str.tostring(conditions_met) + "/7", bgcolor=conditions_met == 7 ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+    row := row + 1
+
+    // Individual conditions
+    table.cell(infoTable, 0, row, "RSI >" + str.tostring(rsi_threshold, "#"), text_color=color.gray)
+    table.cell(infoTable, 1, row, rsi_condition ? "✓ " + str.tostring(rsi, "#.#") : "✗ " + str.tostring(rsi, "#.#"), text_color=rsi_condition ? color.green : color.red)
+    row := row + 1
+
+    table.cell(infoTable, 0, row, "C > EMA", text_color=color.gray)
+    table.cell(infoTable, 1, row, ema_condition ? "✓" : "✗", text_color=ema_condition ? color.green : color.red)
+    row := row + 1
+
+    table.cell(infoTable, 0, row, "C > DC Upper", text_color=color.gray)
+    table.cell(infoTable, 1, row, dc_condition ? "✓" : "✗", text_color=dc_condition ? color.green : color.red)
+    row := row + 1
+
+    table.cell(infoTable, 0, row, "ADX <" + str.tostring(adx_threshold, "#"), text_color=color.gray)
+    table.cell(infoTable, 1, row, adx_condition ? "✓ " + str.tostring(adx, "#.#") : "✗ " + str.tostring(adx, "#.#"), text_color=adx_condition ? color.green : color.red)
+    row := row + 1
+
+    table.cell(infoTable, 0, row, "ER >" + str.tostring(er_threshold, "#.#"), text_color=color.gray)
+    table.cell(infoTable, 1, row, er_condition ? "✓ " + str.tostring(er, "#.##") : "✗ " + str.tostring(er, "#.##"), text_color=er_condition ? color.green : color.red)
+    row := row + 1
+
+    table.cell(infoTable, 0, row, "C > ST", text_color=color.gray)
+    table.cell(infoTable, 1, row, st_condition ? "✓" : "✗", text_color=st_condition ? color.green : color.red)
+    row := row + 1
+
+    table.cell(infoTable, 0, row, "Not Doji", text_color=color.gray)
+    table.cell(infoTable, 1, row, not_doji ? "✓" : "✗", text_color=not_doji ? color.green : color.red)
+    row := row + 1
+
+    // Entry Signal
+    table.cell(infoTable, 0, row, "Entry Signal", text_color=color.white)
+    table.cell(infoTable, 1, row, long_entry ? "ALL MET ✓" : "WAITING", bgcolor=long_entry ? color.new(color.green, 50) : color.new(color.red, 70), text_color=color.white)
+    row := row + 1
+
+    // Price and SuperTrend
+    table.cell(infoTable, 0, row, "Price/ST", text_color=color.gray)
+    table.cell(infoTable, 1, row, str.tostring(close, "#.#") + " / " + str.tostring(supertrend, "#.#"), text_color=color.white)
+    row := row + 1
+
+// ========================================
+// NOTES
+// ========================================
+//
+// USAGE:
+// 1. Add this indicator to BINANCE:BTCUSDT.P chart
+// 2. Create TradingView alert on this indicator
+// 3. Set webhook URL to your Python listener
+// 4. Run signal_listener.py to receive signals
+//
+// SIGNAL TYPES SENT:
+// - EOD_MONITOR: Continuous tick-by-tick updates (alert.freq_all)
+// - BASE_ENTRY: Once per bar when all 7 conditions met
+// - PYRAMID: Once per bar when in position and conditions met
+// - EXIT: Once per bar when exit condition triggers
+//
+// TESTING MODES:
+// - Continuous EOD Mode: Always fire EOD signals (for rapid testing)
+// - EOD Only On Entry: Only fire EOD when entry conditions met (matches production)
+// - Simulate Position: Enable to test pyramid/exit signals
+//
+// ========================================

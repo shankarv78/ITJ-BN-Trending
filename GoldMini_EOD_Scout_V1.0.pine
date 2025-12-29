@@ -1,0 +1,240 @@
+//@version=5
+// ========================================
+// GOLD MINI EOD SCOUT v1.0
+// ========================================
+//
+// Type: Indicator (The Scout)
+// Role: Sends throttled EOD_MONITOR alerts every 15 seconds
+// Asset: MCX Gold Mini 100g Futures
+//
+// DUMB SCOUT / SMART GENERAL ARCHITECTURE:
+// ========================================
+// - This indicator is "dumb" - it only sends raw condition data
+// - Python Portfolio Manager is the "smart general" - makes execution decisions
+// - Scout is BLIND to positions (cannot see strategy state)
+// - PM is the AUTHORITY on position state (database truth)
+//
+// THROTTLING:
+// - Uses varip (not var) to persist timestamp between ticks
+// - Fires alert once every 15 seconds (configurable)
+// - Prevents TradingView rate limiting
+//
+// EOD WINDOW:
+// - Gold Mini: 23:40 - 23:55 IST (winter timing)
+// - Test mode bypasses window check for development
+//
+// ========================================
+
+indicator("Gold Mini EOD Scout v1.0", overlay=true)
+
+// ========================================
+// SETTINGS
+// ========================================
+
+group_indicators = "Indicator Settings"
+rsi_period = input.int(6, "RSI Period", group=group_indicators)
+rsi_threshold = input.float(70.0, "RSI Threshold", group=group_indicators)
+ema_period = input.int(200, "EMA Period", group=group_indicators)
+dc_period = input.int(20, "Donchian Period", group=group_indicators)
+adx_period = input.int(30, "ADX Period", group=group_indicators)
+adx_threshold = input.float(15.0, "ADX Threshold", group=group_indicators, tooltip="Entry when ADX < threshold (low volatility)")
+er_period = input.int(3, "Efficiency Ratio Period", group=group_indicators)
+er_threshold = input.float(0.8, "Efficiency Ratio Threshold", group=group_indicators)
+st_period = input.int(10, "SuperTrend Period", group=group_indicators)
+st_multiplier = input.float(1.5, "SuperTrend Multiplier", group=group_indicators)
+atr_period = input.int(14, "ATR Period", group=group_indicators)
+doji_threshold = input.float(0.1, "Doji Threshold", group=group_indicators, tooltip="Body/Range ratio below this = Doji")
+
+group_eod = "EOD Scout Settings"
+enable_eod_scout = input.bool(true, "Enable EOD Scout", group=group_eod)
+eod_alert_interval = input.int(15, "Alert Interval (seconds)", minval=5, maxval=60, group=group_eod, tooltip="Minimum seconds between EOD_MONITOR alerts")
+force_eod_test_mode = input.bool(false, "Force EOD Test Mode", group=group_eod, tooltip="Bypass EOD window check for testing")
+
+// EOD Window: 23:40 - 23:55 IST for MCX Gold Mini (winter timing)
+eod_window_start_hour = input.int(23, "EOD Start Hour", minval=0, maxval=23, group=group_eod)
+eod_window_start_minute = input.int(40, "EOD Start Minute", minval=0, maxval=59, group=group_eod)
+eod_window_end_hour = input.int(23, "EOD End Hour", minval=0, maxval=23, group=group_eod)
+eod_window_end_minute = input.int(55, "EOD End Minute", minval=0, maxval=59, group=group_eod)
+
+// ========================================
+// INDICATOR CALCULATIONS
+// ========================================
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// EMA
+ema = ta.ema(close, ema_period)
+
+// Donchian Channel (Use [1] offset for breakout, not current bar)
+dc_upper = ta.highest(high[1], dc_period)
+dc_lower = ta.lowest(low[1], dc_period)
+
+// ADX Calculation
+[diPlus, diMinus, adx] = ta.dmi(adx_period, adx_period)
+
+// Efficiency Ratio
+change_abs = math.abs(close - close[er_period])
+volatility_sum = math.sum(math.abs(close - close[1]), er_period)
+er = volatility_sum != 0 ? change_abs / volatility_sum : 0
+
+// SuperTrend
+[supertrend, direction] = ta.supertrend(st_multiplier, st_period)
+
+// ATR
+atr_value = ta.atr(atr_period)
+
+// Doji Detection
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) < doji_threshold : false
+not_doji = not is_doji
+
+// ========================================
+// ENTRY/EXIT CONDITIONS
+// ========================================
+
+// Individual conditions
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+
+// Combined entry signal (all 7 conditions must be true)
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and not_doji
+
+// Exit condition (price below SuperTrend)
+long_exit = close < supertrend
+
+// ========================================
+// EOD WINDOW CHECK
+// ========================================
+
+// Check if current time is within EOD window
+// Uses timenow (real-time) for accurate tick-by-tick checking
+current_hour = hour(timenow)
+current_minute = minute(timenow)
+
+// Calculate minutes from midnight for comparison
+current_time_minutes = current_hour * 60 + current_minute
+eod_start_minutes = eod_window_start_hour * 60 + eod_window_start_minute
+eod_end_minutes = eod_window_end_hour * 60 + eod_window_end_minute
+
+// Handle window that crosses midnight (not needed for Gold, but future-proof)
+is_in_eod_window = eod_start_minutes <= eod_end_minutes ?
+     (current_time_minutes >= eod_start_minutes and current_time_minutes < eod_end_minutes) :
+     (current_time_minutes >= eod_start_minutes or current_time_minutes < eod_end_minutes)
+
+// Apply test mode override
+is_eod_active = force_eod_test_mode or is_in_eod_window
+
+// ========================================
+// TIMESTAMP HELPER
+// ========================================
+
+getTimestamp() =>
+    // IST is UTC+5:30
+    ist_offset_ms = 5 * 60 * 60 * 1000 + 30 * 60 * 1000
+    str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
+
+// ========================================
+// VARIP THROTTLED EOD ALERT
+// ========================================
+// Uses varip (not var) to persist between ticks on the same bar
+// var resets to bar-open value each tick - WRONG for throttling
+// varip = "var intrabar persist" - remembers updates between ticks
+
+varip float last_alert_ms = na
+
+float current_ms = timenow
+float interval_ms = eod_alert_interval * 1000
+
+// Calculate time since last alert
+float time_since_last = na(last_alert_ms) ? interval_ms : (current_ms - last_alert_ms)
+
+// Throttle check - fire if first run (na) or enough time passed
+bool throttle_ok = na(last_alert_ms) or (time_since_last >= interval_ms)
+
+// Master condition for firing alert
+bool should_fire = enable_eod_scout and is_eod_active and throttle_ok
+
+// Build JSON payload
+string json_conditions = '"conditions":{"rsi_condition":' + str.tostring(rsi_condition) + ',"ema_condition":' + str.tostring(ema_condition) + ',"dc_condition":' + str.tostring(dc_condition) + ',"adx_condition":' + str.tostring(adx_condition) + ',"er_condition":' + str.tostring(er_condition) + ',"st_condition":' + str.tostring(st_condition) + ',"not_doji":' + str.tostring(not_doji) + ',"long_entry":' + str.tostring(long_entry) + ',"long_exit":' + str.tostring(long_exit) + '}'
+
+string json_indicators = '"indicators":{"rsi":' + str.tostring(rsi, "#.##") + ',"ema":' + str.tostring(ema, "#.##") + ',"dc_upper":' + str.tostring(dc_upper, "#.##") + ',"adx":' + str.tostring(adx, "#.##") + ',"er":' + str.tostring(er, "#.####") + ',"supertrend":' + str.tostring(supertrend, "#.##") + ',"atr":' + str.tostring(atr_value, "#.##") + '}'
+
+string timestamp_str = getTimestamp()
+
+// Complete EOD_MONITOR JSON - NO position_status (Scout is blind to positions)
+string eod_json = '{"type":"EOD_MONITOR","instrument":"GOLD_MINI","timestamp":"' + timestamp_str + '","price":' + str.tostring(close, "#.##") + ',' + json_conditions + ',' + json_indicators + '}'
+
+// Fire alert and update timestamp
+if should_fire
+    last_alert_ms := current_ms
+    alert(eod_json, alert.freq_all)
+
+// ========================================
+// MINIMAL VISUALS (Optional Debug)
+// ========================================
+// Scout is invisible by default - no plots to avoid chart clutter
+// Uncomment below for debugging
+
+// plot(supertrend, "SuperTrend", color=direction < 0 ? color.green : color.red, display=display.none)
+// plot(ema, "EMA", color=color.blue, display=display.none)
+
+// EOD Window background (only when testing)
+bgcolor(force_eod_test_mode and is_eod_active ? color.new(color.orange, 95) : na, title="EOD Test Mode Active")
+
+// ========================================
+// INFO TABLE (Debug - Optional)
+// ========================================
+
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 85), border_width=1)
+
+conditions_met = (rsi_condition ? 1 : 0) + (ema_condition ? 1 : 0) + (dc_condition ? 1 : 0) + (adx_condition ? 1 : 0) + (er_condition ? 1 : 0) + (st_condition ? 1 : 0) + (not_doji ? 1 : 0)
+seconds_until_next = throttle_ok ? 0 : math.max(0, (interval_ms - time_since_last) / 1000)
+
+if barstate.islast and force_eod_test_mode
+    table.cell(infoTable, 0, 0, "Gold Scout", bgcolor=color.new(color.orange, 50), text_color=color.white)
+    table.cell(infoTable, 1, 0, "v1.0", bgcolor=color.new(color.orange, 50), text_color=color.white)
+
+    table.cell(infoTable, 0, 1, "EOD Active", text_color=color.gray)
+    table.cell(infoTable, 1, 1, is_eod_active ? "YES" : "NO", bgcolor=is_eod_active ? color.new(color.green, 70) : color.new(color.red, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 2, "Next Alert", text_color=color.gray)
+    table.cell(infoTable, 1, 2, throttle_ok ? "Ready" : str.tostring(seconds_until_next, "#") + "s", text_color=color.white)
+
+    table.cell(infoTable, 0, 3, "Conditions", text_color=color.gray)
+    table.cell(infoTable, 1, 3, str.tostring(conditions_met) + "/7", bgcolor=conditions_met == 7 ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 4, "Entry Signal", text_color=color.gray)
+    table.cell(infoTable, 1, 4, long_entry ? "VALID" : "---", bgcolor=long_entry ? color.new(color.green, 50) : color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 5, "Price", text_color=color.gray)
+    table.cell(infoTable, 1, 5, str.tostring(close, "#.##"), text_color=color.white)
+
+// ========================================
+// NOTES
+// ========================================
+//
+// USAGE:
+// 1. Add this indicator to MCX Gold Mini chart (1H timeframe)
+// 2. Create alert: "Any alert() function call"
+// 3. Set webhook URL to your Python Portfolio Manager
+// 4. Alerts fire every 15s during 23:40-23:55 IST
+//
+// TEST MODE:
+// - Enable "Force EOD Test Mode" to fire alerts immediately
+// - Use this for development/testing outside EOD window
+//
+// ARCHITECTURE:
+// - Scout sends raw condition data (7 booleans + indicator values)
+// - Python PM determines actual position state from database
+// - Python PM decides whether to execute based on:
+//   1. Conditions from scout
+//   2. Database position state (the authority)
+//   3. Time within execution window (T-60 to T-0)
+//
+// ========================================

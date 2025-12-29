@@ -428,13 +428,16 @@ class EODMonitorSignal:
 
     Note: 'sizing' field is OPTIONAL (deprecated in v8.0).
     Python calculates position sizing using real portfolio equity.
+
+    V9 Scout Mode: position_status is OPTIONAL.
+    Scout indicators don't track positions - PM gets state from database.
     """
     timestamp: datetime
     instrument: str                  # BANK_NIFTY or GOLD_MINI
     price: float                     # Current price at signal time
     conditions: EODConditions        # All 7 conditions + entry/exit signals
     indicators: EODIndicators        # All indicator values
-    position_status: EODPositionStatus  # Current position info (for reference)
+    position_status: Optional[EODPositionStatus] = None  # V9: Optional (Scout mode) - PM uses DB
     sizing: Optional[EODSizing] = None  # DEPRECATED: Python calculates sizing
 
     # Computed fields
@@ -547,14 +550,18 @@ class EODMonitorSignal:
             roc=float(ind_data['roc']) if 'roc' in ind_data and ind_data['roc'] else None
         )
 
-        # Parse position status
-        pos_data = data.get('position_status', {})
-        position_status = EODPositionStatus(
-            in_position=pos_data.get('in_position', False),
-            pyramid_count=int(pos_data.get('pyramid_count', 0)),
-            entry_price=float(pos_data['entry_price']) if pos_data.get('entry_price') else None,
-            unrealized_pnl=float(pos_data['unrealized_pnl']) if pos_data.get('unrealized_pnl') else None
-        )
+        # Parse position status (OPTIONAL in V9 Scout mode)
+        # Scout indicators don't track positions - PM gets state from database
+        pos_data = data.get('position_status')
+        position_status = None
+        if pos_data:
+            position_status = EODPositionStatus(
+                in_position=pos_data.get('in_position', False),
+                pyramid_count=int(pos_data.get('pyramid_count', 0)),
+                entry_price=float(pos_data['entry_price']) if pos_data.get('entry_price') else None,
+                unrealized_pnl=float(pos_data['unrealized_pnl']) if pos_data.get('unrealized_pnl') else None
+            )
+        # If position_status is None, PM will populate from database (Scout mode)
 
         # Parse sizing (OPTIONAL - deprecated in v8.0, Python calculates position sizing)
         sizing = None

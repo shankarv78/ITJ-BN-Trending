@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 from datetime import datetime
-from core.models import Signal, SignalType, Position, InstrumentType, EODMonitorSignal
+from core.models import Signal, SignalType, Position, InstrumentType, EODMonitorSignal, EODPositionStatus
 from core.portfolio_state import PortfolioStateManager
 from core.eod_monitor import EODMonitor
 from core.eod_executor import EODExecutor, EODExecutionContext, EODExecutionPhase
@@ -1848,6 +1848,9 @@ class LiveTradingEngine:
         Called at T-45 seconds before market close.
         Validates conditions and prepares for execution.
 
+        IMPORTANT (Gap 1 Fix): Uses DATABASE position state, not signal state.
+        TradingView is a "dumb scout" - Python PM is the authority on position state.
+
         Args:
             instrument: Trading instrument
 
@@ -1858,6 +1861,50 @@ class LiveTradingEngine:
             return {'success': False, 'reason': 'eod_disabled'}
 
         logger.info(f"[LIVE-EOD] Condition check for {instrument}")
+
+        # ============================================================
+        # GAP 1 FIX: Override signal position_status with DATABASE truth
+        # ============================================================
+        # TradingView sends raw indicator data but may have stale/incorrect
+        # position info. Python PM is the authority on position state.
+        state = self.eod_monitor.get_execution_state(instrument)
+        if state and state.latest_signal:
+            # Get actual position state from database
+            portfolio_state = self.portfolio.get_current_state()
+            db_positions = portfolio_state.get_positions_for_instrument(instrument)
+            db_in_position = len(db_positions) > 0
+            db_pyramid_count = len(db_positions) - 1 if db_in_position else 0
+
+            # Handle Scout mode (no position_status from TradingView)
+            if state.latest_signal.position_status is None:
+                # Create position_status from database (Scout mode)
+                logger.info(
+                    f"[LIVE-EOD] Scout mode: Creating position_status from database for {instrument}"
+                )
+                state.latest_signal.position_status = EODPositionStatus(
+                    in_position=db_in_position,
+                    pyramid_count=db_pyramid_count
+                )
+            else:
+                # V8 compatibility: Log mismatch and override
+                signal_in_position = state.latest_signal.position_status.in_position
+                signal_pyramid_count = state.latest_signal.position_status.pyramid_count
+                if db_in_position != signal_in_position or db_pyramid_count != signal_pyramid_count:
+                    logger.warning(
+                        f"[LIVE-EOD] Position state mismatch for {instrument}: "
+                        f"Signal says in_position={signal_in_position}, pyramid_count={signal_pyramid_count}; "
+                        f"Database says in_position={db_in_position}, pyramid_count={db_pyramid_count}. "
+                        f"Using DATABASE values (PM is the authority)."
+                    )
+                # Override signal's position_status with database truth
+                state.latest_signal.position_status.in_position = db_in_position
+                state.latest_signal.position_status.pyramid_count = db_pyramid_count
+
+            logger.info(
+                f"[LIVE-EOD] Database position state for {instrument}: "
+                f"in_position={db_in_position}, pyramid_count={db_pyramid_count}"
+            )
+        # ============================================================
 
         # Check if we should execute
         if not self.eod_monitor.should_execute(instrument):
@@ -1901,6 +1948,9 @@ class LiveTradingEngine:
         Called at T-30 seconds before market close.
         Places the order if conditions were met at T-45.
 
+        IMPORTANT (Gap 1 + Gap 3 Fix): Re-validates with fresh DATABASE state
+        at execution time to catch any condition changes since T-45.
+
         Args:
             instrument: Trading instrument
 
@@ -1931,8 +1981,47 @@ class LiveTradingEngine:
                 'instrument': instrument
             }
 
-        # Get signal and action type
+        # ============================================================
+        # GAP 1 + GAP 3 FIX: Re-validate with fresh DATABASE state
+        # ============================================================
+        # Even though we checked at T-45, we re-check at T-30 with fresh
+        # database state to catch any changes (e.g., manual intervention,
+        # or if conditions changed via fresh signal updates)
         eod_signal = state.latest_signal
+        if not eod_signal:
+            logger.warning(f"[LIVE-EOD] No signal available for {instrument}")
+            return {
+                'success': False,
+                'reason': 'no_signal',
+                'instrument': instrument
+            }
+
+        # Get fresh position state from database
+        portfolio_state = self.portfolio.get_current_state()
+        db_positions = portfolio_state.get_positions_for_instrument(instrument)
+        db_in_position = len(db_positions) > 0
+        db_pyramid_count = len(db_positions) - 1 if db_in_position else 0
+
+        # Log current database state at T-30
+        logger.info(
+            f"[LIVE-EOD] T-30 fresh DB state for {instrument}: "
+            f"in_position={db_in_position}, pyramid_count={db_pyramid_count}"
+        )
+
+        # Override signal's position_status with fresh database truth (null-safe)
+        if eod_signal.position_status is None:
+            # Scout mode: create position_status from database
+            eod_signal.position_status = EODPositionStatus(
+                in_position=db_in_position,
+                pyramid_count=db_pyramid_count
+            )
+        else:
+            # V8 mode: override existing
+            eod_signal.position_status.in_position = db_in_position
+            eod_signal.position_status.pyramid_count = db_pyramid_count
+        # ============================================================
+
+        # Get signal and action type (now uses corrected position state)
         action = eod_signal.get_signal_type_to_execute()
 
         if not action:
