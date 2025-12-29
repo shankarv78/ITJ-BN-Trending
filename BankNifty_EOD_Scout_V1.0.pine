@@ -1,0 +1,216 @@
+//@version=5
+// ========================================
+// BANK NIFTY EOD SCOUT v1.0
+// ========================================
+//
+// Type: Indicator (The Scout)
+// Role: Sends throttled EOD_MONITOR alerts every 15 seconds
+// Asset: Bank Nifty (NSE)
+//
+// DUMB SCOUT / SMART GENERAL ARCHITECTURE:
+// ========================================
+// - This indicator is "dumb" - it only sends raw condition data
+// - Python Portfolio Manager is the "smart general" - makes execution decisions
+// - Scout is BLIND to positions (cannot see strategy state)
+// - PM is the AUTHORITY on position state (database truth)
+//
+// THROTTLING:
+// - Uses varip (not var) to persist timestamp between ticks
+// - Fires alert once every 15 seconds (configurable)
+// - Prevents TradingView rate limiting
+//
+// EOD WINDOW:
+// - Bank Nifty: 15:15 - 15:30 IST (NSE closing window)
+// - Test mode bypasses window check for development
+//
+// ========================================
+
+indicator("Bank Nifty EOD Scout v1.0", overlay=true)
+
+// ========================================
+// SETTINGS
+// ========================================
+
+group_indicators = "Indicator Settings"
+rsi_period = input.int(6, "RSI Period", group=group_indicators)
+rsi_threshold = input.float(70.0, "RSI Threshold", group=group_indicators)
+ema_period = input.int(200, "EMA Period", group=group_indicators)
+dc_period = input.int(20, "Donchian Period", group=group_indicators)
+adx_period = input.int(14, "ADX Period", group=group_indicators, tooltip="Bank Nifty: 14 (vs 30 for commodities)")
+adx_threshold = input.float(25.0, "ADX Threshold", group=group_indicators, tooltip="Bank Nifty: 25")
+er_period = input.int(5, "Efficiency Ratio Period", group=group_indicators, tooltip="Bank Nifty: 5 (vs 3 for commodities)")
+er_threshold = input.float(0.5, "Efficiency Ratio Threshold", group=group_indicators, tooltip="Bank Nifty: 0.5 (vs 0.8 for commodities)")
+st_period = input.int(10, "SuperTrend Period", group=group_indicators)
+st_multiplier = input.float(2.0, "SuperTrend Multiplier", group=group_indicators, tooltip="Bank Nifty: 2.0 (vs 1.5 for commodities)")
+atr_period = input.int(14, "ATR Period", group=group_indicators)
+doji_threshold = input.float(0.1, "Doji Threshold", group=group_indicators, tooltip="Body/Range ratio below this = Doji")
+
+group_eod = "EOD Scout Settings"
+enable_eod_scout = input.bool(true, "Enable EOD Scout", group=group_eod)
+eod_alert_interval = input.int(15, "Alert Interval (seconds)", minval=5, maxval=60, group=group_eod, tooltip="Minimum seconds between EOD_MONITOR alerts")
+force_eod_test_mode = input.bool(false, "Force EOD Test Mode", group=group_eod, tooltip="Bypass EOD window check for testing")
+
+// EOD Window: 15:15 - 15:30 IST for Bank Nifty (NSE)
+eod_window_start_hour = input.int(15, "EOD Start Hour", minval=0, maxval=23, group=group_eod)
+eod_window_start_minute = input.int(15, "EOD Start Minute", minval=0, maxval=59, group=group_eod)
+eod_window_end_hour = input.int(15, "EOD End Hour", minval=0, maxval=23, group=group_eod)
+eod_window_end_minute = input.int(30, "EOD End Minute", minval=0, maxval=59, group=group_eod)
+
+// ========================================
+// INDICATOR CALCULATIONS
+// ========================================
+
+// RSI
+rsi = ta.rsi(close, rsi_period)
+
+// EMA
+ema = ta.ema(close, ema_period)
+
+// Donchian Channel (Use [1] offset for breakout, not current bar)
+dc_upper = ta.highest(high[1], dc_period)
+dc_lower = ta.lowest(low[1], dc_period)
+
+// ADX Calculation
+[diPlus, diMinus, adx] = ta.dmi(adx_period, adx_period)
+
+// Efficiency Ratio
+change_abs = math.abs(close - close[er_period])
+volatility_sum = math.sum(math.abs(close - close[1]), er_period)
+er = volatility_sum != 0 ? change_abs / volatility_sum : 0
+
+// SuperTrend
+[supertrend, direction] = ta.supertrend(st_multiplier, st_period)
+
+// ATR
+atr_value = ta.atr(atr_period)
+
+// Doji Detection
+body_size = math.abs(close - open)
+candle_range = high - low
+is_doji = candle_range > 0 ? (body_size / candle_range) < doji_threshold : false
+not_doji = not is_doji
+
+// ========================================
+// ENTRY/EXIT CONDITIONS
+// ========================================
+
+// Individual conditions
+rsi_condition = rsi > rsi_threshold
+ema_condition = close > ema
+dc_condition = close > dc_upper
+adx_condition = adx < adx_threshold
+er_condition = er > er_threshold
+st_condition = close > supertrend
+
+// Combined entry signal (all 7 conditions must be true)
+long_entry = rsi_condition and ema_condition and dc_condition and adx_condition and er_condition and st_condition and not_doji
+
+// Exit condition (price below SuperTrend)
+long_exit = close < supertrend
+
+// ========================================
+// EOD WINDOW CHECK
+// ========================================
+
+current_hour = hour(timenow)
+current_minute = minute(timenow)
+
+current_time_minutes = current_hour * 60 + current_minute
+eod_start_minutes = eod_window_start_hour * 60 + eod_window_start_minute
+eod_end_minutes = eod_window_end_hour * 60 + eod_window_end_minute
+
+is_in_eod_window = eod_start_minutes <= eod_end_minutes ?
+     (current_time_minutes >= eod_start_minutes and current_time_minutes < eod_end_minutes) :
+     (current_time_minutes >= eod_start_minutes or current_time_minutes < eod_end_minutes)
+
+is_eod_active = force_eod_test_mode or is_in_eod_window
+
+// ========================================
+// TIMESTAMP HELPER
+// ========================================
+
+getTimestamp() =>
+    ist_offset_ms = 5 * 60 * 60 * 1000 + 30 * 60 * 1000
+    str.format("{0,date,yyyy-MM-dd'T'HH:mm:ss}", timenow + ist_offset_ms)
+
+// ========================================
+// VARIP THROTTLED EOD ALERT
+// ========================================
+
+varip float last_alert_ms = na
+
+float current_ms = timenow
+float interval_ms = eod_alert_interval * 1000
+
+float time_since_last = na(last_alert_ms) ? interval_ms : (current_ms - last_alert_ms)
+bool throttle_ok = na(last_alert_ms) or (time_since_last >= interval_ms)
+
+bool should_fire = enable_eod_scout and is_eod_active and throttle_ok
+
+// Build JSON payload
+string json_conditions = '"conditions":{"rsi_condition":' + str.tostring(rsi_condition) + ',"ema_condition":' + str.tostring(ema_condition) + ',"dc_condition":' + str.tostring(dc_condition) + ',"adx_condition":' + str.tostring(adx_condition) + ',"er_condition":' + str.tostring(er_condition) + ',"st_condition":' + str.tostring(st_condition) + ',"not_doji":' + str.tostring(not_doji) + ',"long_entry":' + str.tostring(long_entry) + ',"long_exit":' + str.tostring(long_exit) + '}'
+
+string json_indicators = '"indicators":{"rsi":' + str.tostring(rsi, "#.##") + ',"ema":' + str.tostring(ema, "#.##") + ',"dc_upper":' + str.tostring(dc_upper, "#.##") + ',"adx":' + str.tostring(adx, "#.##") + ',"er":' + str.tostring(er, "#.####") + ',"supertrend":' + str.tostring(supertrend, "#.##") + ',"atr":' + str.tostring(atr_value, "#.##") + '}'
+
+string timestamp_str = getTimestamp()
+
+// Complete EOD_MONITOR JSON - NO position_status (Scout is blind to positions)
+string eod_json = '{"type":"EOD_MONITOR","instrument":"BANK_NIFTY","timestamp":"' + timestamp_str + '","price":' + str.tostring(close, "#.##") + ',' + json_conditions + ',' + json_indicators + '}'
+
+if should_fire
+    last_alert_ms := current_ms
+    alert(eod_json, alert.freq_all)
+
+// ========================================
+// MINIMAL VISUALS
+// ========================================
+
+bgcolor(force_eod_test_mode and is_eod_active ? color.new(color.blue, 95) : na, title="EOD Test Mode Active")
+
+// ========================================
+// INFO TABLE (Debug)
+// ========================================
+
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 85), border_width=1)
+
+conditions_met = (rsi_condition ? 1 : 0) + (ema_condition ? 1 : 0) + (dc_condition ? 1 : 0) + (adx_condition ? 1 : 0) + (er_condition ? 1 : 0) + (st_condition ? 1 : 0) + (not_doji ? 1 : 0)
+seconds_until_next = throttle_ok ? 0 : math.max(0, (interval_ms - time_since_last) / 1000)
+
+if barstate.islast and force_eod_test_mode
+    table.cell(infoTable, 0, 0, "BN Scout", bgcolor=color.new(color.blue, 50), text_color=color.white)
+    table.cell(infoTable, 1, 0, "v1.0", bgcolor=color.new(color.blue, 50), text_color=color.white)
+
+    table.cell(infoTable, 0, 1, "EOD Active", text_color=color.gray)
+    table.cell(infoTable, 1, 1, is_eod_active ? "YES" : "NO", bgcolor=is_eod_active ? color.new(color.green, 70) : color.new(color.red, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 2, "Next Alert", text_color=color.gray)
+    table.cell(infoTable, 1, 2, throttle_ok ? "Ready" : str.tostring(seconds_until_next, "#") + "s", text_color=color.white)
+
+    table.cell(infoTable, 0, 3, "Conditions", text_color=color.gray)
+    table.cell(infoTable, 1, 3, str.tostring(conditions_met) + "/7", bgcolor=conditions_met == 7 ? color.new(color.green, 70) : color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 4, "Entry Signal", text_color=color.gray)
+    table.cell(infoTable, 1, 4, long_entry ? "VALID" : "---", bgcolor=long_entry ? color.new(color.green, 50) : color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(infoTable, 0, 5, "Price", text_color=color.gray)
+    table.cell(infoTable, 1, 5, str.tostring(close, "#.##"), text_color=color.white)
+
+// ========================================
+// NOTES
+// ========================================
+//
+// USAGE:
+// 1. Add this indicator to Bank Nifty chart (75min or 1H timeframe)
+// 2. Create alert: "Any alert() function call"
+// 3. Set webhook URL to your Python Portfolio Manager
+// 4. Alerts fire every 15s during 15:15-15:30 IST
+//
+// KEY DIFFERENCES FROM COMMODITIES:
+// - EOD Window: 15:15-15:30 IST (vs 23:40-23:55 for MCX)
+// - ADX period: 14 (vs 30)
+// - ER period: 5 (vs 3)
+// - ER threshold: 0.5 (vs 0.8)
+// - SuperTrend multiplier: 2.0 (vs 1.5)
+// - Instrument in JSON: "BANK_NIFTY"
+//
+// ========================================
