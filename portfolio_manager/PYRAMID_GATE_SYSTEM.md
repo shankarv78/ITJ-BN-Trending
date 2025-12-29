@@ -238,38 +238,96 @@ These gates are enforced by PM even if Pine Script sends the pyramid signal.
 
 ## Position Sizing (Separate from Gating)
 
-After gates pass, position size is calculated independently:
+After gates pass, position size is calculated independently.
 
-### Pine Script: Triple Constraint
+### V9.0 Two-Tier Architecture (PR #5)
+
+**Problem:** Prior to V9.0, Pine used geometric scaling for `lot_b`:
 ```pine
+// OLD (V8.5): Geometric scaling in Pine
+lot_b := math.floor(initial_position_size * math.pow(0.5, pyramid_count + 1))
+// PYR1: 50%, PYR2: 25%, PYR3: 12.5%, PYR4: 6.25%...
+```
+
+This caused **later pyramids to fail silently**:
+
+| Pyramid | lot_b (base=10) | Result |
+|---------|-----------------|--------|
+| PYR1 | floor(10 × 0.5) = 5 | ✅ Signal fires |
+| PYR2 | floor(10 × 0.25) = 2 | ✅ Signal fires |
+| PYR3 | floor(10 × 0.125) = 1 | ✅ Signal fires |
+| PYR4 | floor(10 × 0.0625) = **0** | ❌ **No signal!** |
+
+When `pyramid_lots = 0`, no alert fires → PM never sees the opportunity.
+
+**Solution:** Split responsibilities between Pine and PM:
+
+| Component | Role | lot_b Calculation |
+|-----------|------|-------------------|
+| **Pine Script** | Signal generator | **Fixed 50%** (ensures ALL signals fire) |
+| **PM** | Execution authority | **Geometric 0.5^(n+1)** (actual sizing) |
+
+### Pine Script V9.0: Fixed 50% for Triggering
+```pine
+// V9.0: Fixed 50% ensures signals ALWAYS fire
 lot_a = free_margin / margin_per_lot          // Margin constraint
-lot_b = initial_position_size × 0.5           // Geometric scaling
+lot_b = initial_position_size × 0.5           // FIXED 50% (not geometric!)
 lot_c = available_risk_budget / risk_per_lot  // Profit protection
 
 pyramid_lots = MIN(lot_a, lot_b, lot_c)
+// Signal always fires if gates pass - PM decides execution
 ```
 
-### Portfolio Manager: Tom Basso 3-Constraint
+### Portfolio Manager: Geometric Scaling for Execution
 ```python
-lot_r = (equity × 0.5%) / risk_per_lot × ER   // Risk-based
-lot_v = (equity × 0.2%) / vol_per_lot         // Volatility-based
-lot_m = available_margin / margin_per_lot     // Margin-based
+# position_sizer.py - PM calculates actual execution sizing
+geometric_multiplier = 0.5 ** (pyramid_count + 1)
+lot_b = math.floor(base_position_size * geometric_multiplier)
 
-final_lots = FLOOR(MIN(lot_r, lot_v, lot_m))
+# PYR1 (count=0): 0.5^1 = 50%
+# PYR2 (count=1): 0.5^2 = 25%
+# PYR3 (count=2): 0.5^3 = 12.5%
+# PYR4 (count=3): 0.5^4 = 6.25% → rounds to 0 → blocked
 ```
 
-**Key Point:** PM calculates position size from its ₹50L shared pool, not from Pine Script's calculation.
+### What Happens to PYR4+ Signals
+
+| Step | What Happens |
+|------|--------------|
+| Pine fires PYR4 | ✅ Signal sent (fixed 50% lot_b = 5) |
+| PM receives signal | ✅ Webhook processed |
+| PM calculates sizing | lot_b = floor(10 × 0.0625) = 0 |
+| PM decision | final_lots = 0 → **No order placed** |
+| Result | Signal acknowledged, execution blocked |
+
+This is **correct behavior** - PM is the decision authority, not Pine.
+
+### Why This Architecture
+
+1. **Separation of Concerns**: Pine generates signals, PM executes
+2. **No Silent Failures**: All pyramid opportunities reach PM
+3. **PM Authority**: PM makes the final sizing decision
+4. **Geometric Discipline**: Later pyramids get smaller positions (risk control)
+
+**Key Point:** PM calculates position size from its ₹50L shared pool using geometric scaling. Pine's `lots` value is just a suggestion to ensure the signal fires.
 
 ---
 
 ## Summary
 
-| Aspect | Pine Script | Portfolio Manager | Match? |
-|--------|-------------|-------------------|--------|
-| 1R Gate Logic | `price_move > initial_risk` | `price_move > initial_risk` | ✓ |
-| ATR Spacing | Configurable per instrument | Configurable per instrument | ✓ |
-| Capital for Gating | Not used (1R is price-based) | Not used (1R is price-based) | ✓ |
-| Position Sizing | Own calculation | Tom Basso 3-constraint | PM overrides |
+| Aspect | Pine Script (V9.0) | Portfolio Manager | Notes |
+|--------|-------------------|-------------------|-------|
+| 1R Gate Logic | `price_move > initial_risk` | `price_move > initial_risk` | ✓ Identical |
+| ATR Spacing | Configurable per instrument | Configurable per instrument | ✓ Identical |
+| Capital for Gating | Not used (1R is price-based) | Not used (1R is price-based) | ✓ Identical |
+| **Pyramid lot_b** | **Fixed 50%** (trigger) | **Geometric 0.5^(n+1)** (execute) | PM authority |
 | Additional Gates | None | Risk + Profit gates | PM adds |
 
-The 1R gate ensures **signal timing is identical** between Pine Script and PM, while PM handles position sizing and additional risk controls independently.
+### Design Principles (V9.0)
+
+1. **Signal Timing**: 1R gate ensures identical timing between Pine and PM
+2. **Signal Reliability**: Fixed 50% in Pine ensures ALL pyramid signals fire
+3. **Execution Authority**: PM calculates actual sizing with geometric scaling
+4. **Risk Control**: Later pyramids get smaller positions (geometric discipline)
+
+The 1R gate ensures **signal timing is identical** between Pine Script and PM, while PM handles position sizing (with geometric scaling) and additional risk controls independently.
