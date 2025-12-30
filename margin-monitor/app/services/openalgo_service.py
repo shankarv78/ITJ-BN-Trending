@@ -4,11 +4,31 @@ Margin Monitor - OpenAlgo API Client Service
 
 import httpx
 import logging
-from typing import List, TypedDict, Optional
+import time
+from typing import List, TypedDict, Optional, Tuple, Any
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Simple in-memory cache with TTL
+_cache: dict[str, Tuple[float, Any]] = {}
+CACHE_TTL_SECONDS = 5  # 5 second cache to prevent API hammering
+
+
+def _get_cached(key: str) -> Optional[Any]:
+    """Get value from cache if not expired."""
+    if key in _cache:
+        timestamp, value = _cache[key]
+        if time.time() - timestamp < CACHE_TTL_SECONDS:
+            return value
+        del _cache[key]
+    return None
+
+
+def _set_cached(key: str, value: Any) -> None:
+    """Store value in cache with current timestamp."""
+    _cache[key] = (time.time(), value)
 
 
 class FundsData(TypedDict):
@@ -56,7 +76,15 @@ class OpenAlgoService:
 
         Raises:
             OpenAlgoError: If API call fails.
+
+        Note:
+            Results are cached for 5 seconds to prevent API hammering.
         """
+        # Check cache first
+        cached = _get_cached("funds")
+        if cached is not None:
+            return cached
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
@@ -72,13 +100,15 @@ class OpenAlgoService:
 
                 data = result["data"]
 
-                return {
+                funds_data: FundsData = {
                     "used_margin": float(data["utiliseddebits"]),
                     "available_cash": float(data["availablecash"]),
                     "collateral": float(data["collateral"]),
                     "m2m_realized": float(data["m2mrealized"]),
                     "m2m_unrealized": float(data["m2munrealized"]),
                 }
+                _set_cached("funds", funds_data)
+                return funds_data
 
             except httpx.HTTPStatusError as e:
                 logger.error(f"OpenAlgo funds API HTTP error: {e}")
@@ -99,7 +129,15 @@ class OpenAlgoService:
 
         Raises:
             OpenAlgoError: If API call fails.
+
+        Note:
+            Results are cached for 5 seconds to prevent API hammering.
         """
+        # Check cache first
+        cached = _get_cached("positions")
+        if cached is not None:
+            return cached
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
@@ -125,6 +163,7 @@ class OpenAlgoService:
                         "pnl": float(pos["pnl"]),
                     })
 
+                _set_cached("positions", positions)
                 return positions
 
             except httpx.HTTPStatusError as e:

@@ -26,10 +26,32 @@ from app.api.schemas import (
     HistoryResponse, HistoryConfig, HistorySnapshot,
     SummaryResponse, DailySummaryData,
     AnalyticsResponse, DayOfWeekAnalytics,
+    SnapshotCaptureResponse,
     ErrorResponse,
 )
 
 router = APIRouter()
+
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def config_to_response(config: DailyConfig) -> ConfigResponse:
+    """Convert DailyConfig model to ConfigResponse schema."""
+    return ConfigResponse(
+        id=config.id,
+        date=config.date.strftime('%Y-%m-%d'),
+        day_of_week=config.day_of_week,
+        day_name=config.day_name,
+        index_name=config.index_name,
+        expiry_date=config.expiry_date.strftime('%Y-%m-%d'),
+        num_baskets=config.num_baskets,
+        budget_per_basket=config.budget_per_basket,
+        total_budget=config.total_budget,
+        baseline_margin=config.baseline_margin,
+        baseline_captured_at=format_datetime_ist(config.baseline_captured_at) if config.baseline_captured_at else None,
+    )
 
 
 # ============================================================
@@ -84,24 +106,16 @@ async def set_daily_config(
         )
         db.add(config)
 
-    await db.commit()
-    await db.refresh(config)
+    try:
+        await db.commit()
+        await db.refresh(config)
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"Database error: {e}")
 
     return ConfigCreateResponse(
         success=True,
-        config=ConfigResponse(
-            id=config.id,
-            date=config.date.strftime('%Y-%m-%d'),
-            day_of_week=config.day_of_week,
-            day_name=config.day_name,
-            index_name=config.index_name,
-            expiry_date=config.expiry_date.strftime('%Y-%m-%d'),
-            num_baskets=config.num_baskets,
-            budget_per_basket=config.budget_per_basket,
-            total_budget=config.total_budget,
-            baseline_margin=config.baseline_margin,
-            baseline_captured_at=format_datetime_ist(config.baseline_captured_at) if config.baseline_captured_at else None,
-        )
+        config=config_to_response(config)
     )
 
 
@@ -127,19 +141,7 @@ async def get_daily_config(
     if not config:
         raise HTTPException(404, f"No configuration for {target_date}")
 
-    return ConfigResponse(
-        id=config.id,
-        date=config.date.strftime('%Y-%m-%d'),
-        day_of_week=config.day_of_week,
-        day_name=config.day_name,
-        index_name=config.index_name,
-        expiry_date=config.expiry_date.strftime('%Y-%m-%d'),
-        num_baskets=config.num_baskets,
-        budget_per_basket=config.budget_per_basket,
-        total_budget=config.total_budget,
-        baseline_margin=config.baseline_margin,
-        baseline_captured_at=format_datetime_ist(config.baseline_captured_at) if config.baseline_captured_at else None,
-    )
+    return config_to_response(config)
 
 
 # ============================================================
@@ -178,7 +180,12 @@ async def capture_baseline(
         config.baseline_margin = baseline
         config.baseline_captured_at = now_ist()
         config.baseline_manual = False
-        await db.commit()
+
+        try:
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(500, f"Database error: {e}")
 
         return BaselineCaptureResponse(
             success=True,
@@ -212,7 +219,12 @@ async def set_manual_baseline(
     config.baseline_margin = request.baseline_margin
     config.baseline_captured_at = now_ist()
     config.baseline_manual = True
-    await db.commit()
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"Database error: {e}")
 
     return BaselineCaptureResponse(
         success=True,
@@ -254,19 +266,7 @@ async def get_current_margin(
         return CurrentMarginResponse(
             success=True,
             timestamp=format_datetime_ist(now_ist()),
-            config=ConfigResponse(
-                id=config.id,
-                date=config.date.strftime('%Y-%m-%d'),
-                day_of_week=config.day_of_week,
-                day_name=config.day_name,
-                index_name=config.index_name,
-                expiry_date=config.expiry_date.strftime('%Y-%m-%d'),
-                num_baskets=config.num_baskets,
-                budget_per_basket=config.budget_per_basket,
-                total_budget=config.total_budget,
-                baseline_margin=config.baseline_margin,
-                baseline_captured_at=format_datetime_ist(config.baseline_captured_at) if config.baseline_captured_at else None,
-            ),
+            config=config_to_response(config),
             margin=MarginData(**data['margin']),
             positions=PositionSummary(**data['positions']),
             m2m=M2MData(**data['m2m']),
@@ -500,7 +500,7 @@ async def get_analytics(
 # Capture Snapshot (Manual Trigger)
 # ============================================================
 
-@router.post("/snapshot")
+@router.post("/snapshot", response_model=SnapshotCaptureResponse)
 async def capture_snapshot(
     db: AsyncSession = Depends(get_db)
 ):
@@ -525,10 +525,10 @@ async def capture_snapshot(
     snapshot = await margin_service.capture_snapshot(config, db)
 
     if snapshot:
-        return {
-            "success": True,
-            "snapshot_id": snapshot.id,
-            "utilization_pct": snapshot.utilization_pct,
-        }
+        return SnapshotCaptureResponse(
+            success=True,
+            snapshot_id=snapshot.id,
+            utilization_pct=snapshot.utilization_pct,
+        )
     else:
         raise HTTPException(500, "Failed to capture snapshot")

@@ -56,6 +56,7 @@ class MarginSnapshot(Base):
     __tablename__ = 'margin_snapshots'
     __table_args__ = (
         Index('idx_margin_snapshots_config_time', 'config_id', 'timestamp'),
+        Index('idx_margin_snapshots_timestamp', 'timestamp'),  # For time-range queries
         {'schema': SCHEMA}
     )
 

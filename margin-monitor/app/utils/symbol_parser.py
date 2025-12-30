@@ -2,13 +2,13 @@
 Margin Monitor - Symbol Parser for Option Symbols
 
 Parses trading symbols like NIFTY30DEC2525800PE to extract:
-- Index (NIFTY, SENSEX, BANKNIFTY)
+- Index (NIFTY, SENSEX, BANKNIFTY, FINNIFTY)
 - Expiry date (30-Dec-2025)
 - Strike price (25800)
 - Option type (CE/PE)
 
 Format: {INDEX}{DD}{MMM}{YY}{STRIKE}{CE/PE}
-Pattern: ^(NIFTY|SENSEX|BANKNIFTY)(DD)(MMM)(YY)(STRIKE)(CE|PE)$
+Pattern: ^(NIFTY|SENSEX|BANKNIFTY|FINNIFTY)(DD)(MMM)(YY)(STRIKE)(CE|PE)$
 """
 
 import re
@@ -18,7 +18,7 @@ from typing import Optional, NamedTuple
 
 class ParsedSymbol(NamedTuple):
     """Parsed components of an option symbol."""
-    index: str          # NIFTY, SENSEX, BANKNIFTY
+    index: str          # NIFTY, SENSEX, BANKNIFTY, FINNIFTY
     day: int            # 30
     month: str          # DEC
     year: int           # 25
@@ -34,9 +34,9 @@ MONTH_MAP = {
     'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
 }
 
-# Symbol pattern regex
+# Symbol pattern regex - supports NIFTY, SENSEX, BANKNIFTY, FINNIFTY
 SYMBOL_PATTERN = re.compile(
-    r'^(NIFTY|SENSEX|BANKNIFTY)(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$'
+    r'^(NIFTY|SENSEX|BANKNIFTY|FINNIFTY)(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$'
 )
 
 

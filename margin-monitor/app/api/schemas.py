@@ -234,6 +234,17 @@ class AnalyticsResponse(BaseModel):
 
 
 # ============================================================
+# Response Schemas - Snapshot
+# ============================================================
+
+class SnapshotCaptureResponse(BaseModel):
+    """Response after manually capturing a snapshot."""
+    success: bool
+    snapshot_id: int
+    utilization_pct: float
+
+
+# ============================================================
 # Error Response
 # ============================================================
 
