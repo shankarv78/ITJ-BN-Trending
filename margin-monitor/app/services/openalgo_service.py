@@ -100,12 +100,24 @@ class OpenAlgoService:
 
                 data = result["data"]
 
+                # Log available fields for debugging
+                logger.debug(f"OpenAlgo funds API response fields: {list(data.keys())}")
+
+                # Flexible field mapping - try multiple possible field names
+                def get_field(d: dict, *keys: str, default: float = 0.0) -> float:
+                    """Try multiple field names and return first match."""
+                    for key in keys:
+                        if key in d:
+                            return float(d[key])
+                    logger.warning(f"None of {keys} found in response. Available: {list(d.keys())}")
+                    return default
+
                 funds_data: FundsData = {
-                    "used_margin": float(data["utiliseddebits"]),
-                    "available_cash": float(data["availablecash"]),
-                    "collateral": float(data["collateral"]),
-                    "m2m_realized": float(data["m2mrealized"]),
-                    "m2m_unrealized": float(data["m2munrealized"]),
+                    "used_margin": get_field(data, "utiliseddebits", "utilised_debits", "used_margin", "usedMargin", "margin_used"),
+                    "available_cash": get_field(data, "availablecash", "available_cash", "availableCash", "cash"),
+                    "collateral": get_field(data, "collateral", "Collateral"),
+                    "m2m_realized": get_field(data, "m2mrealized", "m2m_realized", "m2mRealized", "realizedPnl"),
+                    "m2m_unrealized": get_field(data, "m2munrealized", "m2m_unrealized", "m2mUnrealized", "unrealizedPnl"),
                 }
                 _set_cached("funds", funds_data)
                 return funds_data
@@ -117,7 +129,7 @@ class OpenAlgoService:
                 logger.error(f"OpenAlgo funds API request error: {e}")
                 raise OpenAlgoError(f"Request failed: {e}")
             except (KeyError, ValueError) as e:
-                logger.error(f"OpenAlgo funds API parse error: {e}")
+                logger.error(f"OpenAlgo funds API parse error: {e}. Response: {result}")
                 raise OpenAlgoError(f"Failed to parse response: {e}")
 
     async def get_positions(self) -> List[PositionData]:
@@ -152,15 +164,27 @@ class OpenAlgoService:
                     raise OpenAlgoError(f"API returned error: {result}")
 
                 positions: List[PositionData] = []
+
+                # Flexible field getter for positions
+                def get_pos_field(p: dict, *keys: str, default: Any = None) -> Any:
+                    for key in keys:
+                        if key in p:
+                            return p[key]
+                    return default
+
                 for pos in result.get("data", []):
+                    # Log first position's fields for debugging
+                    if not positions:
+                        logger.debug(f"OpenAlgo position fields: {list(pos.keys())}")
+
                     positions.append({
-                        "symbol": pos["symbol"],
-                        "exchange": pos["exchange"],
-                        "product": pos["product"],
-                        "quantity": int(pos["quantity"]),
-                        "average_price": float(pos["average_price"]),
-                        "ltp": float(pos["ltp"]),
-                        "pnl": float(pos["pnl"]),
+                        "symbol": get_pos_field(pos, "symbol", "tradingsymbol", "Symbol") or "",
+                        "exchange": get_pos_field(pos, "exchange", "Exchange") or "NFO",
+                        "product": get_pos_field(pos, "product", "producttype", "Product") or "NRML",
+                        "quantity": int(get_pos_field(pos, "quantity", "netqty", "Quantity") or 0),
+                        "average_price": float(get_pos_field(pos, "average_price", "averageprice", "avgprice") or 0),
+                        "ltp": float(get_pos_field(pos, "ltp", "lastprice", "LTP") or 0),
+                        "pnl": float(get_pos_field(pos, "pnl", "unrealizedpnl", "PnL") or 0),
                     })
 
                 _set_cached("positions", positions)
@@ -173,7 +197,7 @@ class OpenAlgoService:
                 logger.error(f"OpenAlgo positions API request error: {e}")
                 raise OpenAlgoError(f"Request failed: {e}")
             except (KeyError, ValueError) as e:
-                logger.error(f"OpenAlgo positions API parse error: {e}")
+                logger.error(f"OpenAlgo positions API parse error: {e}. Response: {result}")
                 raise OpenAlgoError(f"Failed to parse response: {e}")
 
 
