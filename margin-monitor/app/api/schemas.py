@@ -258,7 +258,8 @@ class MarketStatusResponse(BaseModel):
     is_pre_market: bool
     is_post_market: bool
     is_weekend: bool
-    session_status: str  # 'pre_market', 'open', 'closed', 'weekend'
+    is_holiday: bool = False
+    session_status: str  # 'pre_market', 'open', 'closed', 'weekend', 'holiday'
     next_event: str
     market_open_time: str
     market_close_time: str

@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.database import get_db
 from app.models.db_models import DailyConfig, MarginSnapshot, DailySummary
@@ -584,13 +584,13 @@ async def get_status(
         if summary:
             has_eod_summary = True
 
-            # Get snapshot count
+            # Get snapshot count efficiently (don't load all rows)
             snapshot_count_result = await db.execute(
-                select(MarginSnapshot)
+                select(func.count(MarginSnapshot.id))
                 .where(MarginSnapshot.config_id == config.id)
                 .where(MarginSnapshot.error_message.is_(None))
             )
-            snapshots = snapshot_count_result.scalars().all()
+            snapshot_count = snapshot_count_result.scalar() or 0
 
             eod_summary = EODSummaryResponse(
                 date=summary.date.strftime('%Y-%m-%d'),
@@ -607,7 +607,7 @@ async def get_status(
                 max_short_count=summary.max_short_count,
                 max_long_count=summary.max_long_count,
                 total_closed_count=summary.total_closed_count,
-                snapshot_count=len(snapshots),
+                snapshot_count=snapshot_count,
                 first_snapshot_time=format_datetime_ist(summary.first_position_time) if summary.first_position_time else None,
                 last_snapshot_time=format_datetime_ist(summary.last_position_time) if summary.last_position_time else None,
             )
@@ -622,6 +622,7 @@ async def get_status(
         is_pre_market=market_status['is_pre_market'],
         is_post_market=market_status['is_post_market'],
         is_weekend=market_status['is_weekend'],
+        is_holiday=market_status.get('is_holiday', False),
         session_status=market_status['session_status'],
         next_event=market_status['next_event'],
         market_open_time=market_status['market_open_time'],
