@@ -256,13 +256,47 @@ class DatabaseStateManager:
         """
         Save portfolio state (single-row table)
 
+        SAFETY: This method includes protection against accidental equity overwrites.
+        If the new closed_equity is significantly lower than the current value
+        (>20% drop), the save is REJECTED to prevent data loss.
+
         Args:
             state: PortfolioState object
             initial_capital: Initial capital (not stored in PortfolioState model)
 
         Returns:
-            True if successful
+            True if successful, False if rejected due to safety check
         """
+        # SAFETY CHECK: Prevent accidental equity overwrites
+        # Get current equity from database (bypass cache to get real value)
+        current_db_equity = self._get_current_db_equity()
+
+        if current_db_equity is not None and current_db_equity > 0:
+            new_equity = state.closed_equity
+            equity_change = new_equity - current_db_equity
+            equity_change_pct = (equity_change / current_db_equity) * 100
+
+            # CRITICAL: Block if equity would drop by more than 20% in a single save
+            # This prevents bugs like startup with wrong --capital from destroying data
+            MAX_ALLOWED_DROP_PCT = 20.0
+
+            if equity_change_pct < -MAX_ALLOWED_DROP_PCT:
+                logger.critical(
+                    f"[SAFETY] BLOCKED equity overwrite! "
+                    f"Current: ₹{current_db_equity:,.0f} → New: ₹{new_equity:,.0f} "
+                    f"({equity_change_pct:+.1f}% change). "
+                    f"Max allowed drop: {MAX_ALLOWED_DROP_PCT}%. "
+                    f"If this is intentional, use inject_capital() or reset_equity()."
+                )
+                return False
+
+            # Log significant changes for audit trail
+            if abs(equity_change) > 10000:  # Log changes > ₹10,000
+                logger.info(
+                    f"[EQUITY] ₹{current_db_equity:,.0f} → ₹{new_equity:,.0f} "
+                    f"({equity_change:+,.0f}, {equity_change_pct:+.1f}%)"
+                )
+
         with self.transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -296,6 +330,22 @@ class DatabaseStateManager:
                 'margin_used': state.margin_used
             }
             return True
+
+    def _get_current_db_equity(self) -> Optional[float]:
+        """
+        Get current closed_equity directly from database (bypasses cache).
+        Used for safety checks before overwriting.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT closed_equity FROM portfolio_state WHERE id = 1")
+                row = cursor.fetchone()
+                if row:
+                    return float(row[0])
+        except Exception as e:
+            logger.warning(f"Failed to get current DB equity for safety check: {e}")
+        return None
 
     def get_portfolio_state(self) -> Optional[dict]:
         """

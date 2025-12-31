@@ -305,21 +305,52 @@ def run_live(args):
         except Exception as e:
             logger.warning(f"Failed to initialize strategy manager: {e}")
 
-    # Determine initial capital: from args, database, or default
-    initial_capital = args.capital
-    if initial_capital is None:
-        if db_manager:
-            # Try to load from database
-            db_state = db_manager.get_portfolio_state()
-            if db_state and db_state.get('initial_capital'):
-                initial_capital = float(db_state['initial_capital'])
-                logger.info(f"Loaded initial_capital from database: ₹{initial_capital:,.0f}")
-            else:
-                initial_capital = 5000000.0  # Default fallback
-                logger.warning(f"No capital in database, using default: ₹{initial_capital:,.0f}")
+    # Determine initial capital: from database (preferred) or args (dangerous)
+    #
+    # SAFETY: Capital should come from database (tracks deposits/withdrawals).
+    # The --capital flag is DANGEROUS and should only be used for initial setup.
+    #
+    if args.capital is not None:
+        # Explicit --capital flag used - this is dangerous in production!
+        initial_capital = args.capital
+        logger.warning(
+            f"⚠️  [DANGEROUS] Using --capital flag: ₹{initial_capital:,.0f}. "
+            f"This can overwrite database equity! Only use for initial setup."
+        )
+    elif db_manager:
+        # Load from database (SAFE - this is the correct way)
+        db_state = db_manager.get_portfolio_state()
+        if db_state and db_state.get('initial_capital'):
+            initial_capital = float(db_state['initial_capital'])
+            closed_equity = float(db_state.get('closed_equity', initial_capital))
+            logger.info(
+                f"✓ Loaded from database: initial_capital=₹{initial_capital:,.0f}, "
+                f"closed_equity=₹{closed_equity:,.0f}"
+            )
         else:
-            initial_capital = 5000000.0  # Default fallback
-            logger.warning(f"No --capital specified and no database, using default: ₹{initial_capital:,.0f}")
+            # CRITICAL: No capital in database - this is a problem!
+            # Don't silently default to ₹50L - that caused the bug.
+            logger.critical(
+                "❌ [CRITICAL] No capital found in database! "
+                "Please run a capital deposit first using the /capital/inject API, "
+                "or use --capital flag for initial setup only."
+            )
+            print("\n" + "="*60)
+            print("ERROR: No capital configured in database!")
+            print("="*60)
+            print("\nTo fix this, either:")
+            print("  1. Use the Capital API to record a deposit:")
+            print("     curl -X POST http://localhost:5002/capital/inject \\")
+            print('       -H "Content-Type: application/json" \\')
+            print('       -d \'{"type": "DEPOSIT", "amount": 10000000, "notes": "Initial capital"}\'')
+            print("\n  2. Or for FIRST-TIME setup only, use --capital flag:")
+            print("     python portfolio_manager.py live --capital 10000000 ...")
+            print("="*60 + "\n")
+            sys.exit(1)
+    else:
+        # No database and no --capital - cannot proceed
+        logger.critical("No database configured and no --capital specified. Cannot start.")
+        sys.exit(1)
 
     # Initialize broker client using factory
     try:
