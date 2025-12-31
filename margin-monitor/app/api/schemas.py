@@ -245,6 +245,62 @@ class SnapshotCaptureResponse(BaseModel):
 
 
 # ============================================================
+# Market Status Response
+# ============================================================
+
+class MarketStatusResponse(BaseModel):
+    """Market status and session information."""
+    success: bool = True
+    timestamp: str
+
+    # Market timing
+    is_open: bool
+    is_pre_market: bool
+    is_post_market: bool
+    is_weekend: bool
+    is_holiday: bool = False
+    session_status: str  # 'pre_market', 'open', 'closed', 'weekend', 'holiday'
+    next_event: str
+    market_open_time: str
+    market_close_time: str
+
+    # Session state
+    has_config: bool
+    has_baseline: bool
+    has_eod_summary: bool
+    session_complete: bool  # True if market closed AND EOD summary exists
+
+
+class EODSummaryResponse(BaseModel):
+    """Today's EOD summary if available."""
+    date: str
+    day_name: str
+    index_name: str
+    num_baskets: int
+    total_budget: float
+    baseline_margin: float
+    max_intraday_margin: float
+    max_utilization_pct: float
+    avg_utilization_pct: Optional[float]
+    total_hedge_cost: float
+    total_pnl: float
+    max_short_count: int
+    max_long_count: int
+    total_closed_count: int
+    snapshot_count: int
+    first_snapshot_time: Optional[str]
+    last_snapshot_time: Optional[str]
+
+
+class TodayStatusResponse(BaseModel):
+    """Full status response including market status and EOD summary."""
+    success: bool = True
+    timestamp: str
+    market: MarketStatusResponse
+    eod_summary: Optional[EODSummaryResponse] = None
+
+
+# ============================================================
 # Error Response
 # ============================================================
 

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     market_open: str = "09:15"
     market_close: str = "15:30"
 
+    # Auto-shutdown after EOD (at 15:40 IST)
+    auto_shutdown_after_eod: bool = False
+    shutdown_time: str = "15:40"
+
     # Frontend CORS - Allow all localhost ports for development
     cors_origins: str = '["*"]'
 

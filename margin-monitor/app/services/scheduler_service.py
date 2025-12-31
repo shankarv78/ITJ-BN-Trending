@@ -5,6 +5,9 @@ Manages scheduled jobs for baseline capture, margin polling, and EOD summary.
 """
 
 import logging
+import os
+import signal
+import sys
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -60,6 +63,18 @@ class SchedulerService:
             replace_existing=True
         )
         logger.info("Scheduled: eod_summary at 15:35 IST (Mon-Fri)")
+
+        # Auto-shutdown at 15:40 IST (if enabled)
+        if settings.auto_shutdown_after_eod:
+            self.scheduler.add_job(
+                self._graceful_shutdown,
+                CronTrigger(day_of_week='mon-fri', hour=15, minute=40),
+                id='auto_shutdown',
+                replace_existing=True
+            )
+            logger.info("Scheduled: auto_shutdown at 15:40 IST (Mon-Fri)")
+        else:
+            logger.info("Auto-shutdown disabled (set AUTO_SHUTDOWN_AFTER_EOD=true to enable)")
 
     def start(self):
         """Start the scheduler."""
@@ -171,6 +186,26 @@ class SchedulerService:
 
             except Exception as e:
                 logger.error(f"Failed to generate EOD summary: {e}")
+
+    async def _graceful_shutdown(self):
+        """Gracefully shutdown the application after EOD."""
+        logger.info("=" * 50)
+        logger.info("AUTO-SHUTDOWN: Trading day complete")
+        logger.info("EOD summary has been generated")
+        logger.info("Initiating graceful shutdown...")
+        logger.info("=" * 50)
+
+        # Stop the scheduler first
+        self.stop()
+
+        # Give a few seconds for any pending operations
+        import asyncio
+        await asyncio.sleep(2)
+
+        # Send SIGTERM to self for graceful shutdown
+        # This allows FastAPI to properly cleanup
+        logger.info("Sending shutdown signal...")
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 # Global service instance
