@@ -12,12 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models.db_models import DailyConfig, MarginSnapshot
+from app.models.db_models import DailyConfig, MarginSnapshot, DailySummary
 from app.services.margin_service import margin_service
 from app.services.position_service import position_service
 from app.services.openalgo_service import openalgo_service, OpenAlgoError
 from app.services.analytics_service import analytics_service
-from app.utils.date_utils import today_ist, get_day_of_week, get_day_name, now_ist, format_datetime_ist
+from app.utils.date_utils import today_ist, get_day_of_week, get_day_name, now_ist, format_datetime_ist, get_market_status
 from app.api.schemas import (
     ConfigRequest, ConfigCreateResponse, ConfigResponse,
     BaselineRequest, ManualBaselineRequest, BaselineCaptureResponse,
@@ -27,6 +27,7 @@ from app.api.schemas import (
     SummaryResponse, DailySummaryData,
     AnalyticsResponse, DayOfWeekAnalytics,
     SnapshotCaptureResponse,
+    MarketStatusResponse, EODSummaryResponse, TodayStatusResponse,
     ErrorResponse,
 )
 
@@ -532,3 +533,108 @@ async def capture_snapshot(
         )
     else:
         raise HTTPException(500, "Failed to capture snapshot")
+
+
+# ============================================================
+# Market Status Endpoint
+# ============================================================
+
+@router.get("/status", response_model=TodayStatusResponse)
+async def get_status(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get comprehensive market and session status.
+
+    Returns:
+    - Market timing (open/closed/pre-market)
+    - Session state (config/baseline/EOD summary)
+    - EOD summary if available (after 15:35)
+
+    Use this endpoint to determine if:
+    - Market is currently open (should auto-refresh)
+    - Session is complete (show EOD summary)
+    - Monitor should stop (post-market)
+    """
+    today = today_ist()
+    market_status = get_market_status()
+
+    # Get today's config
+    config_result = await db.execute(
+        select(DailyConfig)
+        .where(DailyConfig.date == today)
+        .where(DailyConfig.is_active == 1)
+    )
+    config = config_result.scalar_one_or_none()
+
+    has_config = config is not None
+    has_baseline = config is not None and config.baseline_margin is not None
+
+    # Check for EOD summary
+    eod_summary = None
+    has_eod_summary = False
+
+    if config:
+        summary_result = await db.execute(
+            select(DailySummary)
+            .where(DailySummary.config_id == config.id)
+        )
+        summary = summary_result.scalar_one_or_none()
+
+        if summary:
+            has_eod_summary = True
+
+            # Get snapshot count
+            snapshot_count_result = await db.execute(
+                select(MarginSnapshot)
+                .where(MarginSnapshot.config_id == config.id)
+                .where(MarginSnapshot.error_message.is_(None))
+            )
+            snapshots = snapshot_count_result.scalars().all()
+
+            eod_summary = EODSummaryResponse(
+                date=summary.date.strftime('%Y-%m-%d'),
+                day_name=summary.day_name,
+                index_name=summary.index_name,
+                num_baskets=summary.num_baskets,
+                total_budget=summary.total_budget,
+                baseline_margin=summary.baseline_margin,
+                max_intraday_margin=summary.max_intraday_margin,
+                max_utilization_pct=summary.max_utilization_pct,
+                avg_utilization_pct=summary.avg_utilization_pct,
+                total_hedge_cost=summary.total_hedge_cost,
+                total_pnl=summary.total_pnl,
+                max_short_count=summary.max_short_count,
+                max_long_count=summary.max_long_count,
+                total_closed_count=summary.total_closed_count,
+                snapshot_count=len(snapshots),
+                first_snapshot_time=format_datetime_ist(summary.first_position_time) if summary.first_position_time else None,
+                last_snapshot_time=format_datetime_ist(summary.last_position_time) if summary.last_position_time else None,
+            )
+
+    # Session is complete if market is closed AND EOD summary exists
+    session_complete = market_status['is_post_market'] and has_eod_summary
+
+    market_response = MarketStatusResponse(
+        success=True,
+        timestamp=format_datetime_ist(now_ist()),
+        is_open=market_status['is_open'],
+        is_pre_market=market_status['is_pre_market'],
+        is_post_market=market_status['is_post_market'],
+        is_weekend=market_status['is_weekend'],
+        session_status=market_status['session_status'],
+        next_event=market_status['next_event'],
+        market_open_time=market_status['market_open_time'],
+        market_close_time=market_status['market_close_time'],
+        has_config=has_config,
+        has_baseline=has_baseline,
+        has_eod_summary=has_eod_summary,
+        session_complete=session_complete,
+    )
+
+    return TodayStatusResponse(
+        success=True,
+        timestamp=format_datetime_ist(now_ist()),
+        market=market_response,
+        eod_summary=eod_summary,
+    )
