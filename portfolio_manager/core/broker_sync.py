@@ -449,11 +449,14 @@ class BrokerSyncManager:
                     )
 
                     # Any excess lots (if CE and PE don't match) are orphaned
+                    # CRITICAL: Count excess in total so discrepancies are surfaced
                     if ce_lots != pe_lots:
                         excess = abs(ce_lots - pe_lots)
+                        banknifty_synthetic_lots += excess  # Add orphaned excess to total
+                        excess_type = 'CE' if ce_lots > pe_lots else 'PE'
                         logger.warning(
                             f"[SYNC] Bank Nifty strike {strike} has unbalanced legs: "
-                            f"CE={ce_lots}L, PE={pe_lots}L (excess: {excess}L)"
+                            f"CE={ce_lots}L, PE={pe_lots}L (orphaned {excess}L {excess_type})"
                         )
                 else:
                     # Both same direction - not a synthetic, count separately
