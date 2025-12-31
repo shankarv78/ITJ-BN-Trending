@@ -305,21 +305,27 @@ def run_live(args):
         except Exception as e:
             logger.warning(f"Failed to initialize strategy manager: {e}")
 
-    # Determine initial capital: from args, database, or default
-    initial_capital = args.capital
-    if initial_capital is None:
-        if db_manager:
-            # Try to load from database
-            db_state = db_manager.get_portfolio_state()
-            if db_state and db_state.get('initial_capital'):
-                initial_capital = float(db_state['initial_capital'])
-                logger.info(f"Loaded initial_capital from database: ₹{initial_capital:,.0f}")
-            else:
-                initial_capital = 5000000.0  # Default fallback
-                logger.warning(f"No capital in database, using default: ₹{initial_capital:,.0f}")
-        else:
-            initial_capital = 5000000.0  # Default fallback
-            logger.warning(f"No --capital specified and no database, using default: ₹{initial_capital:,.0f}")
+    # Load capital from database (READ-ONLY)
+    # PM startup NEVER modifies capital/equity - only reads from DB.
+    # Capital changes require admin authentication via /capital/inject API.
+    if not db_manager:
+        logger.critical("Database required for live mode. Use --db-config.")
+        sys.exit(1)
+
+    db_state = db_manager.get_portfolio_state()
+    if db_state and db_state.get('initial_capital'):
+        initial_capital = float(db_state['initial_capital'])
+        closed_equity = float(db_state.get('closed_equity', initial_capital))
+        logger.info(
+            f"✓ Loaded from database (READ-ONLY): "
+            f"capital=₹{initial_capital:,.0f}, equity=₹{closed_equity:,.0f}"
+        )
+    else:
+        logger.critical(
+            "No capital found in database. "
+            "Use /capital/inject API with admin password to add initial capital."
+        )
+        sys.exit(1)
 
     # Initialize broker client using factory
     try:
@@ -1064,13 +1070,15 @@ def run_live(args):
     @app.route('/capital/inject', methods=['POST'])
     def capital_inject():
         """
-        Inject capital (deposit) or withdraw from portfolio
+        Inject capital (deposit) or withdraw from portfolio.
+        REQUIRES ADMIN PASSWORD - protects against accidental/programmatic changes.
 
         Request body:
         {
             "type": "DEPOSIT" or "WITHDRAW",
             "amount": 500000,
-            "notes": "Optional notes"
+            "notes": "Optional notes",
+            "admin_password": "REQUIRED - set via PM_ADMIN_PASSWORD env var"
         }
 
         Returns:
@@ -1092,6 +1100,29 @@ def run_live(args):
                     'status': 'error',
                     'message': 'Request body required'
                 }), 400
+
+            # ===== ADMIN PASSWORD REQUIRED =====
+            # This prevents LLMs/agents/programs from modifying capital
+            admin_password = os.environ.get('PM_ADMIN_PASSWORD')
+            if not admin_password:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Admin password not configured. Set PM_ADMIN_PASSWORD env var.'
+                }), 500
+
+            provided_password = data.get('admin_password')
+            if not provided_password:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'admin_password is required for capital changes'
+                }), 401
+
+            if provided_password != admin_password:
+                logger.warning(f"[SECURITY] Failed capital injection attempt - wrong password")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid admin password'
+                }), 403
 
             transaction_type = data.get('type')
             amount = data.get('amount')
@@ -3322,8 +3353,9 @@ def main():
                             help='Broker name (default: zerodha)')
     live_parser.add_argument('--api-key', type=str, required=True,
                             help='OpenAlgo API key')
-    live_parser.add_argument('--capital', type=float, default=None,
-                            help='Initial capital (loads from database if not specified)')
+    # NOTE: --capital flag REMOVED for live mode.
+    # Capital/equity MUST come from database only.
+    # Use /capital/inject API with admin password to add capital.
     live_parser.add_argument('--disable-rollover', action='store_true',
                             help='Disable automatic rollover scheduler')
     live_parser.add_argument('--db-config', type=str,
