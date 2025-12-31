@@ -365,6 +365,10 @@ class BrokerSyncManager:
         Only checks ITJ instruments (SILVER_MINI, GOLD_MINI, BANK_NIFTY, COPPER).
         Other instruments (SENSEX, NIFTY, etc.) are ignored as they belong to other strategies.
 
+        IMPORTANT: For Bank Nifty, we use SYNTHETIC FUTURES (CE + PE at same strike).
+        A synthetic long = BUY CE + SELL PE at same strike = 1 position, not 2.
+        This method detects synthetic pairs and counts them as single positions.
+
         Args:
             pm_positions: Positions from PortfolioStateManager
             broker_positions: Positions from broker
@@ -390,16 +394,89 @@ class BrokerSyncManager:
 
         # Build a map from broker positions
         # Note: Broker uses actual trading symbols, we need to map back
+        # SPECIAL HANDLING: Bank Nifty uses synthetic futures (CE + PE = 1 position)
         broker_by_instrument: Dict[str, int] = {}
+
+        # First pass: Collect Bank Nifty positions by strike for synthetic detection
+        banknifty_by_strike: Dict[int, Dict[str, Dict]] = {}  # strike -> {CE: pos, PE: pos}
+
         for symbol, pos in broker_positions.items():
-            # Try to identify instrument from symbol
+            instrument = self._symbol_to_instrument(symbol)
             quantity = pos.get('quantity', 0)
             lot_size = self._get_lot_size_from_symbol(symbol)
             lots = abs(quantity) // lot_size if lot_size > 0 else abs(quantity)
 
-            instrument = self._symbol_to_instrument(symbol)
-            if instrument:
+            if instrument == 'BANK_NIFTY':
+                # Extract strike and option type from symbol
+                # Format: BANKNIFTY27JAN2660000CE or BANKNIFTY27JAN2660000PE
+                strike, opt_type = self._parse_banknifty_symbol(symbol)
+                if strike and opt_type:
+                    if strike not in banknifty_by_strike:
+                        banknifty_by_strike[strike] = {}
+                    banknifty_by_strike[strike][opt_type] = {
+                        'symbol': symbol,
+                        'quantity': quantity,
+                        'lots': lots
+                    }
+            elif instrument:
+                # Non-Bank Nifty: count normally
                 broker_by_instrument[instrument] = broker_by_instrument.get(instrument, 0) + lots
+
+        # Process Bank Nifty synthetic futures
+        # A synthetic long = +CE qty, -PE qty at same strike
+        # A synthetic short = -CE qty, +PE qty at same strike
+        banknifty_synthetic_lots = 0
+        for strike, legs in banknifty_by_strike.items():
+            ce_pos = legs.get('CE')
+            pe_pos = legs.get('PE')
+
+            if ce_pos and pe_pos:
+                # Both legs present - check if it's a synthetic
+                ce_qty = ce_pos['quantity']
+                pe_qty = pe_pos['quantity']
+                ce_lots = ce_pos['lots']
+                pe_lots = pe_pos['lots']
+
+                # Synthetic long: CE is bought (+), PE is sold (-)
+                # Synthetic short: CE is sold (-), PE is bought (+)
+                if (ce_qty > 0 and pe_qty < 0) or (ce_qty < 0 and pe_qty > 0):
+                    # It's a synthetic! Count as ONE position using the smaller lot count
+                    synthetic_lots = min(ce_lots, pe_lots)
+                    banknifty_synthetic_lots += synthetic_lots
+                    logger.info(
+                        f"[SYNC] Bank Nifty synthetic at strike {strike}: "
+                        f"CE={ce_qty} ({ce_lots}L), PE={pe_qty} ({pe_lots}L) → {synthetic_lots} synthetic lots"
+                    )
+
+                    # Any excess lots (if CE and PE don't match) are orphaned
+                    if ce_lots != pe_lots:
+                        excess = abs(ce_lots - pe_lots)
+                        logger.warning(
+                            f"[SYNC] Bank Nifty strike {strike} has unbalanced legs: "
+                            f"CE={ce_lots}L, PE={pe_lots}L (excess: {excess}L)"
+                        )
+                else:
+                    # Both same direction - not a synthetic, count separately
+                    banknifty_synthetic_lots += ce_lots + pe_lots
+                    logger.warning(
+                        f"[SYNC] Bank Nifty strike {strike}: CE and PE same direction "
+                        f"(CE={ce_qty}, PE={pe_qty}) - counting separately"
+                    )
+            else:
+                # Only one leg - orphaned option, count it
+                orphan = ce_pos or pe_pos
+                if orphan:
+                    banknifty_synthetic_lots += orphan['lots']
+                    opt_type = 'CE' if ce_pos else 'PE'
+                    logger.warning(
+                        f"[SYNC] Bank Nifty strike {strike}: Orphaned {opt_type} "
+                        f"({orphan['lots']} lots) without matching leg"
+                    )
+
+        # Add Bank Nifty synthetic count to broker_by_instrument
+        if banknifty_synthetic_lots > 0:
+            broker_by_instrument['BANK_NIFTY'] = banknifty_synthetic_lots
+            logger.info(f"[SYNC] Bank Nifty total: {banknifty_synthetic_lots} synthetic lots")
 
         # Check for positions in PM (strategy-filtered) but not in broker
         for instrument, pm_lots in pm_by_instrument.items():
@@ -478,6 +555,35 @@ class BrokerSyncManager:
             return 'NIFTY'
 
         return None
+
+    def _parse_banknifty_symbol(self, symbol: str) -> Tuple[Optional[int], Optional[str]]:
+        """
+        Parse Bank Nifty option symbol to extract strike and option type.
+
+        Format: BANKNIFTY27JAN2660000CE or BANKNIFTY27JAN2660000PE
+
+        Returns:
+            Tuple of (strike, option_type) or (None, None) if parsing fails
+        """
+        import re
+        symbol_upper = symbol.upper()
+
+        # Match pattern: BANKNIFTY + date + strike + CE/PE
+        # Examples: BANKNIFTY27JAN2660000CE, BANKNIFTY02JAN2559500PE
+        match = re.search(r'BANKNIFTY\d+[A-Z]{3}\d{2}(\d+)(CE|PE)$', symbol_upper)
+        if match:
+            strike = int(match.group(1))
+            opt_type = match.group(2)
+            return strike, opt_type
+
+        # Try alternate format without year in date
+        match = re.search(r'BANKNIFTY\d+[A-Z]{3}(\d+)(CE|PE)$', symbol_upper)
+        if match:
+            strike = int(match.group(1))
+            opt_type = match.group(2)
+            return strike, opt_type
+
+        return None, None
 
     def _get_lot_size_from_symbol(self, symbol: str) -> int:
         """
