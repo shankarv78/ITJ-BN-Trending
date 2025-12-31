@@ -462,7 +462,11 @@ class EODMonitorSignal:
         Note: This only checks conditions, not position sizing.
         Python calculates actual position size separately using
         real portfolio equity (shared across instruments).
+
+        Returns False if position_status is None (Scout mode - PM decides).
         """
+        if self.position_status is None:
+            return False  # Scout mode: PM determines position state
         return (not self.position_status.in_position and
                 self.conditions.should_enter())
 
@@ -473,13 +477,23 @@ class EODMonitorSignal:
         Note: This only checks conditions, not position sizing.
         Python calculates actual position size separately using
         real portfolio equity (shared across instruments).
+
+        Returns False if position_status is None (Scout mode - PM decides).
         """
+        if self.position_status is None:
+            return False  # Scout mode: PM determines position state
         return (self.position_status.in_position and
                 self.position_status.pyramid_count < 5 and
                 self.conditions.should_enter())
 
     def should_execute_exit(self) -> bool:
-        """Check if we should execute an exit at EOD"""
+        """
+        Check if we should execute an exit at EOD.
+
+        Returns False if position_status is None (Scout mode - PM decides).
+        """
+        if self.position_status is None:
+            return False  # Scout mode: PM determines position state
         return (self.position_status.in_position and
                 self.conditions.should_exit())
 

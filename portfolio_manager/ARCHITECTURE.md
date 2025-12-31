@@ -272,14 +272,16 @@ def _execute_pm_initiated_exit(self, position, ...):
 - `calculate_pyramid_size()` - For pyramids (A, B, C constraints)
 - `calculate_peel_off_size()` - Determine peel-off amount
 
-**Formula:**
+**Formula (Base Entry):**
 ```
 Lot-R = (Equity × Risk%) / (Entry - Stop) / Point_Value × ER
-Lot-V = (Equity × Vol%) / (ATR × Point_Value)
+Lot-V = (Equity × Vol%) / (ATR × Point_Value)  ← Reference only, NOT used
 Lot-M = Available_Margin / Margin_Per_Lot
 
-Final_Lots = FLOOR(MIN(Lot-R, Lot-V, Lot-M))
+Final_Lots = FLOOR(MIN(Lot-R, Lot-M))  ← Lot-V excluded to match Pine Script
 ```
+
+> **Note:** See [RISK_MANAGEMENT.md](RISK_MANAGEMENT.md) for complete position sizing and stop loss details.
 
 **Test Coverage:** 15 unit tests, 90%+ coverage
 

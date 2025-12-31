@@ -2013,7 +2013,11 @@ class SyntheticFuturesExecutor:
         Extract strike price from Bank Nifty option symbol.
 
         Symbol format: BANKNIFTY[DDMMMYY][STRIKE][PE/CE]
-        Example: BANKNIFTY30DEC2560000PE -> 60000
+        Example: BANKNIFTY27JAN2660000CE -> 60000
+
+        Note: The year (e.g., '26') immediately precedes the strike, so we need
+        to properly separate them. Bank Nifty strikes are typically 5 digits
+        (e.g., 60000, 59500) and never start with the year digits.
 
         Args:
             symbol: Option symbol string
@@ -2023,16 +2027,35 @@ class SyntheticFuturesExecutor:
         """
         import re
         try:
-            # Match pattern: letters/numbers followed by strike and PE/CE
-            # BANKNIFTY30DEC2560000PE -> capture 60000
-            match = re.search(r'(\d{4,6})(PE|CE)$', symbol)
+            # Pattern: BANKNIFTY + DD + MMM + YY + STRIKE + PE/CE
+            # Example: BANKNIFTY27JAN2660000CE
+            # The year is 2 digits (YY), followed by strike (typically 5 digits for BN)
+
+            # First try: Match the full format with month name
+            # BANKNIFTY27JAN2660000CE -> captures: day=27, month=JAN, year=26, strike=60000
+            match = re.search(r'BANKNIFTY\d{1,2}[A-Z]{3}(\d{2})(\d{5})(PE|CE)$', symbol)
+            if match:
+                # Year is group 1, strike is group 2 (5 digits)
+                strike = int(match.group(2))
+                logger.debug(f"Extracted strike {strike} from {symbol} (5-digit pattern)")
+                return strike
+
+            # Second try: 6-digit strike (for very high index levels, unlikely for BN)
+            match = re.search(r'BANKNIFTY\d{1,2}[A-Z]{3}(\d{2})(\d{6})(PE|CE)$', symbol)
+            if match:
+                strike = int(match.group(2))
+                logger.debug(f"Extracted strike {strike} from {symbol} (6-digit pattern)")
+                return strike
+
+            # Fallback: Try weekly format BANKNIFTYWK[DDMMM][STRIKE][PE/CE]
+            match = re.search(r'BANKNIFTY\d{1,2}[A-Z]{3}(\d{5,6})(PE|CE)$', symbol)
             if match:
                 strike = int(match.group(1))
-                logger.debug(f"Extracted strike {strike} from {symbol}")
+                logger.debug(f"Extracted strike {strike} from {symbol} (weekly pattern)")
                 return strike
-            else:
-                logger.warning(f"Could not extract strike from symbol: {symbol}")
-                return None
+
+            logger.warning(f"Could not extract strike from symbol: {symbol}")
+            return None
         except Exception as e:
             logger.warning(f"Failed to extract strike from {symbol}: {e}")
             return None

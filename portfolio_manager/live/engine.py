@@ -1586,14 +1586,25 @@ class LiveTradingEngine:
             )
 
             if result.status == ExecutionStatus.EXECUTED:
-                # Use actual fill prices from execution, not index price
+                # Calculate synthetic exit price from actual leg fills
+                synthetic_exit_price = result.get_synthetic_price()
+                pe_exit = result.pe_result.fill_price if result.pe_result else None
+                ce_exit = result.ce_result.fill_price if result.ce_result else None
+
+                logger.info(
+                    f"[OPENALGO] BN Exit fills - PE: ₹{pe_exit}, CE: ₹{ce_exit}, "
+                    f"Synthetic: ₹{synthetic_exit_price:,.2f}" if synthetic_exit_price else
+                    f"[OPENALGO] BN Exit fills - PE: ₹{pe_exit}, CE: ₹{ce_exit}"
+                )
+
                 return {
                     'status': 'success',
                     'order_details': {
                         'pe_order_id': result.pe_result.order_id if result.pe_result else None,
                         'ce_order_id': result.ce_result.order_id if result.ce_result else None,
-                        'pe_exit_price': result.pe_result.fill_price if result.pe_result else None,
-                        'ce_exit_price': result.ce_result.fill_price if result.ce_result else None
+                        'pe_exit_price': pe_exit,
+                        'ce_exit_price': ce_exit,
+                        'exit_price': synthetic_exit_price  # Critical: Used for P&L calculation
                     }
                 }
             else:
@@ -2239,7 +2250,7 @@ class LiveTradingEngine:
         exits_triggered = []
         stops_updated = []
 
-        for position in positions:
+        for position in positions.values():
             # Skip if position is already closing or closed
             if position.status in ['closing', 'closed']:
                 logger.debug(f"[PM-STOP] {position.position_id} already {position.status}, skipping")

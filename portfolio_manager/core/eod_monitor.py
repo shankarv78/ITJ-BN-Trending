@@ -201,12 +201,14 @@ class EODMonitor:
             # Log signal details
             action = signal.get_signal_type_to_execute()
             conditions_met = signal.conditions.all_entry_conditions_met()
+            # Handle Scout mode where position_status may be None
+            in_position_str = str(signal.position_status.in_position) if signal.position_status else "None (Scout mode)"
             logger.info(
                 f"[EOD] Signal updated for {instrument}: "
                 f"price={signal.price:.2f}, "
                 f"conditions_met={conditions_met}, "
                 f"potential_action={action.value if action else 'None'}, "
-                f"in_position={signal.position_status.in_position}"
+                f"in_position={in_position_str}"
             )
 
             # Add to history for deduplication
@@ -330,7 +332,9 @@ class EODMonitor:
         if action == SignalType.BASE_ENTRY:
             position = "Long_1"
         elif action == SignalType.PYRAMID:
-            position = f"Long_{eod_signal.position_status.pyramid_count + 2}"
+            # Safety check: position_status should be populated by eod_condition_check
+            pyramid_count = eod_signal.position_status.pyramid_count if eod_signal.position_status else 0
+            position = f"Long_{pyramid_count + 2}"
         else:  # EXIT
             position = "ALL"
 
