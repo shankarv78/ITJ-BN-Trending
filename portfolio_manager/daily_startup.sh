@@ -29,7 +29,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OPENALGO_DIR="$HOME/openalgo"
 PM_PORT=5002
 OPENALGO_PORT=5000
-EQUITY=5000000  # Your trading capital
+# NOTE: Capital/equity is loaded from database (READ-ONLY)
+# Use /capital/inject API with admin password to modify capital
 
 cd "$SCRIPT_DIR"
 
@@ -118,11 +119,11 @@ else
     API_KEY=$(python3 -c "import json; print(json.load(open('openalgo_config.json'))['openalgo_api_key'])")
 
     # Start PM (MUST include --db-config for persistence!)
+    # NOTE: No --capital flag - PM loads capital from database (READ-ONLY)
     nohup python3 portfolio_manager.py live \
         --broker "$BROKER" \
         --api-key "$API_KEY" \
         --db-config db_config.json \
-        --capital $EQUITY \
         > pm.log 2>&1 &
 
     # Wait for startup
