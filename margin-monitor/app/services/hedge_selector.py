@@ -88,7 +88,9 @@ class HedgeStrikeSelectorService:
 
     async def get_spot_price(self, index: IndexName) -> float:
         """
-        Get current spot price for index.
+        Get current spot price for index using quotes API.
+
+        Falls back to position-based inference if quotes API unavailable.
 
         Args:
             index: NIFTY or SENSEX
@@ -96,47 +98,59 @@ class HedgeStrikeSelectorService:
         Returns:
             Current spot price
         """
-        # Map index to spot symbol
-        symbol_map = {
-            IndexName.NIFTY: "NIFTY 50",
-            IndexName.SENSEX: "SENSEX"
+        # Map index to spot symbol and exchange
+        spot_config = {
+            IndexName.NIFTY: {"symbol": "NIFTY 50", "exchange": "NSE"},
+            IndexName.SENSEX: {"symbol": "SENSEX", "exchange": "BSE"}
         }
-        symbol = symbol_map.get(index, "NIFTY 50")
+        config = spot_config.get(index, spot_config[IndexName.NIFTY])
 
-        # For now, we'll use the positions to infer spot from ATM strikes
-        # In production, this should use the quotes API
-        # TODO: Add direct quote API call when available
+        # Try quotes API first (preferred method)
+        try:
+            quotes = await self.openalgo.get_quotes(
+                symbol=config["symbol"],
+                exchange=config["exchange"]
+            )
+            if quotes and "ltp" in quotes:
+                ltp = float(quotes["ltp"])
+                logger.info(f"[HEDGE_SELECTOR] Got {index.value} spot from quotes API: {ltp}")
+                return ltp
+        except Exception as e:
+            logger.warning(f"[HEDGE_SELECTOR] Quotes API failed for {index.value}: {e}")
 
-        positions = await self.openalgo.get_positions()
+        # Fallback: Infer from positions
+        try:
+            positions = await self.openalgo.get_positions()
+            if positions:
+                # Find positions for this index
+                index_positions = [
+                    p for p in positions
+                    if index.value in p['symbol'].upper()
+                ]
 
-        if not positions:
-            logger.warning(f"[HEDGE_SELECTOR] No positions found, using fallback spot")
-            # Fallback values
-            return 25000 if index == IndexName.NIFTY else 80000
+                if index_positions:
+                    # Parse strike from symbol (e.g., NIFTY30DEC2525000PE -> 25000)
+                    from app.utils.symbol_parser import parse_option_symbol
 
-        # Find ATM strike from existing positions
-        index_positions = [
-            p for p in positions
-            if index.value in p['symbol'].upper()
-        ]
+                    strikes = []
+                    for pos in index_positions:
+                        parsed = parse_option_symbol(pos['symbol'])
+                        if parsed and 'strike_price' in parsed:
+                            strikes.append(parsed['strike_price'])
 
-        if not index_positions:
-            return 25000 if index == IndexName.NIFTY else 80000
+                    if strikes:
+                        spot = sum(strikes) / len(strikes)
+                        logger.info(
+                            f"[HEDGE_SELECTOR] Inferred {index.value} spot from positions: {spot}"
+                        )
+                        return spot
+        except Exception as e:
+            logger.warning(f"[HEDGE_SELECTOR] Position inference failed: {e}")
 
-        # Parse strike from symbol (e.g., NIFTY30DEC2525000PE -> 25000)
-        from app.utils.symbol_parser import parse_option_symbol
-
-        strikes = []
-        for pos in index_positions:
-            parsed = parse_option_symbol(pos['symbol'])
-            if parsed and 'strike_price' in parsed:
-                strikes.append(parsed['strike_price'])
-
-        if strikes:
-            # Use average of strikes as approximate spot
-            return sum(strikes) / len(strikes)
-
-        return 25000 if index == IndexName.NIFTY else 80000
+        # Last resort: fallback values
+        fallback = 25000 if index == IndexName.NIFTY else 80000
+        logger.warning(f"[HEDGE_SELECTOR] Using fallback spot for {index.value}: {fallback}")
+        return fallback
 
     async def find_hedge_candidates(
         self,
@@ -152,6 +166,9 @@ class HedgeStrikeSelectorService:
         Filters candidates based on:
         - Premium range (min_premium to max_premium)
         - OTM distance (min_otm_distance to max_otm_distance)
+
+        Uses option chain API for real LTPs when available,
+        falls back to estimation model if API unavailable.
 
         Args:
             index: NIFTY or SENSEX
@@ -180,7 +197,6 @@ class HedgeStrikeSelectorService:
         lot_size = self.lot_sizes.get_lot_size(index)
         lots_per_basket = self.lot_sizes.get_lots_per_basket(index)
         total_lots = lots_per_basket * num_baskets
-        total_quantity = lot_size * total_lots
 
         # Estimate margin benefit per side (CE or PE)
         # Total hedge benefit is split between CE and PE
@@ -188,6 +204,15 @@ class HedgeStrikeSelectorService:
             index, expiry_type, num_baskets
         )
         per_side_benefit = total_benefit / 2  # CE and PE each contribute half
+
+        # Try to get real LTPs from option chain API
+        option_chain_data = await self._fetch_option_chain(index, expiry_type)
+        use_real_ltp = len(option_chain_data) > 0
+
+        if use_real_ltp:
+            logger.info(f"[HEDGE_SELECTOR] Using real LTPs from option chain ({len(option_chain_data)} strikes)")
+        else:
+            logger.warning(f"[HEDGE_SELECTOR] Using estimated LTPs (option chain unavailable)")
 
         candidates: List[HedgeCandidate] = []
 
@@ -209,7 +234,6 @@ class HedgeStrikeSelectorService:
             start_strike = (start_strike // strike_step) * strike_step
             end_strike = ((end_strike // strike_step) + 1) * strike_step
 
-            # Check each strike (in production, use option chain API)
             for strike in range(start_strike, end_strike, strike_step):
                 # Calculate OTM distance
                 if opt_type == 'CE':
@@ -221,9 +245,14 @@ class HedgeStrikeSelectorService:
                 if otm_distance < min_otm or otm_distance > max_otm:
                     continue
 
-                # Estimate LTP based on OTM distance (simplified model)
-                # In production, use actual option chain data
-                ltp = self._estimate_ltp(otm_distance, index, expiry_type)
+                # Get LTP (real or estimated)
+                if use_real_ltp:
+                    ltp = self._get_ltp_from_chain(option_chain_data, strike, opt_type)
+                    if ltp is None:
+                        # Strike not in chain, skip or estimate
+                        ltp = self._estimate_ltp(otm_distance, index, expiry_type)
+                else:
+                    ltp = self._estimate_ltp(otm_distance, index, expiry_type)
 
                 # Skip if outside premium range
                 if not (self.config.min_premium <= ltp <= self.config.max_premium):
@@ -254,6 +283,92 @@ class HedgeStrikeSelectorService:
         logger.info(f"[HEDGE_SELECTOR] Found {len(candidates)} candidates")
 
         return candidates
+
+    async def _fetch_option_chain(
+        self,
+        index: IndexName,
+        expiry_type: ExpiryType
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Fetch option chain data from API.
+
+        Returns:
+            Dict mapping strike -> {CE: ltp, PE: ltp}
+        """
+        try:
+            # Map index to option chain symbol
+            symbol_map = {
+                IndexName.NIFTY: ("NIFTY", "NFO"),
+                IndexName.SENSEX: ("SENSEX", "BFO")
+            }
+            symbol, exchange = symbol_map.get(index, ("NIFTY", "NFO"))
+
+            # Calculate expiry date based on expiry_type
+            from datetime import date, timedelta
+            today = date.today()
+            if expiry_type == ExpiryType.ZERO_DTE:
+                expiry = today
+            elif expiry_type == ExpiryType.ONE_DTE:
+                expiry = today + timedelta(days=1)
+            else:
+                expiry = today + timedelta(days=2)
+
+            expiry_str = expiry.strftime("%Y-%m-%d")
+
+            # Fetch from API
+            chain_data = await self.openalgo.get_option_chain(
+                symbol=symbol,
+                exchange=exchange,
+                expiry=expiry_str
+            )
+
+            # Parse into strike -> {CE: ltp, PE: ltp} format
+            result: Dict[str, Dict[str, float]] = {}
+
+            for entry in chain_data:
+                strike = entry.get("strike") or entry.get("strike_price")
+                if strike is None:
+                    continue
+
+                strike = int(strike)
+                if strike not in result:
+                    result[strike] = {}
+
+                # Handle different response formats
+                if "ce_ltp" in entry:
+                    result[strike]["CE"] = float(entry["ce_ltp"])
+                if "pe_ltp" in entry:
+                    result[strike]["PE"] = float(entry["pe_ltp"])
+                if "ltp" in entry and "option_type" in entry:
+                    result[strike][entry["option_type"]] = float(entry["ltp"])
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"[HEDGE_SELECTOR] Failed to fetch option chain: {e}")
+            return {}
+
+    def _get_ltp_from_chain(
+        self,
+        chain: Dict[str, Dict[str, float]],
+        strike: int,
+        option_type: str
+    ) -> Optional[float]:
+        """
+        Get LTP for a specific strike and option type from chain data.
+
+        Args:
+            chain: Option chain data {strike -> {CE: ltp, PE: ltp}}
+            strike: Strike price
+            option_type: 'CE' or 'PE'
+
+        Returns:
+            LTP or None if not found
+        """
+        strike_data = chain.get(strike)
+        if strike_data:
+            return strike_data.get(option_type)
+        return None
 
     def _estimate_ltp(
         self,
