@@ -3,15 +3,17 @@ Auto-Hedge System - Hedge Executor Service
 
 Executes hedge orders via OpenAlgo API.
 Handles order placement, tracking, and recording.
+Includes circuit breaker and rate limiting for production safety.
 """
 
+import asyncio
 import logging
-from datetime import datetime
-from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 import pytz
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hedge_models import (
@@ -20,13 +22,68 @@ from app.models.hedge_models import (
 from app.models.hedge_constants import (
     IndexName, INDEX_TO_EXCHANGE, HEDGE_CONFIG, LOT_SIZES
 )
-from app.services.openalgo_service import OpenAlgoService
+from app.services.openalgo_service import OpenAlgoService, OpenAlgoError
 from app.services.telegram_service import TelegramService, telegram_service
 from app.services.hedge_selector import HedgeCandidate
 
 logger = logging.getLogger(__name__)
 
 IST = pytz.timezone('Asia/Kolkata')
+
+
+@dataclass
+class CircuitBreakerState:
+    """
+    Circuit breaker to prevent repeated API failures.
+
+    State transitions:
+    - CLOSED: Normal operation, requests allowed
+    - OPEN: Too many failures, requests blocked
+    - HALF_OPEN: Testing if service recovered
+    """
+    failure_count: int = 0
+    last_failure_time: Optional[datetime] = None
+    state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+    failure_threshold: int = 3  # Open circuit after 3 failures
+    recovery_timeout_seconds: int = 60  # Wait 60s before half-open
+
+    def record_failure(self) -> None:
+        """Record an API failure."""
+        self.failure_count += 1
+        self.last_failure_time = datetime.now(IST)
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
+            logger.warning(
+                f"[CIRCUIT_BREAKER] Circuit OPEN after {self.failure_count} failures"
+            )
+
+    def record_success(self) -> None:
+        """Record a successful API call."""
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "CLOSED"
+
+    def is_allowed(self) -> bool:
+        """Check if requests are allowed."""
+        if self.state == "CLOSED":
+            return True
+
+        if self.state == "OPEN":
+            # Check if recovery timeout has passed
+            if self.last_failure_time:
+                elapsed = (datetime.now(IST) - self.last_failure_time).total_seconds()
+                if elapsed >= self.recovery_timeout_seconds:
+                    self.state = "HALF_OPEN"
+                    logger.info("[CIRCUIT_BREAKER] Circuit HALF_OPEN, testing recovery")
+                    return True
+            return False
+
+        # HALF_OPEN: Allow one request to test
+        return True
+
+
+# Global circuit breaker instance
+_circuit_breaker = CircuitBreakerState()
 
 
 @dataclass
@@ -106,6 +163,53 @@ class HedgeExecutorService:
         elapsed = (self._now_ist() - self._last_action_time).total_seconds()
         remaining = self.config.cooldown_seconds - elapsed
         return max(0, int(remaining))
+
+    async def get_daily_hedge_cost(self, session_id: int) -> float:
+        """
+        Get total hedge cost spent today for this session.
+
+        Args:
+            session_id: Daily session ID
+
+        Returns:
+            Total cost in INR spent on hedge buys today
+        """
+        result = await self.db.execute(
+            select(func.coalesce(func.sum(HedgeTransaction.total_cost), 0))
+            .where(HedgeTransaction.session_id == session_id)
+            .where(HedgeTransaction.action == "BUY")
+            .where(HedgeTransaction.order_status.in_(["FILLED", "PENDING", "DRY_RUN"]))
+        )
+        return float(result.scalar() or 0)
+
+    async def check_daily_cost_cap(
+        self,
+        session_id: int,
+        proposed_cost: float
+    ) -> tuple[bool, float, float]:
+        """
+        Check if proposed hedge cost would exceed daily cap.
+
+        Args:
+            session_id: Daily session ID
+            proposed_cost: Cost of proposed hedge buy
+
+        Returns:
+            Tuple of (is_allowed, current_spent, remaining_budget)
+        """
+        current_spent = await self.get_daily_hedge_cost(session_id)
+        max_daily = float(self.config.max_hedge_cost_per_day)
+        remaining = max_daily - current_spent
+
+        if proposed_cost > remaining:
+            logger.warning(
+                f"[HEDGE_EXECUTOR] Daily cost cap would be exceeded: "
+                f"spent=₹{current_spent:,.0f}, proposed=₹{proposed_cost:,.0f}, "
+                f"cap=₹{max_daily:,.0f}"
+            )
+            return False, current_spent, remaining
+
+        return True, current_spent, remaining
 
     def _build_symbol(
         self,
@@ -190,12 +294,38 @@ class HedgeExecutorService:
         limit_price = round(candidate.ltp + self.config.limit_order_buffer, 2)
         total_cost = limit_price * quantity
 
+        # Check daily cost cap BEFORE placing order
+        is_allowed, current_spent, remaining_budget = await self.check_daily_cost_cap(
+            session_id, total_cost
+        )
+        if not is_allowed:
+            error_msg = (
+                f"Daily cost cap exceeded: spent=₹{current_spent:,.0f}, "
+                f"proposed=₹{total_cost:,.0f}, cap=₹{self.config.max_hedge_cost_per_day:,.0f}"
+            )
+            logger.warning(f"[HEDGE_EXECUTOR] {error_msg}")
+            await self.telegram.send_message(
+                f"⚠️ *Hedge Blocked*: Daily cost cap exceeded\n\n"
+                f"Spent today: ₹{current_spent:,.0f}\n"
+                f"Proposed: ₹{total_cost:,.0f}\n"
+                f"Daily cap: ₹{self.config.max_hedge_cost_per_day:,.0f}\n"
+                f"Remaining: ₹{remaining_budget:,.0f}"
+            )
+            return OrderResult(
+                success=False,
+                order_id=None,
+                executed_price=None,
+                error_message=error_msg,
+                transaction_id=None
+            )
+
         logger.info(
             f"[HEDGE_EXECUTOR] Buying hedge: {symbol}, "
-            f"qty={quantity}, price={limit_price}, cost=₹{total_cost:,.0f}"
+            f"qty={quantity}, price={limit_price}, cost=₹{total_cost:,.0f} "
+            f"(daily: ₹{current_spent + total_cost:,.0f}/₹{self.config.max_hedge_cost_per_day:,.0f})"
         )
 
-        # Record pending transaction
+        # Record pending transaction (include total_cost for daily cap tracking)
         transaction = HedgeTransaction(
             session_id=session_id,
             timestamp=self._now_ist(),
@@ -208,6 +338,7 @@ class HedgeExecutorService:
             quantity=quantity,
             lots=total_lots,
             order_price=limit_price,
+            total_cost=total_cost,  # Track for daily cost cap
             utilization_before=utilization_before,
             order_status="PENDING"
         )
@@ -486,37 +617,108 @@ class HedgeExecutorService:
         exchange: str,
         action: str,
         quantity: int,
-        price: float
+        price: float,
+        max_retries: int = 3
     ) -> dict:
         """
-        Place order via OpenAlgo.
+        Place order via OpenAlgo with rate limiting and circuit breaker.
 
-        This is a placeholder that needs to be implemented based on
-        OpenAlgo's order placement API.
+        Implements:
+        - Circuit breaker: Blocks requests after 3 consecutive failures
+        - Exponential backoff: 1s, 2s, 4s between retries
+        - Rate limiting: Min 500ms between order requests
 
         Args:
             symbol: Trading symbol
             exchange: NFO or BFO
             action: BUY or SELL
             quantity: Order quantity
-            price: Limit price
+            price: Limit price (0 for market order)
+            max_retries: Maximum retry attempts (default 3)
 
         Returns:
             Order response from broker
+
+        Raises:
+            OpenAlgoError: If order placement fails after all retries
         """
-        # TODO: Implement actual OpenAlgo order placement
-        # For now, simulate successful order
-        import uuid
+        global _circuit_breaker
 
-        logger.info(
-            f"[HEDGE_EXECUTOR] Placing order: {action} {quantity} {symbol} @ {price}"
-        )
+        # Check circuit breaker
+        if not _circuit_breaker.is_allowed():
+            logger.error(
+                f"[HEDGE_EXECUTOR] Circuit breaker OPEN - blocking order request"
+            )
+            await self.telegram.send_message(
+                "❌ *Order Blocked*: Circuit breaker OPEN due to API failures\n\n"
+                f"Symbol: {symbol}\nAction: {action}\nQty: {quantity}"
+            )
+            raise OpenAlgoError("Circuit breaker OPEN - too many API failures")
 
-        # Simulate order response
-        return {
-            "status": "success",
-            "orderid": str(uuid.uuid4())[:8].upper()
-        }
+        # Rate limiting: min 500ms between orders
+        await asyncio.sleep(0.5)
+
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                logger.info(
+                    f"[HEDGE_EXECUTOR] Placing order (attempt {attempt + 1}/{max_retries}): "
+                    f"{action} {quantity} {symbol} @ {'MARKET' if price == 0 else price}"
+                )
+
+                # Use OpenAlgo service for real order execution
+                price_type = "MARKET" if price == 0 else "LIMIT"
+                result = await self.openalgo.place_order(
+                    symbol=symbol,
+                    exchange=exchange,
+                    action=action,
+                    quantity=quantity,
+                    product="NRML",  # Normal for overnight hedges
+                    price_type=price_type,
+                    price=price
+                )
+
+                # Success - reset circuit breaker
+                _circuit_breaker.record_success()
+
+                order_id = result.get("order_id") or result.get("orderid")
+                logger.info(f"[HEDGE_EXECUTOR] Order placed successfully: {order_id}")
+
+                return {
+                    "status": "success",
+                    "orderid": order_id
+                }
+
+            except OpenAlgoError as e:
+                last_error = e
+                logger.warning(
+                    f"[HEDGE_EXECUTOR] Order attempt {attempt + 1} failed: {e}"
+                )
+
+                # Record failure for circuit breaker
+                _circuit_breaker.record_failure()
+
+                # Exponential backoff: 1s, 2s, 4s
+                if attempt < max_retries - 1:
+                    backoff_seconds = 2 ** attempt
+                    logger.info(f"[HEDGE_EXECUTOR] Retrying in {backoff_seconds}s...")
+                    await asyncio.sleep(backoff_seconds)
+
+            except Exception as e:
+                last_error = e
+                logger.error(
+                    f"[HEDGE_EXECUTOR] Unexpected error in order attempt {attempt + 1}: {e}"
+                )
+                _circuit_breaker.record_failure()
+
+                if attempt < max_retries - 1:
+                    backoff_seconds = 2 ** attempt
+                    await asyncio.sleep(backoff_seconds)
+
+        # All retries exhausted
+        error_msg = f"Order failed after {max_retries} attempts: {last_error}"
+        logger.error(f"[HEDGE_EXECUTOR] {error_msg}")
+        raise OpenAlgoError(error_msg)
 
     async def get_active_hedges(self, session_id: int) -> list:
         """
