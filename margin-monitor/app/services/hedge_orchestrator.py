@@ -142,14 +142,19 @@ class AutoHedgeOrchestrator:
         # Main monitoring loop
         while self._is_running:
             try:
+                # Rollback any stale state before each cycle
+                # This prevents accumulated stale connections in long-running loops
+                await self.db.rollback()
                 await self._check_and_act()
             except Exception as e:
                 logger.error(f"[ORCHESTRATOR] Error in check cycle: {e}")
+                # Clean up on error
+                await self.db.rollback()
                 await self.telegram.send_message(
                     f"❌ *Auto-hedge error:* {str(e)[:100]}"
                 )
-
-            await asyncio.sleep(self._check_interval)
+            finally:
+                await asyncio.sleep(self._check_interval)
 
     async def stop(self):
         """Stop the auto-hedge monitoring loop."""
@@ -388,22 +393,33 @@ class AutoHedgeOrchestrator:
         return None
 
     async def _get_current_margin(self) -> Optional[dict]:
-        """Get current margin data from margin service."""
-        if self.margin_service:
-            try:
-                funds = await self.margin_service.get_current_status()
-                return funds
-            except Exception as e:
-                logger.error(f"[ORCHESTRATOR] Error getting margin: {e}")
+        """
+        Get current margin data from margin service.
 
-        # Fallback: calculate from session data
-        if self._session:
-            return {
-                'utilization_pct': 50.0,  # Placeholder
-                'intraday_margin': float(self._session.total_budget) * 0.5
-            }
+        CRITICAL: This must return real margin data. Never use fake/hardcoded values
+        as they could cause incorrect hedge decisions with ₹50L+ at risk.
+        """
+        if not self.margin_service:
+            logger.critical("[ORCHESTRATOR] No margin service configured!")
+            await self.telegram.send_message(
+                "❌ *CRITICAL*: Margin service not configured!\n\n"
+                "Auto-hedge is disabled until this is resolved."
+            )
+            return None
 
-        return None
+        try:
+            funds = await self.margin_service.get_current_status()
+            if not funds:
+                raise ValueError("Empty margin data received")
+            return funds
+        except Exception as e:
+            logger.critical(f"[ORCHESTRATOR] Cannot fetch margin data: {e}")
+            await self.telegram.send_message(
+                f"❌ *CRITICAL*: Margin service unavailable!\n\n"
+                f"Auto-hedge is disabled until resolved.\n\n"
+                f"`{str(e)[:100]}`"
+            )
+            return None  # Fail explicitly, never use hardcoded values
 
     async def _get_positions(self) -> list:
         """Get current positions."""

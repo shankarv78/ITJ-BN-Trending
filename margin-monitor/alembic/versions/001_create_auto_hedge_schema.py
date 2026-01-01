@@ -157,6 +157,13 @@ def upgrade() -> None:
     )
     op.create_index('idx_active_hedges_session', 'active_hedges', ['session_id', 'is_active'], schema='auto_hedge')
     op.create_index('idx_active_hedges_symbol', 'active_hedges', ['symbol'], schema='auto_hedge')
+    # Composite index for efficient ORDER BY otm_distance queries
+    op.create_index(
+        'idx_active_hedges_session_active_otm',
+        'active_hedges',
+        ['session_id', 'is_active', sa.desc('otm_distance')],
+        schema='auto_hedge'
+    )
 
 
 def downgrade() -> None:

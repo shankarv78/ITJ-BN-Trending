@@ -11,14 +11,27 @@ Tables:
 - active_hedges: Currently held hedge positions
 """
 
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone
 from enum import Enum
 from sqlalchemy import (
     Column, Integer, String, Float, Date, DateTime, Time, Text,
-    ForeignKey, Index, Boolean, Enum as SQLEnum, Numeric
+    ForeignKey, Index, Boolean, Enum as SQLEnum, Numeric, func
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
+
+
+# ============================================================
+# Timezone-aware datetime helper
+# ============================================================
+def utc_now():
+    """Return current time as timezone-aware UTC datetime.
+
+    IMPORTANT: Use this instead of utc_now() for timezone-aware columns.
+    utc_now() returns a naive datetime which causes 5.5 hour offset
+    errors when stored in TIMESTAMPTZ columns in India timezone.
+    """
+    return datetime.now(timezone.utc)
 
 # Schema for auto-hedge tables
 HEDGE_SCHEMA = "auto_hedge"
@@ -110,8 +123,8 @@ class StrategySchedule(Base):
     is_active = Column(Boolean, default=True)
 
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class DailySession(Base):
@@ -147,8 +160,8 @@ class DailySession(Base):
     auto_hedge_enabled = Column(Boolean, default=True)
 
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     # Relationships
     hedge_transactions = relationship("HedgeTransaction", back_populates="session")
@@ -171,7 +184,7 @@ class HedgeTransaction(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey(f'{HEDGE_SCHEMA}.daily_session.id'), nullable=False)
-    timestamp = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=utc_now)
 
     # Action details
     action = Column(String(10), nullable=False)  # BUY, SELL
@@ -205,7 +218,7 @@ class HedgeTransaction(Base):
     telegram_message_id = Column(String(50), nullable=True)
 
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
     # Relationships
     session = relationship("DailySession", back_populates="hedge_transactions")
@@ -245,8 +258,8 @@ class StrategyExecution(Base):
     exit_reason = Column(String(20), nullable=True)  # TIMED, SL_HIT, EXPIRED, MANUAL
 
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     # Relationships
     session = relationship("DailySession", back_populates="strategy_executions")
@@ -287,8 +300,8 @@ class ActiveHedge(Base):
     margin_benefit = Column(Numeric(14, 2), nullable=True)  # Estimated margin reduction
 
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     # Relationships
     session = relationship("DailySession", back_populates="active_hedges")

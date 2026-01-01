@@ -5,10 +5,12 @@ REST API endpoints for managing and monitoring the auto-hedge system.
 """
 
 import logging
+import os
 from datetime import date, datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +40,46 @@ import pytz
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/hedge", tags=["Auto-Hedge"])
+
+# ============================================================
+# Security
+# ============================================================
+
+security = HTTPBearer(auto_error=False)
+
+
+async def verify_api_key(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+) -> bool:
+    """
+    Verify API key for sensitive endpoints.
+
+    Requires HEDGE_API_KEY environment variable to be set.
+    Pass the key as: Authorization: Bearer <api_key>
+    """
+    api_key = os.getenv("HEDGE_API_KEY")
+
+    # If no API key configured, log warning but allow (for dev)
+    if not api_key:
+        logger.warning(
+            "[SECURITY] HEDGE_API_KEY not set - sensitive endpoints unprotected!"
+        )
+        return True
+
+    if not credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Use Authorization: Bearer <api_key>"
+        )
+
+    if credentials.credentials != api_key:
+        logger.warning(f"[SECURITY] Invalid API key attempt")
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid API key"
+        )
+
+    return True
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -88,13 +130,15 @@ async def get_hedge_status(db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.post("/toggle", response_model=ToggleResponse)
+@router.post("/toggle", response_model=ToggleResponse, dependencies=[Depends(verify_api_key)])
 async def toggle_auto_hedge(
     request: ToggleRequest,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Enable or disable auto-hedge for today's session.
+
+    Requires API key authentication.
 
     Args:
         request: Toggle request with enabled flag
@@ -429,13 +473,15 @@ async def get_transactions(
 # Manual Action Endpoints
 # ============================================================
 
-@router.post("/manual/buy", response_model=ActionResponse)
+@router.post("/manual/buy", response_model=ActionResponse, dependencies=[Depends(verify_api_key)])
 async def manual_hedge_buy(
     request: ManualHedgeBuyRequest,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Manually trigger a hedge buy.
+
+    Requires API key authentication. USE WITH CAUTION - this places real orders!
 
     Args:
         request: Strike and option type
@@ -484,13 +530,15 @@ async def manual_hedge_buy(
     )
 
 
-@router.post("/manual/exit", response_model=ActionResponse)
+@router.post("/manual/exit", response_model=ActionResponse, dependencies=[Depends(verify_api_key)])
 async def manual_hedge_exit(
     request: ManualHedgeExitRequest,
     db: AsyncSession = Depends(get_db)
 ):
     """
     Manually trigger a hedge exit.
+
+    Requires API key authentication. USE WITH CAUTION - this places real orders!
 
     Args:
         request: Hedge ID to exit
