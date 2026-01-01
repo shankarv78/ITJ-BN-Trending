@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://localhost:5432/portfolio_manager"
     mm_schema: str = "margin_monitor"
+    hedge_schema: str = "auto_hedge"
 
     # OpenAlgo
     openalgo_base_url: str = "http://127.0.0.1:5000"
@@ -38,6 +39,34 @@ class Settings(BaseSettings):
 
     # Frontend CORS - Allow all localhost ports for development
     cors_origins: str = '["*"]'
+
+    # ================================================================
+    # AUTO-HEDGE CONFIGURATION
+    # ================================================================
+
+    # Telegram Bot (for hedge alerts)
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+    # Hedge Thresholds
+    hedge_entry_trigger_pct: float = 95.0    # Buy hedge if projected > this
+    hedge_entry_target_pct: float = 85.0     # Target utilization after hedge
+    hedge_exit_trigger_pct: float = 70.0     # Consider exit if util < this
+
+    # Hedge Timing
+    hedge_lookahead_minutes: int = 5         # Check this many mins before entry
+    hedge_exit_buffer_minutes: int = 15      # Don't exit if entry within this
+
+    # Hedge Strike Selection
+    hedge_min_premium: float = 2.0           # Min LTP for hedge strike
+    hedge_max_premium: float = 6.0           # Max LTP for hedge strike
+
+    # Hedge Safety
+    hedge_max_cost_per_day: float = 50000.0  # ₹50K max daily spend
+    hedge_cooldown_seconds: int = 120        # Min time between actions
+
+    # Auto-hedge toggle (can be disabled globally)
+    auto_hedge_enabled: bool = True
 
     @property
     def cors_origins_list(self) -> List[str]:
