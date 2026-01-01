@@ -375,6 +375,8 @@ class HedgeExecutorService:
             )
 
         # Record exit transaction
+        # Use dynamic lot size based on symbol (75 for Nifty, 10 for Sensex)
+        lot_size = self.lot_sizes.get_lot_size_from_symbol(hedge.symbol)
         transaction = HedgeTransaction(
             session_id=session_id,
             timestamp=self._now_ist(),
@@ -385,7 +387,7 @@ class HedgeExecutorService:
             strike=hedge.strike,
             option_type=hedge.option_type,
             quantity=hedge.quantity,
-            lots=hedge.quantity // 75,  # Approximate
+            lots=hedge.quantity // lot_size,
             order_price=current_price,
             utilization_before=utilization_before,
             order_status="PENDING"

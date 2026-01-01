@@ -216,6 +216,23 @@ class LotSizes:
         lots_per_basket = self.get_lots_per_basket(index)
         return lot_size * lots_per_basket * num_baskets
 
+    def get_lot_size_from_symbol(self, symbol: str) -> int:
+        """
+        Infer lot size from trading symbol.
+
+        Args:
+            symbol: Trading symbol like 'NIFTY02JAN2524000PE' or 'SENSEX02JAN2584000CE'
+
+        Returns:
+            Lot size (75 for Nifty, 10 for Sensex)
+        """
+        symbol_upper = symbol.upper()
+        if symbol_upper.startswith("SENSEX"):
+            return self.SENSEX
+        else:
+            # Default to NIFTY lot size (75) for NIFTY and any unknown symbols
+            return self.NIFTY
+
 
 # ================================================================
 # EXCHANGE MAPPINGS

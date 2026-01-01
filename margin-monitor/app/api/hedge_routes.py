@@ -56,15 +56,30 @@ async def verify_api_key(
 
     Requires HEDGE_API_KEY environment variable to be set.
     Pass the key as: Authorization: Bearer <api_key>
+
+    In development (HEDGE_DEV_MODE=true), allows requests without API key.
+    In production, API key is REQUIRED - no fallback.
     """
     api_key = os.getenv("HEDGE_API_KEY")
+    dev_mode = os.getenv("HEDGE_DEV_MODE", "false").lower() == "true"
 
-    # If no API key configured, log warning but allow (for dev)
+    # If no API key configured
     if not api_key:
-        logger.warning(
-            "[SECURITY] HEDGE_API_KEY not set - sensitive endpoints unprotected!"
-        )
-        return True
+        if dev_mode:
+            logger.warning(
+                "[SECURITY] HEDGE_DEV_MODE=true - API key not required (dev only!)"
+            )
+            return True
+        else:
+            # Production: REQUIRE API key configuration
+            logger.critical(
+                "[SECURITY] HEDGE_API_KEY not set - blocking request! "
+                "Set HEDGE_API_KEY env var or use HEDGE_DEV_MODE=true for development."
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Server misconfiguration: API authentication not configured"
+            )
 
     if not credentials:
         raise HTTPException(
@@ -73,7 +88,7 @@ async def verify_api_key(
         )
 
     if credentials.credentials != api_key:
-        logger.warning(f"[SECURITY] Invalid API key attempt")
+        logger.warning("[SECURITY] Invalid API key attempt")
         raise HTTPException(
             status_code=403,
             detail="Invalid API key"
@@ -496,6 +511,15 @@ async def manual_hedge_buy(
 
     session = orchestrator.session
 
+    # Fetch current margin utilization for accurate audit trail
+    current_util = 0.0
+    try:
+        margin_data = await orchestrator._get_current_margin()
+        if margin_data:
+            current_util = margin_data.get('utilization_pct', 0.0)
+    except Exception as e:
+        logger.warning(f"[HEDGE_API] Could not fetch margin for manual buy: {e}")
+
     # Create hedge candidate
     candidate = HedgeCandidate(
         strike=request.strike,
@@ -518,7 +542,7 @@ async def manual_hedge_buy(
         expiry_date=session.expiry_date.isoformat(),
         num_baskets=session.num_baskets,
         trigger_reason="MANUAL",
-        utilization_before=0,  # Would need to fetch
+        utilization_before=current_util,
         dry_run=False
     )
 
@@ -552,13 +576,23 @@ async def manual_hedge_exit(
         raise HTTPException(400, "No active session")
 
     session = orchestrator.session
+
+    # Fetch current margin utilization for accurate audit trail
+    current_util = 0.0
+    try:
+        margin_data = await orchestrator._get_current_margin()
+        if margin_data:
+            current_util = margin_data.get('utilization_pct', 0.0)
+    except Exception as e:
+        logger.warning(f"[HEDGE_API] Could not fetch margin for manual exit: {e}")
+
     executor = HedgeExecutorService(db)
 
     result = await executor.execute_hedge_exit(
         hedge_id=request.hedge_id,
         session_id=session.id,
         trigger_reason="MANUAL",
-        utilization_before=0,
+        utilization_before=current_util,
         dry_run=False
     )
 
