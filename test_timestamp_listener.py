@@ -242,3 +242,5 @@ if __name__ == '__main__':
     logger.info("  GET  /health   - Health check")
 
     app.run(host='0.0.0.0', port=5004, debug=False)
+
+

@@ -10,6 +10,7 @@ import logging
 from app.config import settings
 from app.database import init_db
 from app.api.routes import router as api_router
+from app.api.hedge_routes import router as hedge_router
 
 # Configure logging
 logging.basicConfig(
@@ -63,6 +64,7 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(api_router, prefix="/api/margin")
+app.include_router(hedge_router)  # Auto-hedge routes (already has /api/hedge prefix)
 
 
 @app.get("/health")

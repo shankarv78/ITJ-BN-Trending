@@ -1,0 +1,30 @@
+{
+  "description": "Silver Mini Pyramid Signal - To be sent at 9:00 AM on Dec 31, 2025",
+  "context": {
+    "reason": "EOD conditions met at market close on Dec 30, 2025 but market was closed",
+    "base_entry": {
+      "date": "2025-12-30 19:00",
+      "price": 244010,
+      "lots": 2,
+      "original_stop": 236536
+    },
+    "eod_close_data": {
+      "price": 252918,
+      "conditions_met": true,
+      "pnl": 90005
+    }
+  },
+  "signal_to_send": {
+    "type": "PYRAMID",
+    "instrument": "SILVER_MINI",
+    "position": "Long_2",
+    "price": 252900,
+    "stop": 245000,
+    "atr": 2500,
+    "er": 0.5,
+    "lots": 1
+  },
+  "curl_command": "curl -X POST http://localhost:5002/webhook -H 'Content-Type: application/json' -d '{\"type\":\"PYRAMID\",\"instrument\":\"SILVER_MINI\",\"position\":\"Long_2\",\"price\":252900,\"stop\":245000,\"atr\":2500,\"er\":0.5,\"lots\":1}'"
+}
+
+

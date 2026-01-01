@@ -201,5 +201,194 @@ class OpenAlgoService:
                 raise OpenAlgoError(f"Failed to parse response: {e}")
 
 
+    async def get_quotes(self, symbol: str, exchange: str = "NSE") -> dict:
+        """
+        Fetch live quotes for a symbol.
+
+        Args:
+            symbol: Trading symbol (e.g., 'NIFTY 50', 'SENSEX')
+            exchange: Exchange (NSE, NFO, BFO, etc.)
+
+        Returns:
+            Dict with ltp, open, high, low, close, volume, etc.
+
+        Raises:
+            OpenAlgoError: If API call fails.
+        """
+        cache_key = f"quotes:{exchange}:{symbol}"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/v1/quotes",
+                    json={
+                        "apikey": self.api_key,
+                        "symbol": symbol,
+                        "exchange": exchange
+                    },
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                result = response.json()
+
+                if result.get("status") != "success":
+                    raise OpenAlgoError(f"Quotes API error: {result}")
+
+                data = result.get("data", {})
+                _set_cached(cache_key, data)
+                return data
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"OpenAlgo quotes API HTTP error: {e}")
+                raise OpenAlgoError(f"HTTP error: {e.response.status_code}")
+            except httpx.RequestError as e:
+                logger.error(f"OpenAlgo quotes API request error: {e}")
+                raise OpenAlgoError(f"Request failed: {e}")
+
+    async def get_option_chain(
+        self,
+        symbol: str,
+        exchange: str = "NFO",
+        expiry: str = None
+    ) -> List[dict]:
+        """
+        Fetch option chain for an index.
+
+        Args:
+            symbol: Index symbol (e.g., 'NIFTY', 'BANKNIFTY', 'SENSEX')
+            exchange: Exchange (NFO for NIFTY/BANKNIFTY, BFO for SENSEX)
+            expiry: Optional expiry date filter (YYYY-MM-DD format)
+
+        Returns:
+            List of option chain entries with strike, CE/PE LTPs, OI, etc.
+
+        Note:
+            OpenAlgo may not support direct option chain API.
+            In that case, we fall back to position-based inference or estimation.
+        """
+        cache_key = f"optionchain:{exchange}:{symbol}:{expiry or 'all'}"
+        cached = _get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        async with httpx.AsyncClient() as client:
+            try:
+                # Try the option chain API if available
+                response = await client.post(
+                    f"{self.base_url}/api/v1/optionchain",
+                    json={
+                        "apikey": self.api_key,
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "expiry": expiry
+                    },
+                    timeout=15.0
+                )
+
+                # If we get a 404 or error, the API might not support option chain
+                if response.status_code == 404:
+                    logger.warning(
+                        f"[OPENALGO] Option chain API not available for {symbol}. "
+                        "Using estimation fallback."
+                    )
+                    return []
+
+                response.raise_for_status()
+                result = response.json()
+
+                if result.get("status") != "success":
+                    logger.warning(f"[OPENALGO] Option chain API returned error: {result}")
+                    return []
+
+                data = result.get("data", [])
+                _set_cached(cache_key, data)
+                return data
+
+            except httpx.HTTPStatusError as e:
+                # Non-fatal - we can fall back to estimation
+                logger.warning(f"OpenAlgo option chain API HTTP error: {e}")
+                return []
+            except httpx.RequestError as e:
+                logger.warning(f"OpenAlgo option chain API request error: {e}")
+                return []
+
+    async def place_order(
+        self,
+        symbol: str,
+        exchange: str,
+        action: str,  # "BUY" or "SELL"
+        quantity: int,
+        product: str = "NRML",
+        price_type: str = "MARKET",
+        price: float = 0.0
+    ) -> dict:
+        """
+        Place an order via OpenAlgo.
+
+        Args:
+            symbol: Trading symbol
+            exchange: Exchange (NFO, BFO, etc.)
+            action: "BUY" or "SELL"
+            quantity: Order quantity
+            product: Product type (NRML, MIS)
+            price_type: Order type (MARKET, LIMIT)
+            price: Limit price (if price_type is LIMIT)
+
+        Returns:
+            Dict with order_id and status
+
+        Raises:
+            OpenAlgoError: If order placement fails
+        """
+        async with httpx.AsyncClient() as client:
+            try:
+                payload = {
+                    "apikey": self.api_key,
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "action": action,
+                    "quantity": quantity,
+                    "product": product,
+                    "pricetype": price_type,
+                }
+
+                if price_type == "LIMIT":
+                    payload["price"] = price
+
+                logger.info(
+                    f"[OPENALGO] Placing order: {action} {quantity} {symbol} @ {price_type}"
+                )
+
+                response = await client.post(
+                    f"{self.base_url}/api/v1/placeorder",
+                    json=payload,
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                result = response.json()
+
+                if result.get("status") != "success":
+                    raise OpenAlgoError(f"Order placement failed: {result}")
+
+                order_id = result.get("data", {}).get("orderid", result.get("orderid"))
+                logger.info(f"[OPENALGO] Order placed successfully: {order_id}")
+
+                return {
+                    "order_id": order_id,
+                    "status": "success",
+                    "raw_response": result
+                }
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"OpenAlgo place order HTTP error: {e}")
+                raise OpenAlgoError(f"HTTP error: {e.response.status_code}")
+            except httpx.RequestError as e:
+                logger.error(f"OpenAlgo place order request error: {e}")
+                raise OpenAlgoError(f"Request failed: {e}")
+
+
 # Global service instance
 openalgo_service = OpenAlgoService()

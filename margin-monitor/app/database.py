@@ -40,13 +40,14 @@ async def get_db() -> AsyncSession:
 
 
 async def init_schema():
-    """Create the margin_monitor schema if it doesn't exist."""
+    """Create the margin_monitor and auto_hedge schemas if they don't exist."""
     async with engine.begin() as conn:
         await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {settings.mm_schema}"))
+        await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {settings.hedge_schema}"))
 
 
 async def init_db():
-    """Initialize database tables."""
+    """Initialize database tables for all schemas."""
     await init_schema()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
