@@ -960,16 +960,20 @@ class AutoHedgeOrchestrator:
 
             max_reduction = self._session_cache.get('budget', 0) * 0.75 if self._session_cache else 0
 
+            # Sanity check: if no hedges, no reduction
+            hedge_count = len(self._simulated_hedges)
+            total_reduction = self._simulated_margin_reduction if hedge_count > 0 else 0.0
+
             response['simulated_margin'] = {
-                'total_reduction': self._simulated_margin_reduction,
+                'total_reduction': total_reduction,
                 'max_reduction': max_reduction,
-                'hedge_count': len(self._simulated_hedges),
+                'hedge_count': hedge_count,
                 'ce_hedge_count': sum(1 for h in self._simulated_hedges if h.get('option_type') == 'CE'),
                 'pe_hedge_count': sum(1 for h in self._simulated_hedges if h.get('option_type') == 'PE'),
                 'ce_hedge_qty': self._simulated_ce_qty,
                 'pe_hedge_qty': self._simulated_pe_qty,
                 'real_utilization_pct': round(real_util, 1),
-                'simulated_utilization_pct': round(simulated_util, 1),
+                'simulated_utilization_pct': round(simulated_util if hedge_count > 0 else real_util, 1),
                 'hedges': self._simulated_hedges[-10:]  # Last 10 simulated hedges
             }
 
