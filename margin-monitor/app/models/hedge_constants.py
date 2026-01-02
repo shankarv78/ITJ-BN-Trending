@@ -202,11 +202,11 @@ class HedgeConfig:
 class LotSizes:
     """Lot sizes for supported indices."""
     NIFTY: int = 65
-    SENSEX: int = 10
+    SENSEX: int = 20
 
     # Baskets typically have multiple lots
     NIFTY_LOTS_PER_BASKET: int = 1
-    SENSEX_LOTS_PER_BASKET: int = 10  # 10 lots × 10 = 100 qty per basket
+    SENSEX_LOTS_PER_BASKET: int = 5  # 5 lots × 20 = 100 qty per basket
 
     def get_lot_size(self, index: IndexName) -> int:
         """Get lot size for index."""
@@ -230,7 +230,7 @@ class LotSizes:
             symbol: Trading symbol like 'NIFTY02JAN2524000PE' or 'SENSEX02JAN2584000CE'
 
         Returns:
-            Lot size (75 for Nifty, 10 for Sensex)
+            Lot size (65 for Nifty, 20 for Sensex)
         """
         symbol_upper = symbol.upper()
         if symbol_upper.startswith("SENSEX"):

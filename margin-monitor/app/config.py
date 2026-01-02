@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # Trading Defaults
     default_budget_per_basket: float = 1000000.0  # ₹10L per basket
     lot_size_nifty: int = 65
-    lot_size_sensex: int = 10
+    lot_size_sensex: int = 20
 
     # Scheduler
     baseline_capture_time: str = "09:15:15"
