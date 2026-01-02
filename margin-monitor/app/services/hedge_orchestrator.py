@@ -176,16 +176,21 @@ class AutoHedgeOrchestrator:
         Main check cycle - called every 30 seconds.
 
         1. Skip if outside market hours
-        2. Get current margin status
-        3. Check if entry is imminent
-        4. If yes, evaluate if hedge is needed
-        5. If no imminent entry, check if hedges should be exited
+        2. Check if auto-hedge is still enabled (refresh from DB)
+        3. Get current margin status
+        4. Check if entry is imminent
+        5. If yes, evaluate if hedge is needed
+        6. If no imminent entry, check if hedges should be exited
         """
         # Only run during market hours
         if not self._is_market_hours():
             return
 
         if not self._session:
+            return
+
+        # Re-check if auto-hedge is still enabled (user may have toggled off)
+        if not await self._is_auto_hedge_enabled():
             return
 
         # Get current margin status
@@ -536,6 +541,36 @@ class AutoHedgeOrchestrator:
         # For now, just return None and let the setup API create it
         logger.info(f"[ORCHESTRATOR] No session found for {today}")
         return None
+
+    async def _is_auto_hedge_enabled(self) -> bool:
+        """
+        Check if auto-hedge is currently enabled by refreshing from DB.
+
+        This allows the toggle to work in real-time without restarting the orchestrator.
+        """
+        if not self._session_cache:
+            return False
+
+        session_id = self._session_cache['id']
+
+        async with self.db_factory() as db:
+            result = await db.execute(
+                select(DailySession.auto_hedge_enabled)
+                .where(DailySession.id == session_id)
+            )
+            enabled = result.scalar_one_or_none()
+
+            if enabled is None:
+                logger.warning(f"[ORCHESTRATOR] Session {session_id} not found in DB")
+                return False
+
+            # Update cache if changed
+            if enabled != self._session_cache.get('auto_hedge_enabled'):
+                self._session_cache['auto_hedge_enabled'] = enabled
+                status = "ENABLED" if enabled else "DISABLED"
+                logger.info(f"[ORCHESTRATOR] Auto-hedge toggled {status}")
+
+            return enabled
 
     async def _load_existing_dry_run_margin(self):
         """
