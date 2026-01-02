@@ -364,18 +364,7 @@ class AutoHedgeOrchestrator:
             if result.success:
                 # In dry run mode, track the simulated margin reduction
                 if self._dry_run:
-                    estimated_benefit = hedge.estimated_margin_benefit or selection.total_margin_benefit / len(selection.selected)
-                    self._simulated_margin_reduction += estimated_benefit
-                    self._simulated_hedges.append({
-                        'strike': hedge.strike,
-                        'option_type': hedge.option_type,
-                        'margin_benefit': estimated_benefit,
-                        'timestamp': self._now_ist().isoformat()
-                    })
-                    logger.info(
-                        f"[ORCHESTRATOR] DRY RUN: Added simulated margin reduction ₹{estimated_benefit:,.0f}, "
-                        f"total simulated reduction=₹{self._simulated_margin_reduction:,.0f}"
-                    )
+                    self._add_simulated_hedge_benefit(hedge, selection)
             else:
                 logger.error(
                     f"[ORCHESTRATOR] Hedge buy failed: {result.error_message}"
@@ -464,18 +453,7 @@ class AutoHedgeOrchestrator:
 
                 # In dry run mode, track the simulated margin reduction
                 if self._dry_run:
-                    estimated_benefit = hedge.estimated_margin_benefit or selection.total_margin_benefit / len(selection.selected)
-                    self._simulated_margin_reduction += estimated_benefit
-                    self._simulated_hedges.append({
-                        'strike': hedge.strike,
-                        'option_type': hedge.option_type,
-                        'margin_benefit': estimated_benefit,
-                        'timestamp': self._now_ist().isoformat()
-                    })
-                    logger.info(
-                        f"[ORCHESTRATOR] DRY RUN: Added simulated margin reduction ₹{estimated_benefit:,.0f}, "
-                        f"total simulated reduction=₹{self._simulated_margin_reduction:,.0f}"
-                    )
+                    self._add_simulated_hedge_benefit(hedge, selection)
             else:
                 logger.error(
                     f"[ORCHESTRATOR] Reactive hedge failed: {result.error_message}"
@@ -564,6 +542,12 @@ class AutoHedgeOrchestrator:
         Load existing dry run transactions from DB to initialize simulated margin.
 
         This ensures the simulated margin reduction is accurate even after server restart.
+
+        NOTE: Per NSE SPAN margin system research:
+        - Hedge benefits ARE cumulative at portfolio level
+        - Each additional hedge progressively reduces portfolio risk
+        - HOWEVER, there's a floor: minimum ~25% of baseline margin must remain
+        - Diminishing returns apply for far OTM hedges
         """
         from app.models.hedge_models import HedgeTransaction
 
@@ -585,35 +569,94 @@ class AutoHedgeOrchestrator:
                 logger.info("[ORCHESTRATOR] No existing dry run transactions to load")
                 return
 
-            # Calculate total margin benefit from existing transactions
-            # Each hedge pair (CE + PE) provides estimated margin benefit
-            # We estimate based on number of transactions
             num_transactions = len(transactions)
 
-            # Estimate margin benefit per hedge (based on selector's calculation)
-            # This is approximate - in production, we'd store actual margin benefit per transaction
-            estimated_benefit_per_hedge = self.margin_calc.estimate_hedge_margin_benefit(
+            # Calculate cumulative benefit with diminishing returns
+            # First hedge pair gives full benefit, subsequent hedges give less
+            base_benefit_per_hedge = self.margin_calc.estimate_hedge_margin_benefit(
                 IndexName(self._session_cache['index']),
                 ExpiryType(self._session_cache.get('expiry_type', '2DTE')),
                 self._session_cache['baskets']
-            ) / 2  # Divide by 2 because benefit is for a pair (CE + PE)
+            ) / 2  # Per individual hedge (CE or PE)
 
-            total_benefit = num_transactions * estimated_benefit_per_hedge
-            self._simulated_margin_reduction = total_benefit
+            # Apply diminishing returns: each additional hedge gives 80% of previous
+            # This models SPAN's portfolio-level calculation where far OTM hedges help less
+            total_benefit = 0.0
+            diminishing_factor = 1.0
+            for i in range(num_transactions):
+                benefit = base_benefit_per_hedge * diminishing_factor
+                total_benefit += benefit
+                diminishing_factor *= 0.8  # 80% diminishing per additional hedge
+
+            # Apply floor: cannot reduce margin below 25% of baseline (SEBI requirement)
+            # Max reduction = 75% of intraday margin
+            max_reduction = self._session_cache['budget'] * 0.75
+            self._simulated_margin_reduction = min(total_benefit, max_reduction)
 
             # Load last 10 for display
             for txn in transactions[:10]:
                 self._simulated_hedges.append({
                     'strike': txn.strike,
                     'option_type': txn.option_type,
-                    'margin_benefit': estimated_benefit_per_hedge,
+                    'margin_benefit': base_benefit_per_hedge,
                     'timestamp': txn.timestamp.isoformat() if txn.timestamp else ''
                 })
 
             logger.info(
-                f"[ORCHESTRATOR] Loaded {num_transactions} existing dry run transactions, "
-                f"simulated margin reduction=₹{self._simulated_margin_reduction:,.0f}"
+                f"[ORCHESTRATOR] Loaded {num_transactions} dry run transactions, "
+                f"simulated reduction=₹{self._simulated_margin_reduction:,.0f} "
+                f"(max allowed=₹{max_reduction:,.0f}, 75% of budget)"
             )
+
+    def _add_simulated_hedge_benefit(self, hedge, selection):
+        """
+        Add simulated margin benefit for a dry run hedge with proper SPAN modeling.
+
+        Per NSE SPAN research:
+        - Hedge benefits ARE cumulative at portfolio level
+        - BUT with diminishing returns (far OTM hedges help less)
+        - AND a floor: minimum 25% of baseline must remain (max 75% reduction)
+
+        The diminishing factor (0.85) models how additional hedges at different
+        strikes provide progressively less benefit as the portfolio is already
+        partially hedged.
+        """
+        # Base benefit estimate
+        estimated_benefit = hedge.estimated_margin_benefit or selection.total_margin_benefit / len(selection.selected)
+
+        # Apply diminishing returns based on existing hedge count
+        num_existing = len(self._simulated_hedges)
+        diminishing_factor = 0.85 ** num_existing  # 85% of previous benefit
+        adjusted_benefit = estimated_benefit * diminishing_factor
+
+        # Apply floor: cannot reduce margin below 25% of budget (SEBI requirement)
+        max_reduction = self._session_cache['budget'] * 0.75
+        new_total = self._simulated_margin_reduction + adjusted_benefit
+
+        if new_total > max_reduction:
+            # Cap at floor
+            actual_benefit = max(0, max_reduction - self._simulated_margin_reduction)
+            if actual_benefit <= 0:
+                logger.info(
+                    f"[ORCHESTRATOR] DRY RUN: At max reduction floor (₹{max_reduction:,.0f}), "
+                    f"no additional benefit from {hedge.strike} {hedge.option_type}"
+                )
+                return
+            adjusted_benefit = actual_benefit
+
+        self._simulated_margin_reduction += adjusted_benefit
+        self._simulated_hedges.append({
+            'strike': hedge.strike,
+            'option_type': hedge.option_type,
+            'margin_benefit': adjusted_benefit,
+            'timestamp': self._now_ist().isoformat()
+        })
+
+        logger.info(
+            f"[ORCHESTRATOR] DRY RUN: Added ₹{adjusted_benefit:,.0f} benefit "
+            f"(diminished from ₹{estimated_benefit:,.0f}, factor={diminishing_factor:.2f}), "
+            f"total=₹{self._simulated_margin_reduction:,.0f} / max=₹{max_reduction:,.0f}"
+        )
 
     async def _get_current_margin(self) -> Optional[dict]:
         """
