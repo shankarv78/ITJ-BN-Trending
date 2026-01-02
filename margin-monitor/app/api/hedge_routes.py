@@ -806,7 +806,9 @@ async def manual_hedge_buy(
     simulated_strike = round(simulated_strike / strike_gap) * strike_gap
 
     # Get lot size for the index
-    lot_size = 65 if request.index_name.upper() == "NIFTY" else 20
+    index_upper = request.index_name.upper()
+    lot_sizes = {"NIFTY": 65, "BANKNIFTY": 30, "SENSEX": 20}
+    lot_size = lot_sizes.get(index_upper, 65)  # Default to NIFTY
     quantity = request.lots * lot_size
 
     # Build the simulated order details

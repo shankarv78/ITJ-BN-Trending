@@ -15,6 +15,7 @@ from enum import Enum
 class IndexName(str, Enum):
     """Supported indices."""
     NIFTY = "NIFTY"
+    BANKNIFTY = "BANKNIFTY"
     SENSEX = "SENSEX"
 
 
@@ -202,10 +203,12 @@ class HedgeConfig:
 class LotSizes:
     """Lot sizes for supported indices."""
     NIFTY: int = 65
+    BANKNIFTY: int = 30
     SENSEX: int = 20
 
     # Baskets typically have multiple lots
     NIFTY_LOTS_PER_BASKET: int = 1
+    BANKNIFTY_LOTS_PER_BASKET: int = 1
     SENSEX_LOTS_PER_BASKET: int = 5  # 5 lots × 20 = 100 qty per basket
 
     def get_lot_size(self, index: IndexName) -> int:
@@ -230,11 +233,13 @@ class LotSizes:
             symbol: Trading symbol like 'NIFTY02JAN2524000PE' or 'SENSEX02JAN2584000CE'
 
         Returns:
-            Lot size (65 for Nifty, 20 for Sensex)
+            Lot size (65 for Nifty, 30 for BankNifty, 20 for Sensex)
         """
         symbol_upper = symbol.upper()
         if symbol_upper.startswith("SENSEX"):
             return self.SENSEX
+        elif symbol_upper.startswith("BANKNIFTY"):
+            return self.BANKNIFTY
         else:
             # Default to NIFTY lot size (65) for NIFTY and any unknown symbols
             return self.NIFTY
@@ -246,6 +251,7 @@ class LotSizes:
 
 INDEX_TO_EXCHANGE = {
     IndexName.NIFTY: "NFO",
+    IndexName.BANKNIFTY: "NFO",
     IndexName.SENSEX: "BFO"
 }
 
