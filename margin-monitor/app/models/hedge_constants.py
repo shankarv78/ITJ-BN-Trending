@@ -201,7 +201,7 @@ class HedgeConfig:
 @dataclass
 class LotSizes:
     """Lot sizes for supported indices."""
-    NIFTY: int = 75
+    NIFTY: int = 65
     SENSEX: int = 10
 
     # Baskets typically have multiple lots
@@ -236,7 +236,7 @@ class LotSizes:
         if symbol_upper.startswith("SENSEX"):
             return self.SENSEX
         else:
-            # Default to NIFTY lot size (75) for NIFTY and any unknown symbols
+            # Default to NIFTY lot size (65) for NIFTY and any unknown symbols
             return self.NIFTY
 
 
