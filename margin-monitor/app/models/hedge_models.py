@@ -156,6 +156,12 @@ class DailySession(Base):
     baseline_margin = Column(Numeric(14, 2), nullable=True)
     baseline_captured_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Excluded margin (non-intraday positions like trend-following, long-term)
+    # This is subtracted from used_margin along with baseline for utilization calc
+    excluded_margin = Column(Numeric(14, 2), nullable=True, default=0)
+    excluded_margin_breakdown = Column(Text, nullable=True)  # JSON: {"BANK_NIFTY": 2600000, ...}
+    excluded_margin_updated_at = Column(DateTime(timezone=True), nullable=True)
+
     # Auto-hedge toggle
     auto_hedge_enabled = Column(Boolean, default=True)
 

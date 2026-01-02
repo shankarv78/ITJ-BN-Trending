@@ -554,8 +554,42 @@ class SimpleLimitExecutor(OrderExecutor):
 
                 # Check if order is filled
                 if status in ['COMPLETE', 'FILLED'] or fill_status == 'COMPLETE':
-                    fill_price = status_response.get('fill_price') or status_response.get('price') or limit_price
-                    filled_lots = status_response.get('filled_lots') or status_response.get('lots') or lots
+                    # Try multiple field names for fill price
+                    fill_price = (
+                        status_response.get('averageprice') or
+                        status_response.get('average_price') or
+                        status_response.get('tradedprice') or
+                        status_response.get('avgprice') or
+                        status_response.get('fill_price') or
+                        status_response.get('price') or
+                        limit_price
+                    )
+                    filled_lots = (
+                        status_response.get('filledshares') or
+                        status_response.get('filled_lots') or
+                        status_response.get('filled_quantity') or
+                        status_response.get('lots') or
+                        lots
+                    )
+
+                    # If orderbook didn't have fill price, try tradebook
+                    if fill_price == limit_price and order_id:
+                        for tradebook_attempt in range(3):
+                            if tradebook_attempt > 0:
+                                time.sleep(1.0)
+                            tradebook_price = self.openalgo.get_trade_fill_price(order_id)
+                            if tradebook_price and tradebook_price != limit_price:
+                                fill_price = tradebook_price
+                                logger.info(
+                                    f"[SimpleLimitExecutor] Using tradebook fill price: ₹{fill_price:,.2f}"
+                                )
+                                break
+
+                    if fill_price == limit_price:
+                        logger.warning(
+                            f"[SimpleLimitExecutor] Could not find actual fill price, using limit price. "
+                            f"Orderbook data: {status_response}"
+                        )
 
                     result = ExecutionResult(
                         status=ExecutionStatus.EXECUTED,
@@ -574,9 +608,25 @@ class SimpleLimitExecutor(OrderExecutor):
 
                 # Check for partial fill
                 if fill_status == 'PARTIAL':
-                    filled_lots = status_response.get('filled_lots', 0)
+                    filled_lots = (
+                        status_response.get('filledshares') or
+                        status_response.get('filled_lots') or
+                        status_response.get('filled_quantity') or
+                        0
+                    )
                     remaining_lots = status_response.get('remaining_lots', lots - filled_lots)
-                    avg_fill_price = status_response.get('avg_fill_price') or limit_price
+                    avg_fill_price = (
+                        status_response.get('averageprice') or
+                        status_response.get('average_price') or
+                        status_response.get('avg_fill_price') or
+                        limit_price
+                    )
+
+                    # Try tradebook for actual fill price
+                    if avg_fill_price == limit_price and order_id:
+                        tradebook_price = self.openalgo.get_trade_fill_price(order_id)
+                        if tradebook_price:
+                            avg_fill_price = tradebook_price
 
                     logger.info(
                         f"[SimpleLimitExecutor] Partial fill: {filled_lots}/{lots} lots, "
@@ -930,17 +980,26 @@ class ProgressiveExecutor(OrderExecutor):
                     )
 
                     # If orderbook didn't have fill price, try tradebook for actual execution price
+                    # Add delay for broker to update tradebook, then retry
                     if fill_price == attempt_price and order_id:
-                        tradebook_price = self.openalgo.get_trade_fill_price(order_id)
-                        if tradebook_price:
-                            fill_price = tradebook_price
-                            logger.info(f"[ProgressiveExecutor] Using tradebook fill price: ₹{fill_price:,.2f}")
+                        # Tradebook may not be updated immediately - wait and retry
+                        for tradebook_attempt in range(3):
+                            if tradebook_attempt > 0:
+                                time.sleep(1.0)  # Wait 1 second between retries
+                            tradebook_price = self.openalgo.get_trade_fill_price(order_id)
+                            if tradebook_price and tradebook_price != attempt_price:
+                                fill_price = tradebook_price
+                                logger.info(
+                                    f"[ProgressiveExecutor] Using tradebook fill price: ₹{fill_price:,.2f} "
+                                    f"(attempt {tradebook_attempt + 1})"
+                                )
+                                break
 
                     # Warn if we still had to fall back to attempt_price
                     if fill_price == attempt_price:
                         logger.warning(
-                            f"[ProgressiveExecutor] Could not find fill price in orderbook or tradebook, using attempt_price. "
-                            f"Available keys: {list(status_response.keys())}"
+                            f"[ProgressiveExecutor] Could not find fill price in orderbook or tradebook, using attempt_price ₹{attempt_price:,.2f}. "
+                            f"Orderbook data: {status_response}"
                         )
 
                     # OpenAlgo returns 'filledshares' for filled quantity
@@ -979,9 +1038,16 @@ class ProgressiveExecutor(OrderExecutor):
 
                     # Try tradebook for actual fill price if orderbook didn't have it
                     if avg_fill_price == attempt_price and order_id:
-                        tradebook_price = self.openalgo.get_trade_fill_price(order_id)
-                        if tradebook_price:
-                            avg_fill_price = tradebook_price
+                        for tradebook_attempt in range(3):
+                            if tradebook_attempt > 0:
+                                time.sleep(1.0)
+                            tradebook_price = self.openalgo.get_trade_fill_price(order_id)
+                            if tradebook_price and tradebook_price != attempt_price:
+                                avg_fill_price = tradebook_price
+                                logger.info(
+                                    f"[ProgressiveExecutor] Partial fill using tradebook price: ₹{avg_fill_price:,.2f}"
+                                )
+                                break
 
                     logger.info(
                         f"[ProgressiveExecutor] Partial fill on attempt {attempt_num}: "

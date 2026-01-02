@@ -30,6 +30,11 @@ class PositionSummary(TypedDict):
     closed_count: int
     closed_pnl: float
     total_pnl: float
+    # Breakdown by option type for hedge capacity checking
+    short_ce_qty: int
+    short_pe_qty: int
+    long_ce_qty: int
+    long_pe_qty: int
 
 
 class PositionService:
@@ -144,6 +149,24 @@ class PositionService:
         long_pnl = sum(p['pnl'] for p in longs)
         closed_pnl = sum(p['pnl'] for p in closed)
 
+        # Calculate qty by option type for hedge capacity limits
+        short_ce_qty = sum(
+            abs(p['quantity']) for p in shorts
+            if p.get('option_type') == 'CE'
+        )
+        short_pe_qty = sum(
+            abs(p['quantity']) for p in shorts
+            if p.get('option_type') == 'PE'
+        )
+        long_ce_qty = sum(
+            p['quantity'] for p in longs
+            if p.get('option_type') == 'CE'
+        )
+        long_pe_qty = sum(
+            p['quantity'] for p in longs
+            if p.get('option_type') == 'PE'
+        )
+
         return {
             'short_count': len(shorts),
             'short_qty': sum(abs(p['quantity']) for p in shorts),
@@ -155,6 +178,41 @@ class PositionService:
             'closed_count': len(closed),
             'closed_pnl': closed_pnl,
             'total_pnl': short_pnl + long_pnl + closed_pnl,
+            # Breakdown by option type
+            'short_ce_qty': short_ce_qty,
+            'short_pe_qty': short_pe_qty,
+            'long_ce_qty': long_ce_qty,
+            'long_pe_qty': long_pe_qty,
+        }
+
+
+    def get_hedge_capacity(self, summary: PositionSummary) -> dict:
+        """
+        Calculate remaining hedge capacity by option type.
+
+        Hedge buying only provides margin benefit when hedge_qty <= sold_qty.
+        Once you have hedges equal to your shorts, additional hedges provide NO benefit.
+
+        Args:
+            summary: PositionSummary with CE/PE breakdown
+
+        Returns:
+            Dict with remaining capacity for each option type:
+            - remaining_ce_capacity: How many more CE hedges can be bought
+            - remaining_pe_capacity: How many more PE hedges can be bought
+            - is_fully_hedged: True if no more hedges can provide benefit
+        """
+        remaining_ce = max(0, summary['short_ce_qty'] - summary['long_ce_qty'])
+        remaining_pe = max(0, summary['short_pe_qty'] - summary['long_pe_qty'])
+
+        return {
+            'remaining_ce_capacity': remaining_ce,
+            'remaining_pe_capacity': remaining_pe,
+            'short_ce_qty': summary['short_ce_qty'],
+            'short_pe_qty': summary['short_pe_qty'],
+            'long_ce_qty': summary['long_ce_qty'],
+            'long_pe_qty': summary['long_pe_qty'],
+            'is_fully_hedged': (remaining_ce == 0 and remaining_pe == 0),
         }
 
 

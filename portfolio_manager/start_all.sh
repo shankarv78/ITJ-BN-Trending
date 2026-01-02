@@ -13,8 +13,10 @@ OPENALGO_PORT=5000
 OPENALGO_URL="http://127.0.0.1:$OPENALGO_PORT"
 PM_PORT=5002
 FRONTEND_PORT=8080
+MARGIN_MONITOR_PORT=5010
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")/frontend"
+MARGIN_MONITOR_DIR="$(dirname "$SCRIPT_DIR")/margin-monitor"
 LOG_DIR="$SCRIPT_DIR/logs"
 TUNNEL_NAME="portfolio-manager"
 CLOUDFLARED_CONFIG="$HOME/.cloudflared/config.yml"
@@ -67,7 +69,7 @@ parse_flags "$@"
 echo ""
 echo "============================================================"
 echo "  TOM BASSO PORTFOLIO MANAGER - UNIFIED STARTUP"
-echo "  OpenAlgo + Tunnel + Portfolio Manager + Frontend"
+echo "  OpenAlgo + Tunnel + PM + Frontend + Margin Monitor"
 if [ "$TEST_MODE" = true ]; then
     echo -e "  ${YELLOW}⚠️  TEST MODE ENABLED - 1 LOT ORDERS ONLY${NC}"
 fi
@@ -342,6 +344,105 @@ stop_tunnel() {
 }
 
 # -----------------------------------------------------------------------------
+# Start Margin Monitor
+# -----------------------------------------------------------------------------
+
+is_margin_monitor_running() {
+    lsof -ti:$MARGIN_MONITOR_PORT > /dev/null 2>&1
+}
+
+start_margin_monitor() {
+    log_info "Checking Margin Monitor status..."
+
+    if is_margin_monitor_running; then
+        log_success "Margin Monitor already running at http://localhost:$MARGIN_MONITOR_PORT"
+        return 0
+    fi
+
+    if [ ! -d "$MARGIN_MONITOR_DIR" ]; then
+        log_warn "Margin Monitor directory not found at $MARGIN_MONITOR_DIR - skipping"
+        return 1
+    fi
+
+    if [ ! -f "$MARGIN_MONITOR_DIR/run.py" ]; then
+        log_warn "Margin Monitor run.py not found - skipping"
+        return 1
+    fi
+
+    log_info "Starting Margin Monitor..."
+
+    # Create logs directory if it doesn't exist
+    mkdir -p "$LOG_DIR"
+
+    cd "$MARGIN_MONITOR_DIR"
+
+    # Check if venv exists
+    if [ ! -d "venv" ]; then
+        log_warn "Margin Monitor venv not found - creating..."
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install -r requirements.txt >> "$LOG_DIR/margin_monitor.log" 2>&1
+    else
+        source venv/bin/activate
+    fi
+
+    # Set environment variables for dry run mode (safer default)
+    export AUTO_HEDGE_ENABLED=true
+    export AUTO_HEDGE_DRY_RUN=true
+    export HEDGE_DEV_MODE=true
+
+    # Start Margin Monitor in background
+    MM_LOG="$LOG_DIR/margin_monitor.log"
+    nohup python3 run.py >> "$MM_LOG" 2>&1 &
+    MM_PID=$!
+    echo $MM_PID > "$SCRIPT_DIR/.margin_monitor.pid"
+
+    # Wait for Margin Monitor to be ready
+    log_info "Waiting for Margin Monitor to be ready..."
+
+    MAX_RETRIES=30
+    RETRY_COUNT=0
+
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        if is_margin_monitor_running; then
+            log_success "Margin Monitor is ready at http://localhost:$MARGIN_MONITOR_PORT"
+            echo ""
+            echo -e "  ${GREEN}📊 Margin Monitor: http://localhost:$MARGIN_MONITOR_PORT${NC}"
+            echo -e "  ${YELLOW}⚠️  Auto-Hedge: DRY RUN mode (no real orders)${NC}"
+            echo -e "  ${BLUE}📝 Margin Monitor logs: $MM_LOG${NC}"
+            echo ""
+            return 0
+        fi
+        sleep 1
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo -n "."
+    done
+
+    echo ""
+    log_error "Margin Monitor failed to start after ${MAX_RETRIES}s"
+    log_info "Check logs at: $MM_LOG"
+    return 1
+}
+
+stop_margin_monitor() {
+    if [ -f "$SCRIPT_DIR/.margin_monitor.pid" ]; then
+        MM_PID=$(cat "$SCRIPT_DIR/.margin_monitor.pid")
+        if ps -p $MM_PID > /dev/null 2>&1; then
+            log_info "Stopping Margin Monitor (PID $MM_PID)..."
+            kill $MM_PID 2>/dev/null || true
+            rm "$SCRIPT_DIR/.margin_monitor.pid"
+            log_success "Margin Monitor stopped"
+        fi
+    fi
+
+    # Also try to kill by port
+    MM_PID=$(lsof -ti:$MARGIN_MONITOR_PORT 2>/dev/null || true)
+    if [ ! -z "$MM_PID" ]; then
+        kill $MM_PID 2>/dev/null || true
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Start Frontend
 # -----------------------------------------------------------------------------
 
@@ -538,6 +639,9 @@ start_portfolio_manager() {
 stop_all() {
     log_info "Stopping all services..."
 
+    # Stop Margin Monitor
+    stop_margin_monitor
+
     # Stop Frontend
     stop_frontend
 
@@ -646,6 +750,13 @@ show_status() {
         log_success "Frontend: RUNNING at http://localhost:$FRONTEND_PORT"
     else
         log_warn "Frontend: NOT RUNNING"
+    fi
+
+    # Margin Monitor status
+    if is_margin_monitor_running; then
+        log_success "Margin Monitor: RUNNING at http://localhost:$MARGIN_MONITOR_PORT"
+    else
+        log_warn "Margin Monitor: NOT RUNNING"
     fi
 
     # Cloudflare Tunnel status
@@ -774,17 +885,20 @@ case "${1:-start}" in
         start_tunnel  # Start tunnel in background before PM
         start_portfolio_manager "${@:2}"
         start_frontend
+        start_margin_monitor
         echo ""
         echo "============================================================"
         echo -e "  ${GREEN}✅ ALL SERVICES STARTED${NC}"
         echo "============================================================"
         echo ""
-        echo -e "  ${GREEN}🖥️  Frontend:  http://localhost:$FRONTEND_PORT${NC}"
-        echo -e "  ${GREEN}📊 PM API:    http://127.0.0.1:$PM_PORT${NC}"
-        echo -e "  ${GREEN}🔌 OpenAlgo:  $OPENALGO_URL${NC}"
+        echo -e "  ${GREEN}🖥️  Frontend:       http://localhost:$FRONTEND_PORT${NC}"
+        echo -e "  ${GREEN}📊 PM API:         http://127.0.0.1:$PM_PORT${NC}"
+        echo -e "  ${GREEN}📈 Margin Monitor: http://localhost:$MARGIN_MONITOR_PORT${NC}"
+        echo -e "  ${GREEN}🔌 OpenAlgo:       $OPENALGO_URL${NC}"
         echo ""
-        echo -e "  ${BLUE}📝 View PM logs:       tail -f $LOG_DIR/portfolio_manager.log${NC}"
-        echo -e "  ${BLUE}📝 View Frontend logs: tail -f $LOG_DIR/frontend.log${NC}"
+        echo -e "  ${BLUE}📝 View PM logs:             tail -f $LOG_DIR/portfolio_manager.log${NC}"
+        echo -e "  ${BLUE}📝 View Frontend logs:       tail -f $LOG_DIR/frontend.log${NC}"
+        echo -e "  ${BLUE}📝 View Margin Monitor logs: tail -f $LOG_DIR/margin_monitor.log${NC}"
         echo ""
         ;;
     stop)
@@ -801,6 +915,7 @@ case "${1:-start}" in
         start_tunnel
         start_portfolio_manager "${@:2}"
         start_frontend
+        start_margin_monitor
         echo ""
         log_success "All services restarted"
         ;;
@@ -827,26 +942,31 @@ case "${1:-start}" in
         start_tunnel  # Also start tunnel when starting PM
         start_portfolio_manager "${@:2}"
         ;;
+    margin-monitor)
+        # Start only Margin Monitor
+        start_margin_monitor
+        ;;
     logs)
         # Tail all logs
         echo "Tailing logs from: $LOG_DIR"
         echo "Press Ctrl+C to stop"
         echo ""
-        tail -f "$LOG_DIR/portfolio_manager.log" "$LOG_DIR/frontend.log" 2>/dev/null || tail -f "$LOG_DIR/portfolio_manager.log" 2>/dev/null || echo "No log files found yet"
+        tail -f "$LOG_DIR/portfolio_manager.log" "$LOG_DIR/frontend.log" "$LOG_DIR/margin_monitor.log" 2>/dev/null || tail -f "$LOG_DIR/portfolio_manager.log" 2>/dev/null || echo "No log files found yet"
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|restart|openalgo|tunnel|frontend|pm|logs} [--test-mode] [--silent]"
+        echo "Usage: $0 {start|stop|status|restart|openalgo|tunnel|frontend|pm|margin-monitor|logs} [--test-mode] [--silent]"
         echo ""
         echo "Commands:"
-        echo "  start    - Start OpenAlgo, Tunnel, Portfolio Manager, and Frontend"
-        echo "  stop     - Stop all services"
-        echo "  status   - Show status of all services"
-        echo "  restart  - Restart all services"
-        echo "  openalgo - Start only OpenAlgo"
-        echo "  tunnel   - Start only Cloudflare Tunnel"
-        echo "  frontend - Start only Frontend"
-        echo "  pm       - Start Portfolio Manager + Tunnel (OpenAlgo must be running)"
-        echo "  logs     - Tail all log files"
+        echo "  start          - Start all services (OpenAlgo, Tunnel, PM, Frontend, Margin Monitor)"
+        echo "  stop           - Stop all services"
+        echo "  status         - Show status of all services"
+        echo "  restart        - Restart all services"
+        echo "  openalgo       - Start only OpenAlgo"
+        echo "  tunnel         - Start only Cloudflare Tunnel"
+        echo "  frontend       - Start only Frontend"
+        echo "  pm             - Start Portfolio Manager + Tunnel (OpenAlgo must be running)"
+        echo "  margin-monitor - Start only Margin Monitor (auto-hedge system)"
+        echo "  logs           - Tail all log files"
         echo ""
         echo "Options:"
         echo "  --test-mode  Enable test mode (1 lot orders only, logged calculated lots)"
@@ -857,12 +977,14 @@ case "${1:-start}" in
         echo "  $0 start --test-mode  # Start in test mode"
         echo "  $0 start --silent     # Start in silent mode (no voice)"
         echo "  $0 pm --test-mode --silent  # PM with both modes"
+        echo "  $0 margin-monitor     # Start only Margin Monitor"
         echo "  $0 logs               # View all logs in real-time"
         echo ""
         echo "Log files:"
-        echo "  PM:       $LOG_DIR/portfolio_manager.log"
-        echo "  Frontend: $LOG_DIR/frontend.log"
-        echo "  OpenAlgo: $OPENALGO_DIR/log/openalgo.log"
+        echo "  PM:             $LOG_DIR/portfolio_manager.log"
+        echo "  Frontend:       $LOG_DIR/frontend.log"
+        echo "  Margin Monitor: $LOG_DIR/margin_monitor.log"
+        echo "  OpenAlgo:       $OPENALGO_DIR/log/openalgo.log"
         echo ""
         exit 1
         ;;

@@ -2,11 +2,19 @@
 Margin Monitor - Margin Service
 
 Calculates intraday margin utilization and captures snapshots.
+
+Key Concepts:
+- Total Used Margin: From OpenAlgo (all positions in account)
+- Baseline Margin: Captured at day start (overnight positions)
+- Excluded Margin: PM trend-following + long-term positions (not intraday)
+- Intraday Margin: total_used - baseline - excluded
+- Utilization %: (intraday / total_budget) * 100
 """
 
+import json
 import logging
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -14,19 +22,145 @@ from sqlalchemy import select
 from app.models.db_models import DailyConfig, MarginSnapshot, PositionSnapshot, DailySummary
 from app.services.openalgo_service import openalgo_service, FundsData
 from app.services.position_service import position_service
+from app.services.pm_client import pm_client, ExcludedMarginResult
 from app.utils.date_utils import now_ist, format_datetime_ist
 from app.utils.symbol_parser import parse_symbol, get_position_type
 
 logger = logging.getLogger(__name__)
 
+# Margin per lot estimates for long-term positions
+LONG_TERM_MARGIN_PER_LOT = {
+    "NIFTY": 100000,    # ~₹1L per lot for Nifty synthetic/futures
+    "BANKNIFTY": 130000,
+}
+
+# Positions with expiry > this many days are considered "long-term"
+LONG_TERM_EXPIRY_DAYS = 30
+
 
 class MarginService:
     """Service for margin calculations and snapshots."""
 
+    async def _get_long_term_excluded_margin(
+        self,
+        positions: List[Dict[str, Any]],
+        session_expiry_date: str
+    ) -> Dict[str, Any]:
+        """
+        Identify long-term positions and estimate their margin.
+
+        Long-term positions are those with expiry > LONG_TERM_EXPIRY_DAYS from today.
+        These should be excluded from intraday margin calculation.
+
+        Args:
+            positions: All positions from OpenAlgo
+            session_expiry_date: Current session's expiry (YYYY-MM-DD)
+
+        Returns:
+            Dict with total_margin, breakdown, and position details
+        """
+        today = datetime.now().date()
+        cutoff_date = today + timedelta(days=LONG_TERM_EXPIRY_DAYS)
+
+        breakdown: Dict[str, float] = {}
+        long_term_positions: List[Dict[str, Any]] = []
+        total_margin = 0.0
+
+        for pos in positions:
+            symbol = pos.get("symbol", "")
+            parsed = parse_symbol(symbol)
+
+            if not parsed or not parsed.expiry_date:
+                continue
+
+            try:
+                expiry_date = datetime.strptime(parsed.expiry_date, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            # Check if this is a long-term position
+            if expiry_date > cutoff_date:
+                index = parsed.index
+                qty = abs(pos.get("quantity", 0))
+
+                # Estimate margin based on index
+                # For synthetic positions, margin is roughly per lot
+                lot_size = 65 if index == "NIFTY" else 20 if index == "BANKNIFTY" else 50
+                lots = qty // lot_size if lot_size > 0 else 0
+
+                margin_per_lot = LONG_TERM_MARGIN_PER_LOT.get(index, 50000)
+                estimated_margin = lots * margin_per_lot
+
+                breakdown[index] = breakdown.get(index, 0) + estimated_margin
+                total_margin += estimated_margin
+
+                long_term_positions.append({
+                    "symbol": symbol,
+                    "quantity": qty,
+                    "expiry_date": parsed.expiry_date,
+                    "estimated_margin": estimated_margin,
+                    "index": index,
+                })
+
+                logger.debug(
+                    f"Long-term position: {symbol} qty={qty} expiry={parsed.expiry_date} "
+                    f"margin=₹{estimated_margin:,.0f}"
+                )
+
+        if long_term_positions:
+            logger.info(
+                f"Long-term excluded margin: ₹{total_margin:,.0f} "
+                f"from {len(long_term_positions)} positions"
+            )
+
+        return {
+            "total_margin": total_margin,
+            "breakdown": breakdown,
+            "positions": long_term_positions,
+        }
+
+    async def get_excluded_margin_breakdown(self) -> Dict[str, Any]:
+        """
+        Get full excluded margin breakdown from all sources.
+
+        Sources:
+        1. PM trend-following positions (BN, Gold Mini, Silver Mini)
+        2. Long-term positions (expiry > 30 days)
+
+        Returns:
+            Dict with pm_excluded, long_term_excluded, total, and breakdowns
+        """
+        # Get PM excluded margin
+        pm_result = await pm_client.get_excluded_margin()
+
+        # Get all positions to find long-term ones
+        positions = await openalgo_service.get_positions()
+        long_term_result = await self._get_long_term_excluded_margin(
+            positions,
+            datetime.now().strftime("%Y-%m-%d")
+        )
+
+        total = pm_result.total_excluded + long_term_result["total_margin"]
+
+        return {
+            "pm_excluded": pm_result.total_excluded,
+            "pm_breakdown": pm_result.breakdown,
+            "pm_positions": pm_result.positions,
+            "long_term_excluded": long_term_result["total_margin"],
+            "long_term_breakdown": long_term_result["breakdown"],
+            "long_term_positions": long_term_result["positions"],
+            "total_excluded": total,
+            "combined_breakdown": {
+                **pm_result.breakdown,
+                **{f"LT_{k}": v for k, v in long_term_result["breakdown"].items()}
+            }
+        }
+
     async def get_current_margin(
         self,
         config: DailyConfig,
-        db: AsyncSession
+        db: AsyncSession,
+        include_excluded: bool = True
     ) -> dict:
         """
         Get current margin status for a config.
@@ -34,6 +168,7 @@ class MarginService:
         Args:
             config: Daily configuration with baseline
             db: Database session
+            include_excluded: Whether to subtract excluded margin (default True)
 
         Returns:
             Dictionary with margin, positions, and M2M data.
@@ -41,13 +176,33 @@ class MarginService:
         # Fetch funds from OpenAlgo
         funds = await openalgo_service.get_funds()
 
-        # Calculate intraday margin
+        # Get baseline
         baseline = config.baseline_margin or 0.0
-        intraday = funds['used_margin'] - baseline
+
+        # Get excluded margin (PM + long-term)
+        excluded_margin = 0.0
+        excluded_breakdown: Dict[str, Any] = {}
+
+        if include_excluded:
+            try:
+                excluded_data = await self.get_excluded_margin_breakdown()
+                excluded_margin = excluded_data["total_excluded"]
+                excluded_breakdown = excluded_data
+            except Exception as e:
+                logger.warning(f"Failed to get excluded margin: {e}")
+                excluded_margin = 0.0
+
+        # Calculate intraday margin
+        # Formula: intraday = total_used - baseline - excluded
+        intraday = funds['used_margin'] - baseline - excluded_margin
+
+        # Ensure intraday doesn't go negative
+        intraday = max(0, intraday)
+
         utilization = (intraday / config.total_budget) * 100 if config.total_budget > 0 else 0.0
         budget_remaining = config.total_budget - intraday
 
-        # Fetch and filter positions
+        # Fetch and filter positions for this session's index/expiry
         positions = await openalgo_service.get_positions()
         filtered = position_service.filter_positions(
             positions,
@@ -60,6 +215,8 @@ class MarginService:
             'margin': {
                 'total_used': funds['used_margin'],
                 'baseline': baseline,
+                'excluded': excluded_margin,
+                'excluded_breakdown': excluded_breakdown,
                 'intraday_used': intraday,
                 'available_cash': funds['available_cash'],
                 'collateral': funds['collateral'],
