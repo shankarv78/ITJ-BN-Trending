@@ -26,6 +26,7 @@ from app.services.hedge_selector import HedgeStrikeSelectorService
 from app.services.hedge_executor import HedgeExecutorService
 from app.services.telegram_service import TelegramService, telegram_service
 from app.services.margin_service import MarginService
+from app.services.position_service import position_service
 
 logger = logging.getLogger(__name__)
 
@@ -325,17 +326,31 @@ class AutoHedgeOrchestrator:
         num_baskets = self._session_cache['baskets']
         expiry_date = self._session_cache['expiry_date']
 
-        # Get current short positions to determine hedge side
+        # Get current positions and calculate hedge capacity
         positions = await self._get_positions()
         short_positions = [p for p in positions if p.get('quantity', 0) < 0]
 
-        # Select optimal hedges
+        # Calculate hedge capacity (how many more hedges can provide benefit)
+        filtered = position_service.filter_positions(
+            positions, self._session_cache['index'], expiry_date
+        )
+        summary = position_service.get_summary(filtered)
+        hedge_capacity = position_service.get_hedge_capacity(summary)
+
+        logger.info(
+            f"[ORCHESTRATOR] Hedge capacity: "
+            f"CE {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
+            f"PE {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
+        )
+
+        # Select optimal hedges (respects capacity limits)
         selection = await self.hedge_selector.select_optimal_hedges(
             index=index,
             expiry_type=expiry_type,
             margin_reduction_needed=requirement.margin_reduction_needed,
             short_positions=short_positions,
-            num_baskets=num_baskets
+            num_baskets=num_baskets,
+            hedge_capacity=hedge_capacity
         )
 
         if not selection.selected:
@@ -413,17 +428,43 @@ class AutoHedgeOrchestrator:
             f"{'📝 DRY RUN - Simulating hedge...' if self._dry_run else '⚡ Placing hedge order...'}"
         )
 
-        # Get current short positions to determine hedge side
+        # Get current positions and calculate hedge capacity
         positions = await self._get_positions()
         short_positions = [p for p in positions if p.get('quantity', 0) < 0]
+        expiry_date = self._session_cache['expiry_date']
 
-        # Select optimal hedges
+        # Calculate hedge capacity (how many more hedges can provide benefit)
+        filtered = position_service.filter_positions(
+            positions, self._session_cache['index'], expiry_date
+        )
+        summary = position_service.get_summary(filtered)
+        hedge_capacity = position_service.get_hedge_capacity(summary)
+
+        logger.info(
+            f"[ORCHESTRATOR] Hedge capacity: "
+            f"CE {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
+            f"PE {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
+        )
+
+        # Check if fully hedged
+        if hedge_capacity['is_fully_hedged']:
+            await self.telegram.send_message(
+                f"⚠️ *Cannot add more hedges - fully hedged!*\n\n"
+                f"*Current util:* {current_util:.1f}%\n"
+                f"*CE:* {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}\n"
+                f"*PE:* {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}\n\n"
+                f"No more margin benefit possible from hedges."
+            )
+            return
+
+        # Select optimal hedges (respects capacity limits)
         selection = await self.hedge_selector.select_optimal_hedges(
             index=index,
             expiry_type=ExpiryType(self._session_cache.get('expiry_type', '2DTE')),
             margin_reduction_needed=margin_reduction_needed,
             short_positions=short_positions,
-            num_baskets=num_baskets
+            num_baskets=num_baskets,
+            hedge_capacity=hedge_capacity
         )
 
         if not selection or not selection.selected:
@@ -838,5 +879,20 @@ class AutoHedgeOrchestrator:
                 'simulated_utilization_pct': round(simulated_util, 1),
                 'hedges': self._simulated_hedges[-10:]  # Last 10 simulated hedges
             }
+
+        # Add hedge capacity info (available in both dry run and live mode)
+        try:
+            if self._session_cache:
+                positions = await self._get_positions()
+                expiry_date = self._session_cache.get('expiry_date')
+                if positions and expiry_date:
+                    filtered = position_service.filter_positions(
+                        positions, self._session_cache['index'], expiry_date
+                    )
+                    summary = position_service.get_summary(filtered)
+                    hedge_capacity = position_service.get_hedge_capacity(summary)
+                    response['hedge_capacity'] = hedge_capacity
+        except Exception as e:
+            logger.warning(f"[ORCHESTRATOR] Could not get hedge capacity for status: {e}")
 
         return response

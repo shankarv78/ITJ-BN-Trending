@@ -108,6 +108,17 @@ class SimulatedMarginSchema(BaseModel):
     hedges: List[SimulatedHedgeSchema] = Field(default=[], description="Recent simulated hedges")
 
 
+class HedgeCapacitySchema(BaseModel):
+    """Schema for hedge capacity limits - prevents over-hedging."""
+    remaining_ce_capacity: int = Field(..., description="Remaining CE qty that can be hedged")
+    remaining_pe_capacity: int = Field(..., description="Remaining PE qty that can be hedged")
+    short_ce_qty: int = Field(..., description="Total CE options sold")
+    short_pe_qty: int = Field(..., description="Total PE options sold")
+    long_ce_qty: int = Field(..., description="Current CE hedges held")
+    long_pe_qty: int = Field(..., description="Current PE hedges held")
+    is_fully_hedged: bool = Field(..., description="True if no more hedges can provide benefit")
+
+
 class HedgeStatusResponse(BaseModel):
     """Response with current auto-hedge status."""
     status: str = Field(..., description="running, stopped, disabled, no_session")
@@ -117,6 +128,7 @@ class HedgeStatusResponse(BaseModel):
     next_entry: Optional[NextEntrySchema] = None
     cooldown_remaining: int = 0
     simulated_margin: Optional[SimulatedMarginSchema] = Field(None, description="Simulated margin info (dry run only)")
+    hedge_capacity: Optional[HedgeCapacitySchema] = Field(None, description="Current hedge capacity limits")
 
 
 # ============================================================

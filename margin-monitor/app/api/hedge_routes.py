@@ -236,6 +236,21 @@ async def get_hedge_status(db: AsyncSession = Depends(get_db)):
             hedges=[SimulatedHedgeSchema(**h) for h in sim_data.get('hedges', [])]
         )
 
+    # Build hedge capacity schema if present
+    hedge_capacity = None
+    if status_data.get('hedge_capacity'):
+        from app.api.hedge_schemas import HedgeCapacitySchema
+        cap_data = status_data['hedge_capacity']
+        hedge_capacity = HedgeCapacitySchema(
+            remaining_ce_capacity=cap_data.get('remaining_ce_capacity', 0),
+            remaining_pe_capacity=cap_data.get('remaining_pe_capacity', 0),
+            short_ce_qty=cap_data.get('short_ce_qty', 0),
+            short_pe_qty=cap_data.get('short_pe_qty', 0),
+            long_ce_qty=cap_data.get('long_ce_qty', 0),
+            long_pe_qty=cap_data.get('long_pe_qty', 0),
+            is_fully_hedged=cap_data.get('is_fully_hedged', False)
+        )
+
     return HedgeStatusResponse(
         status=display_status,
         dry_run=status_data.get('dry_run', False),
@@ -243,7 +258,8 @@ async def get_hedge_status(db: AsyncSession = Depends(get_db)):
         active_hedges=[ActiveHedgeSchema(**h) for h in status_data.get('active_hedges', [])],
         next_entry=NextEntrySchema(**status_data['next_entry']) if status_data.get('next_entry') else None,
         cooldown_remaining=status_data.get('cooldown_remaining', 0),
-        simulated_margin=simulated_margin
+        simulated_margin=simulated_margin,
+        hedge_capacity=hedge_capacity
     )
 
 

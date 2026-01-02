@@ -415,7 +415,8 @@ class HedgeStrikeSelectorService:
         expiry_type: ExpiryType,
         margin_reduction_needed: float,
         short_positions: List[Dict[str, Any]],
-        num_baskets: int
+        num_baskets: int,
+        hedge_capacity: Optional[Dict[str, Any]] = None
     ) -> HedgeSelection:
         """
         Select optimal hedges to achieve required margin reduction with minimum cost.
@@ -425,12 +426,16 @@ class HedgeStrikeSelectorService:
         2. Sort by MBPR (highest first)
         3. Select hedges until reduction target is met
 
+        IMPORTANT: Respects hedge capacity limits - buying more hedges than sold qty
+        provides NO margin benefit (just adds naked long premium cost).
+
         Args:
             index: NIFTY or SENSEX
             expiry_type: 0DTE, 1DTE, or 2DTE
             margin_reduction_needed: Target margin reduction in INR
             short_positions: Current short positions (to determine which sides need hedging)
             num_baskets: Number of baskets
+            hedge_capacity: Optional dict with remaining_ce_capacity/remaining_pe_capacity
 
         Returns:
             HedgeSelection with selected candidates
@@ -455,6 +460,43 @@ class HedgeStrikeSelectorService:
                 margin_reduction_needed=margin_reduction_needed,
                 fully_covered=False
             )
+
+        # Check if we're at capacity (hedge qty already >= sold qty)
+        if hedge_capacity:
+            if hedge_capacity.get('is_fully_hedged'):
+                logger.warning(
+                    "[HEDGE_SELECTOR] Fully hedged! "
+                    f"CE: {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
+                    f"PE: {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']} - "
+                    "no additional hedge benefit possible"
+                )
+                return HedgeSelection(
+                    candidates=[],
+                    selected=[],
+                    total_cost=0,
+                    total_margin_benefit=0,
+                    margin_reduction_needed=margin_reduction_needed,
+                    fully_covered=False
+                )
+
+            # Filter out option types at capacity
+            if hedge_capacity.get('remaining_ce_capacity', 0) == 0 and 'CE' in option_types:
+                logger.info("[HEDGE_SELECTOR] CE at capacity, skipping CE hedges")
+                option_types.remove('CE')
+            if hedge_capacity.get('remaining_pe_capacity', 0) == 0 and 'PE' in option_types:
+                logger.info("[HEDGE_SELECTOR] PE at capacity, skipping PE hedges")
+                option_types.remove('PE')
+
+            if not option_types:
+                logger.warning("[HEDGE_SELECTOR] Both CE and PE at hedge capacity")
+                return HedgeSelection(
+                    candidates=[],
+                    selected=[],
+                    total_cost=0,
+                    total_margin_benefit=0,
+                    margin_reduction_needed=margin_reduction_needed,
+                    fully_covered=False
+                )
 
         # Find candidates
         candidates = await self.find_hedge_candidates(
