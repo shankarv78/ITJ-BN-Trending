@@ -810,9 +810,32 @@ class AutoHedgeOrchestrator:
 
         # Add simulated margin info for dry run mode
         if self._dry_run:
+            # Get current real margin to calculate utilization comparison
+            real_util = 0.0
+            simulated_util = 0.0
+            real_intraday = 0.0
+
+            try:
+                margin_data = await self._get_current_margin()
+                if margin_data and self._session_cache:
+                    real_util = margin_data.get('utilization_pct', 0)
+                    real_intraday = margin_data.get('intraday_margin', 0)
+                    total_budget = self._session_cache.get('budget', 1)
+
+                    # Calculate simulated utilization
+                    simulated_intraday = real_intraday - self._simulated_margin_reduction
+                    simulated_util = (simulated_intraday / total_budget) * 100 if total_budget > 0 else 0
+            except Exception as e:
+                logger.warning(f"[ORCHESTRATOR] Could not get margin for status: {e}")
+
+            max_reduction = self._session_cache.get('budget', 0) * 0.75 if self._session_cache else 0
+
             response['simulated_margin'] = {
                 'total_reduction': self._simulated_margin_reduction,
+                'max_reduction': max_reduction,
                 'hedge_count': len(self._simulated_hedges),
+                'real_utilization_pct': round(real_util, 1),
+                'simulated_utilization_pct': round(simulated_util, 1),
                 'hedges': self._simulated_hedges[-10:]  # Last 10 simulated hedges
             }
 

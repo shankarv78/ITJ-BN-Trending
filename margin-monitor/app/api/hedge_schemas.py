@@ -101,7 +101,10 @@ class SimulatedHedgeSchema(BaseModel):
 class SimulatedMarginSchema(BaseModel):
     """Schema for simulated margin info in dry run mode."""
     total_reduction: float = Field(..., description="Total simulated margin reduction in ₹")
+    max_reduction: float = Field(0, description="Maximum allowed reduction (75% floor)")
     hedge_count: int = Field(..., description="Number of simulated hedges placed")
+    real_utilization_pct: float = Field(0, description="Real margin utilization %")
+    simulated_utilization_pct: float = Field(0, description="Simulated margin utilization % after hedges")
     hedges: List[SimulatedHedgeSchema] = Field(default=[], description="Recent simulated hedges")
 
 
