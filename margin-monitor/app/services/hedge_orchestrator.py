@@ -91,6 +91,8 @@ class AutoHedgeOrchestrator:
         # Tracks the cumulative margin benefit from simulated hedges
         self._simulated_margin_reduction: float = 0.0
         self._simulated_hedges: list = []  # Track simulated hedge details
+        self._simulated_ce_qty: int = 0  # Track simulated CE hedge quantity
+        self._simulated_pe_qty: int = 0  # Track simulated PE hedge quantity
 
     def _now_ist(self) -> datetime:
         """Get current time in IST."""
@@ -115,6 +117,8 @@ class AutoHedgeOrchestrator:
         # Reset simulated margin tracking at start
         self._simulated_margin_reduction = 0.0
         self._simulated_hedges = []
+        self._simulated_ce_qty = 0
+        self._simulated_pe_qty = 0
 
         # Load or create today's session (this also populates _session_cache)
         self._session = await self._get_or_create_session()
@@ -343,14 +347,16 @@ class AutoHedgeOrchestrator:
             f"PE {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
         )
 
-        # Select optimal hedges (respects capacity limits)
+        # Select optimal hedges (EQUAL allocation for proactive hedging)
+        # Proactive = before strategy entry, buy CE and PE in equal qty
         selection = await self.hedge_selector.select_optimal_hedges(
             index=index,
             expiry_type=expiry_type,
             margin_reduction_needed=requirement.margin_reduction_needed,
             short_positions=short_positions,
             num_baskets=num_baskets,
-            hedge_capacity=hedge_capacity
+            hedge_capacity=hedge_capacity,
+            allocation_mode='equal'  # Equal allocation for proactive hedging
         )
 
         if not selection.selected:
@@ -457,14 +463,16 @@ class AutoHedgeOrchestrator:
             )
             return
 
-        # Select optimal hedges (respects capacity limits)
+        # Select optimal hedges (PROPORTIONAL allocation for reactive hedging)
+        # Reactive = critical utilization, allocate based on exposure ratio
         selection = await self.hedge_selector.select_optimal_hedges(
             index=index,
             expiry_type=ExpiryType(self._session_cache.get('expiry_type', '2DTE')),
             margin_reduction_needed=margin_reduction_needed,
             short_positions=short_positions,
             num_baskets=num_baskets,
-            hedge_capacity=hedge_capacity
+            hedge_capacity=hedge_capacity,
+            allocation_mode='proportional'  # Proportional for reactive hedging
         )
 
         if not selection or not selection.selected:
@@ -669,17 +677,27 @@ class AutoHedgeOrchestrator:
             max_reduction = self._session_cache['budget'] * 0.75
             self._simulated_margin_reduction = min(total_benefit, max_reduction)
 
+            # Load transactions and track CE/PE quantities
+            for txn in transactions:
+                qty = txn.quantity or 0
+                if txn.option_type == 'CE':
+                    self._simulated_ce_qty += qty
+                elif txn.option_type == 'PE':
+                    self._simulated_pe_qty += qty
+
             # Load last 10 for display
             for txn in transactions[:10]:
                 self._simulated_hedges.append({
                     'strike': txn.strike,
                     'option_type': txn.option_type,
+                    'quantity': txn.quantity or 0,
                     'margin_benefit': base_benefit_per_hedge,
                     'timestamp': txn.timestamp.isoformat() if txn.timestamp else ''
                 })
 
             logger.info(
                 f"[ORCHESTRATOR] Loaded {num_transactions} dry run transactions, "
+                f"CE={self._simulated_ce_qty}, PE={self._simulated_pe_qty}, "
                 f"simulated reduction=₹{self._simulated_margin_reduction:,.0f} "
                 f"(max allowed=₹{max_reduction:,.0f}, 75% of budget)"
             )
@@ -721,17 +739,26 @@ class AutoHedgeOrchestrator:
             adjusted_benefit = actual_benefit
 
         self._simulated_margin_reduction += adjusted_benefit
+
+        # Track quantity by option type
+        qty = getattr(hedge, 'quantity', 0) or 0
+        if hedge.option_type == 'CE':
+            self._simulated_ce_qty += qty
+        else:
+            self._simulated_pe_qty += qty
+
         self._simulated_hedges.append({
             'strike': hedge.strike,
             'option_type': hedge.option_type,
+            'quantity': qty,
             'margin_benefit': adjusted_benefit,
             'timestamp': self._now_ist().isoformat()
         })
 
         logger.info(
-            f"[ORCHESTRATOR] DRY RUN: Added ₹{adjusted_benefit:,.0f} benefit "
-            f"(diminished from ₹{estimated_benefit:,.0f}, factor={diminishing_factor:.2f}), "
-            f"total=₹{self._simulated_margin_reduction:,.0f} / max=₹{max_reduction:,.0f}"
+            f"[ORCHESTRATOR] DRY RUN: Added {hedge.option_type} hedge, "
+            f"qty={qty}, benefit=₹{adjusted_benefit:,.0f} "
+            f"(total CE={self._simulated_ce_qty}, PE={self._simulated_pe_qty})"
         )
 
     async def _get_current_margin(self) -> Optional[dict]:
@@ -875,23 +902,51 @@ class AutoHedgeOrchestrator:
                 'total_reduction': self._simulated_margin_reduction,
                 'max_reduction': max_reduction,
                 'hedge_count': len(self._simulated_hedges),
+                'ce_hedge_count': sum(1 for h in self._simulated_hedges if h.get('option_type') == 'CE'),
+                'pe_hedge_count': sum(1 for h in self._simulated_hedges if h.get('option_type') == 'PE'),
+                'ce_hedge_qty': self._simulated_ce_qty,
+                'pe_hedge_qty': self._simulated_pe_qty,
                 'real_utilization_pct': round(real_util, 1),
                 'simulated_utilization_pct': round(simulated_util, 1),
                 'hedges': self._simulated_hedges[-10:]  # Last 10 simulated hedges
             }
 
         # Add hedge capacity info (available in both dry run and live mode)
+        # Use margin service's position summary (same as main margin monitor)
         try:
-            if self._session_cache:
-                positions = await self._get_positions()
-                expiry_date = self._session_cache.get('expiry_date')
-                if positions and expiry_date:
-                    filtered = position_service.filter_positions(
-                        positions, self._session_cache['index'], expiry_date
-                    )
-                    summary = position_service.get_summary(filtered)
+            if self._session_cache and self.margin_service:
+                # Use margin service's get_position_summary if available
+                if hasattr(self.margin_service, 'get_position_summary'):
+                    summary = await self.margin_service.get_position_summary()
                     hedge_capacity = position_service.get_hedge_capacity(summary)
+
+                    # In dry run mode, adjust capacity for simulated hedges
+                    if self._dry_run:
+                        hedge_capacity['long_ce_qty'] += self._simulated_ce_qty
+                        hedge_capacity['long_pe_qty'] += self._simulated_pe_qty
+                        hedge_capacity['remaining_ce_capacity'] = max(
+                            0, hedge_capacity['short_ce_qty'] - hedge_capacity['long_ce_qty']
+                        )
+                        hedge_capacity['remaining_pe_capacity'] = max(
+                            0, hedge_capacity['short_pe_qty'] - hedge_capacity['long_pe_qty']
+                        )
+                        hedge_capacity['is_fully_hedged'] = (
+                            hedge_capacity['remaining_ce_capacity'] == 0 and
+                            hedge_capacity['remaining_pe_capacity'] == 0
+                        )
+
                     response['hedge_capacity'] = hedge_capacity
+                else:
+                    # Fallback to manual filtering
+                    positions = await self._get_positions()
+                    expiry_date = self._session_cache.get('expiry_date')
+                    if positions and expiry_date:
+                        filtered = position_service.filter_positions(
+                            positions, self._session_cache['index'], expiry_date
+                        )
+                        summary = position_service.get_summary(filtered)
+                        hedge_capacity = position_service.get_hedge_capacity(summary)
+                        response['hedge_capacity'] = hedge_capacity
         except Exception as e:
             logger.warning(f"[ORCHESTRATOR] Could not get hedge capacity for status: {e}")
 

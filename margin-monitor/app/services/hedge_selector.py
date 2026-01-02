@@ -416,7 +416,8 @@ class HedgeStrikeSelectorService:
         margin_reduction_needed: float,
         short_positions: List[Dict[str, Any]],
         num_baskets: int,
-        hedge_capacity: Optional[Dict[str, Any]] = None
+        hedge_capacity: Optional[Dict[str, Any]] = None,
+        allocation_mode: str = 'proportional'  # 'proportional' or 'equal'
     ) -> HedgeSelection:
         """
         Select optimal hedges to achieve required margin reduction with minimum cost.
@@ -436,6 +437,7 @@ class HedgeStrikeSelectorService:
             short_positions: Current short positions (to determine which sides need hedging)
             num_baskets: Number of baskets
             hedge_capacity: Optional dict with remaining_ce_capacity/remaining_pe_capacity
+            allocation_mode: 'proportional' (based on short qty) or 'equal' (50/50)
 
         Returns:
             HedgeSelection with selected candidates
@@ -451,17 +453,24 @@ class HedgeStrikeSelectorService:
         )
 
         total_short_qty = ce_short_qty + pe_short_qty
-        if total_short_qty > 0:
-            ce_ratio = ce_short_qty / total_short_qty
-            pe_ratio = pe_short_qty / total_short_qty
-        else:
+
+        # Determine allocation ratio based on mode
+        if allocation_mode == 'equal' or total_short_qty == 0:
+            # Equal allocation for proactive hedging (before strategy entry)
             ce_ratio = 0.5
             pe_ratio = 0.5
-
-        logger.info(
-            f"[HEDGE_SELECTOR] Short qty: CE={ce_short_qty}, PE={pe_short_qty}, "
-            f"ratio CE:PE = {ce_ratio:.1%}:{pe_ratio:.1%}"
-        )
+            logger.info(
+                f"[HEDGE_SELECTOR] EQUAL allocation mode: CE={ce_short_qty}, PE={pe_short_qty}, "
+                f"using 50%:50% split"
+            )
+        else:
+            # Proportional allocation for reactive hedging (critical utilization)
+            ce_ratio = ce_short_qty / total_short_qty
+            pe_ratio = pe_short_qty / total_short_qty
+            logger.info(
+                f"[HEDGE_SELECTOR] PROPORTIONAL allocation: CE={ce_short_qty}, PE={pe_short_qty}, "
+                f"ratio CE:PE = {ce_ratio:.1%}:{pe_ratio:.1%}"
+            )
 
         option_types = []
         if ce_short_qty > 0:
