@@ -370,8 +370,7 @@ async def reset_dry_run(db: AsyncSession = Depends(get_db)):
 
     # Reset orchestrator's in-memory simulated margin tracking
     if orchestrator:
-        orchestrator._simulated_margin_reduction = 0.0
-        orchestrator._simulated_hedges = []
+        orchestrator.reset_simulated_margin()
 
     logger.info(
         f"[HEDGE_API] Reset dry run: deleted {txn_count} transactions, "

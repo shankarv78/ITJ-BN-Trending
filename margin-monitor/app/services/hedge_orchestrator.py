@@ -176,6 +176,36 @@ class AutoHedgeOrchestrator:
         logger.info("[ORCHESTRATOR] Stopped")
         await self.telegram.send_system_status(status="Stopped")
 
+    def reset_simulated_margin(self):
+        """Reset all simulated margin tracking (for dry run reset)."""
+        self._simulated_margin_reduction = 0.0
+        self._simulated_hedges = []
+        self._simulated_ce_qty = 0
+        self._simulated_pe_qty = 0
+        logger.info("[ORCHESTRATOR] Reset simulated margin tracking")
+
+    def _apply_simulated_hedges_to_capacity(self, hedge_capacity: dict) -> dict:
+        """
+        In dry run mode, add simulated hedge quantities to capacity.
+        This ensures we don't buy more hedges than short positions.
+        """
+        if not self._dry_run:
+            return hedge_capacity
+
+        hedge_capacity['long_ce_qty'] += self._simulated_ce_qty
+        hedge_capacity['long_pe_qty'] += self._simulated_pe_qty
+        hedge_capacity['remaining_ce_capacity'] = max(
+            0, hedge_capacity['short_ce_qty'] - hedge_capacity['long_ce_qty']
+        )
+        hedge_capacity['remaining_pe_capacity'] = max(
+            0, hedge_capacity['short_pe_qty'] - hedge_capacity['long_pe_qty']
+        )
+        hedge_capacity['is_fully_hedged'] = (
+            hedge_capacity['remaining_ce_capacity'] == 0 and
+            hedge_capacity['remaining_pe_capacity'] == 0
+        )
+        return hedge_capacity
+
     async def _check_and_act(self):
         """
         Main check cycle - called every 30 seconds.
@@ -341,11 +371,25 @@ class AutoHedgeOrchestrator:
         summary = position_service.get_summary(filtered)
         hedge_capacity = position_service.get_hedge_capacity(summary)
 
+        # In dry run, add simulated hedges to capacity calculation
+        hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
+
         logger.info(
             f"[ORCHESTRATOR] Hedge capacity: "
             f"CE {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
             f"PE {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
+            f"{' (incl. simulated)' if self._dry_run else ''}"
         )
+
+        # Check if fully hedged - STOP buying more hedges
+        if hedge_capacity['is_fully_hedged']:
+            logger.info("[ORCHESTRATOR] Fully hedged - no more hedges needed")
+            await self.telegram.send_message(
+                f"⚠️ *Cannot add more hedges - fully hedged!*\n\n"
+                f"*CE:* {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}\n"
+                f"*PE:* {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
+            )
+            return
 
         # Select optimal hedges (EQUAL allocation for proactive hedging)
         # Proactive = before strategy entry, buy CE and PE in equal qty
@@ -446,13 +490,17 @@ class AutoHedgeOrchestrator:
         summary = position_service.get_summary(filtered)
         hedge_capacity = position_service.get_hedge_capacity(summary)
 
+        # In dry run, add simulated hedges to capacity calculation
+        hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
+
         logger.info(
             f"[ORCHESTRATOR] Hedge capacity: "
             f"CE {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
             f"PE {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
+            f"{' (incl. simulated)' if self._dry_run else ''}"
         )
 
-        # Check if fully hedged
+        # Check if fully hedged - STOP buying more hedges
         if hedge_capacity['is_fully_hedged']:
             await self.telegram.send_message(
                 f"⚠️ *Cannot add more hedges - fully hedged!*\n\n"
@@ -919,22 +967,7 @@ class AutoHedgeOrchestrator:
                 if hasattr(self.margin_service, 'get_position_summary'):
                     summary = await self.margin_service.get_position_summary()
                     hedge_capacity = position_service.get_hedge_capacity(summary)
-
-                    # In dry run mode, adjust capacity for simulated hedges
-                    if self._dry_run:
-                        hedge_capacity['long_ce_qty'] += self._simulated_ce_qty
-                        hedge_capacity['long_pe_qty'] += self._simulated_pe_qty
-                        hedge_capacity['remaining_ce_capacity'] = max(
-                            0, hedge_capacity['short_ce_qty'] - hedge_capacity['long_ce_qty']
-                        )
-                        hedge_capacity['remaining_pe_capacity'] = max(
-                            0, hedge_capacity['short_pe_qty'] - hedge_capacity['long_pe_qty']
-                        )
-                        hedge_capacity['is_fully_hedged'] = (
-                            hedge_capacity['remaining_ce_capacity'] == 0 and
-                            hedge_capacity['remaining_pe_capacity'] == 0
-                        )
-
+                    hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
                     response['hedge_capacity'] = hedge_capacity
                 else:
                     # Fallback to manual filtering
@@ -946,6 +979,7 @@ class AutoHedgeOrchestrator:
                         )
                         summary = position_service.get_summary(filtered)
                         hedge_capacity = position_service.get_hedge_capacity(summary)
+                        hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
                         response['hedge_capacity'] = hedge_capacity
         except Exception as e:
             logger.warning(f"[ORCHESTRATOR] Could not get hedge capacity for status: {e}")
