@@ -23,6 +23,7 @@ from app.models.hedge_constants import IndexName, ExpiryType, DAY_TO_INDEX_EXPIR
 from app.api.hedge_schemas import (
     ScheduleCreateRequest, ScheduleResponse, StrategyEntrySchema,
     SessionCreateRequest, SessionResponse,
+    BaselineUpdateRequest, ExcludedMarginUpdateRequest, AutoSessionRequest,
     HedgeStatusResponse, ActiveHedgeSchema, NextEntrySchema,
     TransactionsResponse, HedgeTransactionSchema,
     ManualHedgeBuyRequest, ManualHedgeExitRequest, ActionResponse,
@@ -589,9 +590,22 @@ async def get_current_session(
         budget_per_basket=float(session.budget_per_basket),
         total_budget=float(session.total_budget),
         baseline_margin=float(session.baseline_margin) if session.baseline_margin else None,
+        excluded_margin=float(session.excluded_margin) if session.excluded_margin else None,
+        excluded_margin_breakdown=_parse_json_or_none(session.excluded_margin_breakdown) if hasattr(session, 'excluded_margin_breakdown') else None,
         auto_hedge_enabled=session.auto_hedge_enabled,
         created_at=session.created_at
     )
+
+
+def _parse_json_or_none(json_str) -> Optional[dict]:
+    """Parse JSON string or return None."""
+    if not json_str:
+        return None
+    try:
+        import json
+        return json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 @router.post("/session")
@@ -658,9 +672,257 @@ async def create_session(
         budget_per_basket=float(session.budget_per_basket),
         total_budget=float(session.total_budget),
         baseline_margin=float(session.baseline_margin) if session.baseline_margin else None,
+        excluded_margin=float(session.excluded_margin) if session.excluded_margin else None,
+        excluded_margin_breakdown=_parse_json_or_none(session.excluded_margin_breakdown),
         auto_hedge_enabled=session.auto_hedge_enabled,
         created_at=session.created_at
     )
+
+
+@router.patch("/session/baseline")
+async def update_baseline_margin(
+    request: BaselineUpdateRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update baseline margin for today's session.
+
+    This allows manual adjustment of the baseline margin at day start.
+    Useful when overnight positions change or baseline was captured incorrectly.
+
+    Args:
+        request: New baseline margin value
+
+    Returns:
+        Updated session
+    """
+    # Get today's session
+    today = datetime.now(IST).date()
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == today)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(404, "No session found for today. Create a session first.")
+
+    # Update baseline
+    session.baseline_margin = request.baseline_margin
+    session.baseline_captured_at = datetime.now(IST)
+
+    await db.commit()
+    await db.refresh(session)
+
+    logger.info(
+        f"[HEDGE_API] Baseline margin updated to ₹{request.baseline_margin:,.0f} "
+        f"for session {session.session_date}"
+    )
+
+    return SessionResponse(
+        id=session.id,
+        session_date=session.session_date,
+        day_of_week=session.day_of_week,
+        index_name=session.index_name,
+        expiry_type=session.expiry_type,
+        expiry_date=session.expiry_date,
+        num_baskets=session.num_baskets,
+        budget_per_basket=float(session.budget_per_basket),
+        total_budget=float(session.total_budget),
+        baseline_margin=float(session.baseline_margin) if session.baseline_margin else None,
+        excluded_margin=float(session.excluded_margin) if session.excluded_margin else None,
+        excluded_margin_breakdown=_parse_json_or_none(session.excluded_margin_breakdown),
+        auto_hedge_enabled=session.auto_hedge_enabled,
+        created_at=session.created_at
+    )
+
+
+@router.post("/session/refresh-excluded")
+async def refresh_excluded_margin(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Refresh excluded margin calculation for today's session.
+
+    Queries PM for trend-following positions and identifies long-term positions,
+    then updates the session's excluded_margin field.
+
+    Returns:
+        Updated session with new excluded margin values
+    """
+    import json
+    from app.services.margin_service import margin_service
+
+    # Get today's session
+    today = datetime.now(IST).date()
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == today)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(404, "No session found for today. Create a session first.")
+
+    # Calculate excluded margin
+    try:
+        excluded_data = await margin_service.get_excluded_margin_breakdown()
+
+        # Update session
+        session.excluded_margin = excluded_data["total_excluded"]
+        session.excluded_margin_breakdown = json.dumps(excluded_data["combined_breakdown"])
+        session.excluded_margin_updated_at = datetime.now(IST)
+
+        await db.commit()
+        await db.refresh(session)
+
+        logger.info(
+            f"[HEDGE_API] Excluded margin refreshed: ₹{excluded_data['total_excluded']:,.0f} "
+            f"(PM: ₹{excluded_data['pm_excluded']:,.0f}, "
+            f"Long-term: ₹{excluded_data['long_term_excluded']:,.0f})"
+        )
+
+        return {
+            "session_id": session.id,
+            "excluded_margin": float(session.excluded_margin),
+            "breakdown": excluded_data,
+            "updated_at": session.excluded_margin_updated_at.isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to refresh excluded margin: {e}")
+        raise HTTPException(500, f"Failed to calculate excluded margin: {str(e)}")
+
+
+@router.post("/session/auto-create")
+async def auto_create_session(
+    request: AutoSessionRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Auto-create session based on strategy schedule.
+
+    Looks up the strategy_schedule table for the specified day to determine
+    index and expiry type, then calculates the actual expiry date.
+
+    Args:
+        request: Session parameters (date, baskets, budget)
+
+    Returns:
+        Created session
+    """
+    from app.services.strategy_scheduler import expiry_utils
+
+    target_date = request.session_date or datetime.now(IST).date()
+    day_name = target_date.strftime("%A")
+
+    # Check if session already exists
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == target_date)
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        return SessionResponse(
+            id=existing.id,
+            session_date=existing.session_date,
+            day_of_week=existing.day_of_week,
+            index_name=existing.index_name,
+            expiry_type=existing.expiry_type,
+            expiry_date=existing.expiry_date,
+            num_baskets=existing.num_baskets,
+            budget_per_basket=float(existing.budget_per_basket),
+            total_budget=float(existing.total_budget),
+            baseline_margin=float(existing.baseline_margin) if existing.baseline_margin else None,
+            excluded_margin=float(existing.excluded_margin) if existing.excluded_margin else None,
+            excluded_margin_breakdown=_parse_json_or_none(existing.excluded_margin_breakdown),
+            auto_hedge_enabled=existing.auto_hedge_enabled,
+            created_at=existing.created_at
+        )
+
+    # Look up schedule for this day
+    result = await db.execute(
+        select(StrategySchedule)
+        .where(StrategySchedule.day_of_week == day_name)
+        .where(StrategySchedule.is_active == True)
+        .limit(1)
+    )
+    schedule = result.scalar_one_or_none()
+
+    if not schedule:
+        # Use defaults from DAY_TO_INDEX_EXPIRY if no schedule
+        day_config = DAY_TO_INDEX_EXPIRY.get(day_name, {})
+        index_name = day_config.get("index", "NIFTY")
+        expiry_type = day_config.get("expiry", "0DTE")
+    else:
+        index_name = schedule.index_name
+        expiry_type = schedule.expiry_type
+
+    # Calculate expiry date
+    try:
+        expiry_date = expiry_utils.get_expiry_date(
+            IndexName(index_name),
+            ExpiryType(expiry_type),
+            target_date
+        )
+    except Exception as e:
+        logger.warning(f"Failed to calculate expiry: {e}, using target date")
+        expiry_date = target_date
+
+    # Create session
+    session = DailySession(
+        session_date=target_date,
+        day_of_week=day_name,
+        index_name=index_name,
+        expiry_type=expiry_type,
+        expiry_date=expiry_date,
+        num_baskets=request.num_baskets,
+        budget_per_basket=request.budget_per_basket,
+        total_budget=request.num_baskets * request.budget_per_basket,
+        auto_hedge_enabled=request.auto_hedge_enabled
+    )
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
+
+    logger.info(
+        f"[HEDGE_API] Auto-created session for {target_date}: "
+        f"{index_name} {expiry_type}, {request.num_baskets} baskets"
+    )
+
+    return SessionResponse(
+        id=session.id,
+        session_date=session.session_date,
+        day_of_week=session.day_of_week,
+        index_name=session.index_name,
+        expiry_type=session.expiry_type,
+        expiry_date=session.expiry_date,
+        num_baskets=session.num_baskets,
+        budget_per_basket=float(session.budget_per_basket),
+        total_budget=float(session.total_budget),
+        baseline_margin=float(session.baseline_margin) if session.baseline_margin else None,
+        excluded_margin=float(session.excluded_margin) if session.excluded_margin else None,
+        excluded_margin_breakdown=_parse_json_or_none(session.excluded_margin_breakdown),
+        auto_hedge_enabled=session.auto_hedge_enabled,
+        created_at=session.created_at
+    )
+
+
+@router.get("/excluded-margin")
+async def get_excluded_margin():
+    """
+    Get current excluded margin breakdown without updating session.
+
+    Returns real-time calculation of:
+    - PM trend-following positions (Gold Mini, Bank Nifty, Silver Mini, etc.)
+    - Long-term positions (expiry > 30 days)
+    """
+    from app.services.margin_service import margin_service
+
+    try:
+        excluded_data = await margin_service.get_excluded_margin_breakdown()
+        return excluded_data
+    except Exception as e:
+        logger.error(f"Failed to get excluded margin: {e}")
+        raise HTTPException(500, f"Failed to calculate excluded margin: {str(e)}")
 
 
 # ============================================================

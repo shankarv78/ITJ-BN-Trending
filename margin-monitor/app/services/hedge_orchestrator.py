@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hedge_models import DailySession, ActiveHedge, StrategyExecution
-from app.models.hedge_constants import IndexName, ExpiryType, HEDGE_CONFIG, LotSizes
+from app.models.hedge_constants import IndexName, ExpiryType, HEDGE_CONFIG, LOT_SIZES
 from app.services.strategy_scheduler import StrategySchedulerService, UpcomingEntry
 from app.services.margin_calculator import MarginCalculatorService
 from app.services.hedge_selector import HedgeStrikeSelectorService
@@ -35,6 +35,10 @@ IST = pytz.timezone('Asia/Kolkata')
 # Market hours
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
+
+# Simulation constants for dry run mode
+HEDGE_DIMINISHING_FACTOR = 0.85  # Each additional hedge provides 85% of previous benefit
+MAX_SIMULATED_HEDGES = 100  # Maximum tracked simulated hedges (memory limit)
 
 
 class AutoHedgeOrchestrator:
@@ -711,14 +715,14 @@ class AutoHedgeOrchestrator:
                 self._session_cache['baskets']
             ) / 2  # Per individual hedge (CE or PE)
 
-            # Apply diminishing returns: each additional hedge gives 80% of previous
+            # Apply diminishing returns: each additional hedge gives reduced benefit
             # This models SPAN's portfolio-level calculation where far OTM hedges help less
             total_benefit = 0.0
             diminishing_factor = 1.0
             for i in range(num_transactions):
                 benefit = base_benefit_per_hedge * diminishing_factor
                 total_benefit += benefit
-                diminishing_factor *= 0.8  # 80% diminishing per additional hedge
+                diminishing_factor *= HEDGE_DIMINISHING_FACTOR  # Unified constant
 
             # Apply floor: cannot reduce margin below 25% of baseline (SEBI requirement)
             # Max reduction = 75% of intraday margin
@@ -746,6 +750,10 @@ class AutoHedgeOrchestrator:
                     'timestamp': txn.timestamp.isoformat() if txn.timestamp else ''
                 })
 
+            # Bound list size to prevent memory growth
+            if len(self._simulated_hedges) > MAX_SIMULATED_HEDGES:
+                self._simulated_hedges = self._simulated_hedges[-MAX_SIMULATED_HEDGES:]
+
             logger.info(
                 f"[ORCHESTRATOR] Loaded {num_transactions} dry run transactions "
                 f"(CE: {ce_count} hedges/{self._simulated_ce_qty} qty, "
@@ -772,7 +780,7 @@ class AutoHedgeOrchestrator:
 
         # Apply diminishing returns based on existing hedge count
         num_existing = len(self._simulated_hedges)
-        diminishing_factor = 0.85 ** num_existing  # 85% of previous benefit
+        diminishing_factor = HEDGE_DIMINISHING_FACTOR ** num_existing  # Unified constant
         adjusted_benefit = estimated_benefit * diminishing_factor
 
         # Apply floor: cannot reduce margin below 25% of budget (SEBI requirement)
@@ -799,7 +807,7 @@ class AutoHedgeOrchestrator:
         elif hasattr(hedge, 'total_lots') and hedge.total_lots:
             # Calculate quantity from lots * lot_size
             index = IndexName(self._session_cache.get('index', 'NIFTY'))
-            lot_size = LotSizes.get_lot_size(index)
+            lot_size = LOT_SIZES.get_lot_size(index)
             qty = hedge.total_lots * lot_size
         else:
             qty = 0
@@ -816,6 +824,10 @@ class AutoHedgeOrchestrator:
             'margin_benefit': adjusted_benefit,
             'timestamp': self._now_ist().isoformat()
         })
+
+        # Bound list size to prevent memory growth
+        if len(self._simulated_hedges) > MAX_SIMULATED_HEDGES:
+            self._simulated_hedges = self._simulated_hedges[-MAX_SIMULATED_HEDGES:]
 
         logger.info(
             f"[ORCHESTRATOR] DRY RUN: Added {hedge.option_type} hedge, "

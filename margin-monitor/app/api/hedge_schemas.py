@@ -64,8 +64,31 @@ class SessionResponse(BaseModel):
     budget_per_basket: float
     total_budget: float
     baseline_margin: Optional[float]
+    excluded_margin: Optional[float] = None
+    excluded_margin_breakdown: Optional[dict] = None
     auto_hedge_enabled: bool
     created_at: datetime
+
+
+class BaselineUpdateRequest(BaseModel):
+    """Request to update baseline margin."""
+    baseline_margin: float = Field(..., description="New baseline margin value")
+
+
+class ExcludedMarginUpdateRequest(BaseModel):
+    """Request to refresh excluded margin calculation."""
+    pass  # No params - just triggers recalculation
+
+
+class AutoSessionRequest(BaseModel):
+    """Request to auto-create session for a date."""
+    session_date: Optional[date] = Field(
+        None,
+        description="Date for session (defaults to today)"
+    )
+    num_baskets: int = Field(15, description="Number of baskets")
+    budget_per_basket: float = Field(1000000.0, description="Budget per basket")
+    auto_hedge_enabled: bool = Field(True, description="Enable auto-hedge")
 
 
 # ============================================================
