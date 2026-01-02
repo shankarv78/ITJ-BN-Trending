@@ -76,26 +76,77 @@ async def lifespan(app: FastAPI):
             )
             executor = HedgeExecutorService(async_session_maker(), openalgo, telegram)
 
-            # Create margin adapter for hedge orchestrator
+            # Create margin adapter that uses EXISTING margin monitor data
+            # This ensures auto-hedge sees the SAME utilization as main margin monitor
             class HedgeMarginAdapter:
-                """Adapter to provide margin data for hedge orchestrator."""
-                def __init__(self, openalgo_svc, baseline: float = 0.0, total_budget: float = 15000000.0):
+                """
+                Adapter to provide margin data for hedge orchestrator.
+
+                CRITICAL: Uses the actual DailyConfig (baseline, budget) from the database
+                to ensure consistency with main margin monitor display.
+                """
+                def __init__(self, session_maker, openalgo_svc):
+                    self.session_maker = session_maker  # async_session_maker
                     self.openalgo = openalgo_svc
-                    self.baseline = baseline
-                    self.total_budget = total_budget
+                    self._cached_config = None
+
+                async def _get_today_config(self):
+                    """Get today's config with baseline and budget."""
+                    from app.models import DailyConfig
+                    from app.utils.date_utils import today_ist
+                    from sqlalchemy import select
+
+                    async with self.session_maker() as db:
+                        result = await db.execute(
+                            select(DailyConfig)
+                            .where(DailyConfig.date == today_ist())
+                            .where(DailyConfig.is_active == 1)
+                        )
+                        config = result.scalar_one_or_none()
+                        if config:
+                            self._cached_config = {
+                                'id': config.id,
+                                'baseline': config.baseline_margin or 0.0,
+                                'budget': config.total_budget or 15000000.0,
+                                'index': config.index_name,
+                                'expiry_date': config.expiry_date.isoformat() if config.expiry_date else None
+                            }
+                        return self._cached_config
 
                 async def get_current_status(self) -> dict:
-                    """Get current margin status in format orchestrator expects."""
+                    """
+                    Get current margin status using SAME calculation as main margin monitor.
+                    This ensures auto-hedge sees identical utilization %.
+                    """
+                    config = await self._get_today_config()
+                    if not config:
+                        # Fallback if no config
+                        funds = await self.openalgo.get_funds()
+                        used_margin = funds.get('used_margin', 0) or funds.get('marginused', 0) or 0
+                        return {
+                            'utilization_pct': 0,
+                            'used_margin': used_margin,
+                            'available': funds.get('available_margin', 0),
+                            'intraday_margin': 0,
+                            'total_budget': 15000000.0
+                        }
+
+                    # Use same calculation as main margin service
                     funds = await self.openalgo.get_funds()
                     used_margin = funds.get('used_margin', 0) or funds.get('marginused', 0) or 0
-                    intraday = used_margin - self.baseline
-                    utilization = (intraday / self.total_budget) * 100 if self.total_budget > 0 else 0
+                    baseline = config['baseline']
+                    budget = config['budget']
+
+                    intraday = used_margin - baseline
+                    utilization = (intraday / budget) * 100 if budget > 0 else 0
+
                     return {
                         'utilization_pct': utilization,
                         'used_margin': used_margin,
                         'available': funds.get('available_margin', 0) or funds.get('availablecash', 0),
                         'intraday_margin': intraday,
-                        'total_budget': self.total_budget
+                        'total_budget': budget,
+                        'baseline': baseline
                     }
 
                 async def get_filtered_positions(self) -> list:
@@ -105,7 +156,37 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         return []
 
-            margin_adapter = HedgeMarginAdapter(openalgo_service)
+                async def get_position_summary(self) -> dict:
+                    """
+                    Get position summary with CE/PE breakdown.
+                    Uses same filtering as main margin monitor.
+                    """
+                    from app.services.position_service import position_service
+
+                    config = await self._get_today_config()
+                    if not config or not config.get('expiry_date'):
+                        return {
+                            'short_ce_qty': 0,
+                            'short_pe_qty': 0,
+                            'long_ce_qty': 0,
+                            'long_pe_qty': 0,
+                            'short_qty': 0,
+                            'long_qty': 0
+                        }
+
+                    positions = await self.get_filtered_positions()
+                    filtered = position_service.filter_positions(
+                        positions,
+                        config['index'],
+                        config['expiry_date']
+                    )
+                    return position_service.get_summary(filtered)
+
+                def get_cached_config(self):
+                    """Return cached config for position filtering."""
+                    return self._cached_config
+
+            margin_adapter = HedgeMarginAdapter(async_session_maker, openalgo_service)
 
             orchestrator = AutoHedgeOrchestrator(
                 db_factory=get_db_session,
