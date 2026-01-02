@@ -725,27 +725,31 @@ class AutoHedgeOrchestrator:
             max_reduction = self._session_cache['budget'] * 0.75
             self._simulated_margin_reduction = min(total_benefit, max_reduction)
 
-            # Load transactions and track CE/PE quantities
+            # Load ALL transactions and track CE/PE quantities
+            ce_count = 0
+            pe_count = 0
             for txn in transactions:
                 qty = txn.quantity or 0
                 if txn.option_type == 'CE':
                     self._simulated_ce_qty += qty
+                    ce_count += 1
                 elif txn.option_type == 'PE':
                     self._simulated_pe_qty += qty
+                    pe_count += 1
 
-            # Load last 10 for display
-            for txn in transactions[:10]:
+                # Add to simulated hedges list (for all, not just last 10)
                 self._simulated_hedges.append({
                     'strike': txn.strike,
                     'option_type': txn.option_type,
-                    'quantity': txn.quantity or 0,
+                    'quantity': qty,
                     'margin_benefit': base_benefit_per_hedge,
                     'timestamp': txn.timestamp.isoformat() if txn.timestamp else ''
                 })
 
             logger.info(
-                f"[ORCHESTRATOR] Loaded {num_transactions} dry run transactions, "
-                f"CE={self._simulated_ce_qty}, PE={self._simulated_pe_qty}, "
+                f"[ORCHESTRATOR] Loaded {num_transactions} dry run transactions "
+                f"(CE: {ce_count} hedges/{self._simulated_ce_qty} qty, "
+                f"PE: {pe_count} hedges/{self._simulated_pe_qty} qty), "
                 f"simulated reduction=₹{self._simulated_margin_reduction:,.0f} "
                 f"(max allowed=₹{max_reduction:,.0f}, 75% of budget)"
             )
