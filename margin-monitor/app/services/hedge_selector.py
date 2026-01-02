@@ -440,14 +440,33 @@ class HedgeStrikeSelectorService:
         Returns:
             HedgeSelection with selected candidates
         """
-        # Determine which sides need hedging based on short positions
-        ce_shorts = sum(1 for p in short_positions if 'CE' in p.get('symbol', '').upper())
-        pe_shorts = sum(1 for p in short_positions if 'PE' in p.get('symbol', '').upper())
+        # Calculate short QUANTITIES (not just position count) for proportional hedging
+        ce_short_qty = sum(
+            abs(p.get('quantity', 0)) for p in short_positions
+            if 'CE' in p.get('symbol', '').upper()
+        )
+        pe_short_qty = sum(
+            abs(p.get('quantity', 0)) for p in short_positions
+            if 'PE' in p.get('symbol', '').upper()
+        )
+
+        total_short_qty = ce_short_qty + pe_short_qty
+        if total_short_qty > 0:
+            ce_ratio = ce_short_qty / total_short_qty
+            pe_ratio = pe_short_qty / total_short_qty
+        else:
+            ce_ratio = 0.5
+            pe_ratio = 0.5
+
+        logger.info(
+            f"[HEDGE_SELECTOR] Short qty: CE={ce_short_qty}, PE={pe_short_qty}, "
+            f"ratio CE:PE = {ce_ratio:.1%}:{pe_ratio:.1%}"
+        )
 
         option_types = []
-        if ce_shorts > 0:
+        if ce_short_qty > 0:
             option_types.append('CE')
-        if pe_shorts > 0:
+        if pe_short_qty > 0:
             option_types.append('PE')
 
         if not option_types:
@@ -517,22 +536,42 @@ class HedgeStrikeSelectorService:
                 fully_covered=False
             )
 
-        # Greedy selection: pick best MBPR until reduction achieved
+        # Proportional selection: allocate hedges based on short qty ratio
+        # If CE:PE ratio is 25%:75%, allocate margin reduction budget accordingly
         selected: List[HedgeCandidate] = []
         total_benefit = 0.0
         total_cost = 0.0
-        selected_types: set = set()
 
+        # Calculate target benefit per side (proportional to exposure)
+        ce_target = margin_reduction_needed * ce_ratio if 'CE' in option_types else 0
+        pe_target = margin_reduction_needed * pe_ratio if 'PE' in option_types else 0
+
+        ce_benefit = 0.0
+        pe_benefit = 0.0
+
+        logger.info(
+            f"[HEDGE_SELECTOR] Proportional targets: CE=₹{ce_target:,.0f} ({ce_ratio:.0%}), "
+            f"PE=₹{pe_target:,.0f} ({pe_ratio:.0%})"
+        )
+
+        # Sort candidates by MBPR and select proportionally
         for candidate in candidates:
             if total_benefit >= margin_reduction_needed:
                 break
 
-            # Only one hedge per side (CE or PE)
-            if candidate.option_type in selected_types:
-                continue
+            opt_type = candidate.option_type
+
+            # Check if this side still needs more hedges
+            if opt_type == 'CE':
+                if ce_benefit >= ce_target:
+                    continue  # CE already has enough
+                ce_benefit += candidate.estimated_margin_benefit
+            else:  # PE
+                if pe_benefit >= pe_target:
+                    continue  # PE already has enough
+                pe_benefit += candidate.estimated_margin_benefit
 
             selected.append(candidate)
-            selected_types.add(candidate.option_type)
             total_benefit += candidate.estimated_margin_benefit
             total_cost += candidate.total_cost
 
