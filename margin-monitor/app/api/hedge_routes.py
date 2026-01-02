@@ -229,7 +229,10 @@ async def get_hedge_status(db: AsyncSession = Depends(get_db)):
         sim_data = status_data['simulated_margin']
         simulated_margin = SimulatedMarginSchema(
             total_reduction=sim_data.get('total_reduction', 0),
+            max_reduction=sim_data.get('max_reduction', 0),
             hedge_count=sim_data.get('hedge_count', 0),
+            real_utilization_pct=sim_data.get('real_utilization_pct', 0),
+            simulated_utilization_pct=sim_data.get('simulated_utilization_pct', 0),
             hedges=[SimulatedHedgeSchema(**h) for h in sim_data.get('hedges', [])]
         )
 
