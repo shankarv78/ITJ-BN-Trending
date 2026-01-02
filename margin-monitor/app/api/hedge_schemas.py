@@ -90,6 +90,21 @@ class NextEntrySchema(BaseModel):
     seconds_until: int
 
 
+class SimulatedHedgeSchema(BaseModel):
+    """Schema for a simulated hedge in dry run mode."""
+    strike: int
+    option_type: str
+    margin_benefit: float
+    timestamp: str
+
+
+class SimulatedMarginSchema(BaseModel):
+    """Schema for simulated margin info in dry run mode."""
+    total_reduction: float = Field(..., description="Total simulated margin reduction in ₹")
+    hedge_count: int = Field(..., description="Number of simulated hedges placed")
+    hedges: List[SimulatedHedgeSchema] = Field(default=[], description="Recent simulated hedges")
+
+
 class HedgeStatusResponse(BaseModel):
     """Response with current auto-hedge status."""
     status: str = Field(..., description="running, stopped, disabled, no_session")
@@ -98,6 +113,7 @@ class HedgeStatusResponse(BaseModel):
     active_hedges: List[ActiveHedgeSchema] = []
     next_entry: Optional[NextEntrySchema] = None
     cooldown_remaining: int = 0
+    simulated_margin: Optional[SimulatedMarginSchema] = Field(None, description="Simulated margin info (dry run only)")
 
 
 # ============================================================
@@ -143,13 +159,20 @@ class TransactionsResponse(BaseModel):
 
 class ManualHedgeBuyRequest(BaseModel):
     """Request for manual hedge buy."""
-    strike: int
+    index_name: str = Field("NIFTY", description="Index name: NIFTY or SENSEX")
+    expiry_date: str = Field(..., description="Expiry date in YYYY-MM-DD format")
     option_type: str = Field(..., description="CE or PE")
+    strike_offset: int = Field(500, description="OTM distance in points")
+    lots: int = Field(1, ge=1, le=50, description="Number of lots")
+    reason: Optional[str] = Field(None, description="Reason for manual hedge")
+    dry_run: bool = Field(True, description="Simulate without placing real order")
 
 
 class ManualHedgeExitRequest(BaseModel):
     """Request for manual hedge exit."""
     hedge_id: int
+    reason: Optional[str] = Field(None, description="Reason for exit")
+    dry_run: bool = Field(True, description="Simulate without placing real order")
 
 
 class ActionResponse(BaseModel):
@@ -157,6 +180,9 @@ class ActionResponse(BaseModel):
     success: bool
     message: str
     order_id: Optional[str] = None
+    error: Optional[str] = None
+    dry_run: bool = False
+    simulated_order: Optional[dict] = None  # Details of simulated order in dry run
     error: Optional[str] = None
 
 

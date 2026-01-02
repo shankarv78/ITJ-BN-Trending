@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -117,6 +117,40 @@ def set_orchestrator(orchestrator: AutoHedgeOrchestrator):
 # Status Endpoints
 # ============================================================
 
+@router.get("/debug")
+async def debug_orchestrator():
+    """Debug endpoint to check orchestrator state."""
+    orchestrator = get_orchestrator()
+    if not orchestrator:
+        return {"error": "orchestrator is None"}
+
+    try:
+        # Check basic attributes
+        info = {
+            "has_scheduler": orchestrator.scheduler is not None,
+            "has_executor": orchestrator.hedge_executor is not None,
+            "has_db": orchestrator.db is not None,
+            "_is_running": getattr(orchestrator, '_is_running', 'NOT_SET'),
+            "_dry_run": getattr(orchestrator, '_dry_run', 'NOT_SET'),
+            "_session": str(getattr(orchestrator, '_session', 'NOT_SET')),
+        }
+
+        # Try get_status
+        try:
+            status = await orchestrator.get_status()
+            info["get_status"] = "SUCCESS"
+            info["status_data"] = status
+        except Exception as e:
+            import traceback
+            info["get_status"] = f"FAILED: {e}"
+            info["traceback"] = traceback.format_exc()
+
+        return info
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
+
 @router.get("/status", response_model=HedgeStatusResponse)
 async def get_hedge_status(db: AsyncSession = Depends(get_db)):
     """
@@ -127,21 +161,86 @@ async def get_hedge_status(db: AsyncSession = Depends(get_db)):
     """
     orchestrator = get_orchestrator()
 
+    # Always fetch session from DB for accurate toggle state
+    today = datetime.now(IST).date()
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == today)
+    )
+    db_session = result.scalar_one_or_none()
+
+    if not db_session:
+        # Fall back to most recent session
+        result = await db.execute(
+            select(DailySession)
+            .order_by(DailySession.session_date.desc())
+            .limit(1)
+        )
+        db_session = result.scalar_one_or_none()
+
+    session_response = None
+    if db_session:
+        session_response = SessionResponse(
+            id=db_session.id,
+            session_date=db_session.session_date,
+            day_of_week=db_session.day_of_week,
+            index_name=db_session.index_name,
+            expiry_type=db_session.expiry_type,
+            expiry_date=db_session.expiry_date,
+            num_baskets=db_session.num_baskets,
+            budget_per_basket=float(db_session.budget_per_basket),
+            total_budget=float(db_session.total_budget),
+            baseline_margin=float(db_session.baseline_margin) if db_session.baseline_margin else None,
+            auto_hedge_enabled=db_session.auto_hedge_enabled,
+            created_at=db_session.created_at
+        )
+
     if not orchestrator:
         return HedgeStatusResponse(
             status="not_initialized",
-            dry_run=False
+            dry_run=False,
+            session=session_response  # Still show session even if orchestrator not started
         )
 
-    status_data = await orchestrator.get_status()
+    try:
+        status_data = await orchestrator.get_status()
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        logger.error(f"Error getting orchestrator status: {e}\n{error_detail}")
+        # Return partial response even if orchestrator fails
+        return HedgeStatusResponse(
+            status="error",
+            dry_run=False,
+            session=session_response
+        )
+
+    # Determine status based on session's auto_hedge_enabled
+    if session_response and not session_response.auto_hedge_enabled:
+        display_status = "disabled"
+    elif status_data.get('is_running', False):
+        display_status = "running"
+    else:
+        display_status = "stopped"
+
+    # Build simulated margin schema if present (dry run mode)
+    simulated_margin = None
+    if status_data.get('simulated_margin'):
+        from app.api.hedge_schemas import SimulatedMarginSchema, SimulatedHedgeSchema
+        sim_data = status_data['simulated_margin']
+        simulated_margin = SimulatedMarginSchema(
+            total_reduction=sim_data.get('total_reduction', 0),
+            hedge_count=sim_data.get('hedge_count', 0),
+            hedges=[SimulatedHedgeSchema(**h) for h in sim_data.get('hedges', [])]
+        )
 
     return HedgeStatusResponse(
-        status="running" if status_data['is_running'] else "stopped",
+        status=display_status,
         dry_run=status_data.get('dry_run', False),
-        session=SessionResponse(**status_data['session']) if status_data.get('session') else None,
+        session=session_response,
         active_hedges=[ActiveHedgeSchema(**h) for h in status_data.get('active_hedges', [])],
         next_entry=NextEntrySchema(**status_data['next_entry']) if status_data.get('next_entry') else None,
-        cooldown_remaining=status_data.get('cooldown_remaining', 0)
+        cooldown_remaining=status_data.get('cooldown_remaining', 0),
+        simulated_margin=simulated_margin
     )
 
 
@@ -151,7 +250,7 @@ async def toggle_auto_hedge(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Enable or disable auto-hedge for today's session.
+    Enable or disable auto-hedge for the active session.
 
     Requires API key authentication.
 
@@ -163,24 +262,103 @@ async def toggle_auto_hedge(
     """
     today = datetime.now(IST).date()
 
+    # Try today's session first
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == today)
+    )
+    session = result.scalar_one_or_none()
+
+    # Fall back to most recent session
+    if not session:
+        result = await db.execute(
+            select(DailySession)
+            .order_by(DailySession.session_date.desc())
+            .limit(1)
+        )
+        session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(400, "No session found")
+
+    session.auto_hedge_enabled = request.enabled
+    await db.commit()
+
+    status = "enabled" if request.enabled else "disabled"
+    logger.info(f"[HEDGE_API] Auto-hedge {status} for session {session.session_date}")
+
+    return ToggleResponse(
+        success=True,
+        auto_hedge_enabled=request.enabled,
+        message=f"Auto-hedge {status} for session {session.session_date}"
+    )
+
+
+@router.post("/reset-dry-run", response_model=ActionResponse)
+async def reset_dry_run(db: AsyncSession = Depends(get_db)):
+    """
+    Reset dry run data - deletes all transactions and resets simulated margin.
+
+    Only works when system is in dry run mode.
+    Does NOT require API key since it only affects simulated data.
+
+    Returns:
+        Action result with count of deleted records
+    """
+    orchestrator = get_orchestrator()
+
+    # Check if in dry run mode
+    if orchestrator and not orchestrator._dry_run:
+        raise HTTPException(400, "Reset only available in dry run mode")
+
+    # Get the current session
+    today = datetime.now(IST).date()
     result = await db.execute(
         select(DailySession).where(DailySession.session_date == today)
     )
     session = result.scalar_one_or_none()
 
     if not session:
-        raise HTTPException(400, "No session found for today")
+        # Fall back to most recent session
+        result = await db.execute(
+            select(DailySession)
+            .order_by(DailySession.session_date.desc())
+            .limit(1)
+        )
+        session = result.scalar_one_or_none()
 
-    session.auto_hedge_enabled = request.enabled
+    if not session:
+        raise HTTPException(400, "No session found")
+
+    # Delete all hedge transactions for this session
+    from sqlalchemy import delete
+
+    txn_result = await db.execute(
+        delete(HedgeTransaction).where(HedgeTransaction.session_id == session.id)
+    )
+    txn_count = txn_result.rowcount
+
+    # Delete active hedges
+    hedge_result = await db.execute(
+        delete(ActiveHedge).where(ActiveHedge.session_id == session.id)
+    )
+    hedge_count = hedge_result.rowcount
+
     await db.commit()
 
-    status = "enabled" if request.enabled else "disabled"
-    logger.info(f"[HEDGE_API] Auto-hedge {status} for {today}")
+    # Reset orchestrator's in-memory simulated margin tracking
+    if orchestrator:
+        orchestrator._simulated_margin_reduction = 0.0
+        orchestrator._simulated_hedges = []
 
-    return ToggleResponse(
+    logger.info(
+        f"[HEDGE_API] Reset dry run: deleted {txn_count} transactions, "
+        f"{hedge_count} active hedges for session {session.session_date}"
+    )
+
+    return ActionResponse(
         success=True,
-        auto_hedge_enabled=request.enabled,
-        message=f"Auto-hedge {status} for today's session"
+        message=f"Reset complete: deleted {txn_count} transactions, {hedge_count} active hedges",
+        dry_run=True
     )
 
 
@@ -191,6 +369,7 @@ async def toggle_auto_hedge(
 @router.get("/schedule")
 async def get_schedule(
     day: Optional[str] = None,
+    all_days: bool = False,
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -199,10 +378,47 @@ async def get_schedule(
     Args:
         day: Optional day name (Monday, Tuesday, etc.). If not provided,
              returns today's schedule.
+        all_days: If true, returns schedule for all days (Monday-Friday)
 
     Returns:
-        Schedule for the specified day
+        Schedule for the specified day, or list of schedules for all days
     """
+    # If all_days requested, return a list of schedules for each day
+    if all_days:
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        result_list = []
+
+        for d in days:
+            result = await db.execute(
+                select(StrategySchedule)
+                .where(StrategySchedule.day_of_week == d)
+                .where(StrategySchedule.is_active == True)
+                .order_by(StrategySchedule.entry_time)
+            )
+            schedules = result.scalars().all()
+
+            entries = [
+                {
+                    "id": s.id,
+                    "day_of_week": s.day_of_week,
+                    "index_name": s.index_name,
+                    "expiry_type": s.expiry_type,
+                    "portfolio_name": s.portfolio_name,
+                    "entry_time": s.entry_time.isoformat() if s.entry_time else "",
+                    "exit_time": s.exit_time.isoformat() if s.exit_time else None,
+                    "is_active": s.is_active
+                }
+                for s in schedules
+            ]
+
+            result_list.append({
+                "day": d,
+                "entries": entries
+            })
+
+        return result_list
+
+    # Original single-day logic
     if day is None:
         day = datetime.now(IST).strftime("%A")
 
@@ -292,22 +508,53 @@ async def update_schedule(
 # ============================================================
 
 @router.get("/session")
-async def get_current_session(db: AsyncSession = Depends(get_db)):
+async def get_current_session(
+    session_date: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+):
     """
-    Get today's session configuration.
+    Get session configuration.
+
+    If session_date is provided, returns that specific session.
+    Otherwise, returns today's session or the most recent session if none for today.
 
     Returns:
         Session data or 404 if not found
     """
-    today = datetime.now(IST).date()
+    from datetime import datetime as dt
 
-    result = await db.execute(
-        select(DailySession).where(DailySession.session_date == today)
-    )
-    session = result.scalar_one_or_none()
+    session = None
+
+    if session_date:
+        # Parse provided date
+        try:
+            target_date = dt.strptime(session_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(400, f"Invalid date format: {session_date}. Use YYYY-MM-DD")
+
+        result = await db.execute(
+            select(DailySession).where(DailySession.session_date == target_date)
+        )
+        session = result.scalar_one_or_none()
+    else:
+        # Try today first
+        today = datetime.now(IST).date()
+        result = await db.execute(
+            select(DailySession).where(DailySession.session_date == today)
+        )
+        session = result.scalar_one_or_none()
+
+        if not session:
+            # Fall back to most recent session
+            result = await db.execute(
+                select(DailySession)
+                .order_by(DailySession.session_date.desc())
+                .limit(1)
+            )
+            session = result.scalar_one_or_none()
 
     if not session:
-        raise HTTPException(404, "No session found for today")
+        raise HTTPException(404, "No session found")
 
     return SessionResponse(
         id=session.id,
@@ -496,20 +743,81 @@ async def manual_hedge_buy(
     """
     Manually trigger a hedge buy.
 
-    Requires API key authentication. USE WITH CAUTION - this places real orders!
+    Requires API key authentication.
+    Supports dry_run mode for paper trading / testing.
 
     Args:
-        request: Strike and option type
+        request: Index, expiry, option type, strike offset, lots, and dry_run flag
 
     Returns:
-        Action result
+        Action result with simulated order details if dry_run
     """
+    # Get session from DB (works even without orchestrator)
+    today = datetime.now(IST).date()
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == today)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        # Fall back to most recent session
+        result = await db.execute(
+            select(DailySession)
+            .order_by(DailySession.session_date.desc())
+            .limit(1)
+        )
+        session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(400, "No session found. Create a session first.")
+
+    # Calculate simulated strike based on index name and offset
+    # In real mode, we'd fetch the current spot price
+    simulated_spot = 24000 if request.index_name == "NIFTY" else 80000  # Placeholder
+    if request.option_type == "PE":
+        simulated_strike = simulated_spot - request.strike_offset
+    else:
+        simulated_strike = simulated_spot + request.strike_offset
+
+    # Round strike to nearest valid strike (50 for NIFTY, 100 for SENSEX)
+    strike_gap = 50 if request.index_name == "NIFTY" else 100
+    simulated_strike = round(simulated_strike / strike_gap) * strike_gap
+
+    # Get lot size for the index
+    lot_size = 75 if request.index_name.upper() == "NIFTY" else 10
+    quantity = request.lots * lot_size
+
+    # Build the simulated order details
+    simulated_order = {
+        "index": request.index_name,
+        "expiry_date": request.expiry_date,
+        "option_type": request.option_type,
+        "strike": simulated_strike,
+        "strike_offset": request.strike_offset,
+        "lots": request.lots,
+        "lot_size": lot_size,
+        "quantity": quantity,
+        "estimated_premium": 5.0,  # Would be fetched from option chain
+        "estimated_cost": quantity * 5.0,
+        "reason": request.reason or "Manual hedge via UI",
+        "session_id": session.id,
+        "session_date": str(session.session_date),
+    }
+
+    if request.dry_run:
+        # Paper trade - just log and return
+        logger.info(f"[PAPER TRADE] Manual buy simulated: {simulated_order}")
+        return ActionResponse(
+            success=True,
+            message=f"📝 Paper trade simulated: {request.option_type} {simulated_strike} x {request.lots} lots",
+            dry_run=True,
+            simulated_order=simulated_order
+        )
+
+    # Real order - use the executor
     orchestrator = get_orchestrator()
-
-    if not orchestrator or not orchestrator.session:
-        raise HTTPException(400, "No active session")
-
-    session = orchestrator.session
+    if not orchestrator:
+        raise HTTPException(400, "Orchestrator not running. Cannot place real orders.")
 
     # Fetch current margin utilization for accurate audit trail
     current_util = 0.0
@@ -522,20 +830,20 @@ async def manual_hedge_buy(
 
     # Create hedge candidate
     candidate = HedgeCandidate(
-        strike=request.strike,
+        strike=simulated_strike,
         option_type=request.option_type,
         ltp=5.0,  # Will be fetched
-        otm_distance=0,
+        otm_distance=request.strike_offset,
         estimated_margin_benefit=0,
         cost_per_lot=0,
         total_cost=0,
-        total_lots=0,
+        total_lots=request.lots,
         mbpr=0
     )
 
     executor = HedgeExecutorService(db)
 
-    result = await executor.execute_hedge_buy(
+    exec_result = await executor.execute_hedge_buy(
         session_id=session.id,
         candidate=candidate,
         index=IndexName(session.index_name),
@@ -547,10 +855,11 @@ async def manual_hedge_buy(
     )
 
     return ActionResponse(
-        success=result.success,
-        message="Hedge buy executed" if result.success else "Hedge buy failed",
-        order_id=result.order_id,
-        error=result.error_message
+        success=exec_result.success,
+        message="Hedge buy executed" if exec_result.success else "Hedge buy failed",
+        order_id=exec_result.order_id,
+        error=exec_result.error_message,
+        dry_run=False
     )
 
 
@@ -562,45 +871,75 @@ async def manual_hedge_exit(
     """
     Manually trigger a hedge exit.
 
-    Requires API key authentication. USE WITH CAUTION - this places real orders!
+    Requires API key authentication.
+    Supports dry_run mode for paper trading / testing.
 
     Args:
-        request: Hedge ID to exit
+        request: Hedge ID to exit and dry_run flag
 
     Returns:
         Action result
     """
+    # Get the hedge from DB
+    result = await db.execute(
+        select(ActiveHedge).where(ActiveHedge.id == request.hedge_id)
+    )
+    hedge = result.scalar_one_or_none()
+
+    if not hedge:
+        raise HTTPException(404, f"Hedge {request.hedge_id} not found")
+
+    # Build simulated exit details
+    simulated_exit = {
+        "hedge_id": request.hedge_id,
+        "symbol": hedge.symbol,
+        "strike": hedge.strike,
+        "option_type": hedge.option_type,
+        "quantity": hedge.quantity,
+        "entry_price": float(hedge.entry_price),
+        "estimated_exit_price": float(hedge.entry_price) * 0.8,  # Estimate some decay
+        "reason": request.reason or "Manual exit via UI",
+    }
+
+    if request.dry_run:
+        # Paper trade - just log and return
+        logger.info(f"[PAPER TRADE] Manual exit simulated: {simulated_exit}")
+        return ActionResponse(
+            success=True,
+            message=f"📝 Paper exit simulated: {hedge.symbol} x {hedge.quantity} qty",
+            dry_run=True,
+            simulated_order=simulated_exit
+        )
+
+    # Real order - need orchestrator for margin tracking
     orchestrator = get_orchestrator()
-
-    if not orchestrator or not orchestrator.session:
-        raise HTTPException(400, "No active session")
-
-    session = orchestrator.session
 
     # Fetch current margin utilization for accurate audit trail
     current_util = 0.0
-    try:
-        margin_data = await orchestrator._get_current_margin()
-        if margin_data:
-            current_util = margin_data.get('utilization_pct', 0.0)
-    except Exception as e:
-        logger.warning(f"[HEDGE_API] Could not fetch margin for manual exit: {e}")
+    if orchestrator:
+        try:
+            margin_data = await orchestrator._get_current_margin()
+            if margin_data:
+                current_util = margin_data.get('utilization_pct', 0.0)
+        except Exception as e:
+            logger.warning(f"[HEDGE_API] Could not fetch margin for manual exit: {e}")
 
     executor = HedgeExecutorService(db)
 
-    result = await executor.execute_hedge_exit(
+    exec_result = await executor.execute_hedge_exit(
         hedge_id=request.hedge_id,
-        session_id=session.id,
+        session_id=hedge.session_id,
         trigger_reason="MANUAL",
         utilization_before=current_util,
         dry_run=False
     )
 
     return ActionResponse(
-        success=result.success,
-        message="Hedge exit executed" if result.success else "Hedge exit failed",
-        order_id=result.order_id,
-        error=result.error_message
+        success=exec_result.success,
+        message="Hedge exit executed" if exec_result.success else "Hedge exit failed",
+        order_id=exec_result.order_id,
+        error=exec_result.error_message,
+        dry_run=False
     )
 
 
@@ -640,13 +979,13 @@ async def get_analytics(
             select(
                 func.count(HedgeTransaction.id).label('count'),
                 func.sum(
-                    func.case(
+                    case(
                         (HedgeTransaction.action == 'BUY', HedgeTransaction.total_cost),
                         else_=0
                     )
                 ).label('cost'),
                 func.sum(
-                    func.case(
+                    case(
                         (HedgeTransaction.action == 'SELL', HedgeTransaction.total_cost),
                         else_=0
                     )

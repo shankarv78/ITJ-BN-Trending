@@ -49,7 +49,7 @@ class AutoHedgeOrchestrator:
 
     def __init__(
         self,
-        db: AsyncSession,
+        db_factory,  # Callable that returns AsyncSession
         margin_service: MarginService = None,
         scheduler: StrategySchedulerService = None,
         margin_calc: MarginCalculatorService = None,
@@ -62,7 +62,7 @@ class AutoHedgeOrchestrator:
         Initialize the orchestrator.
 
         Args:
-            db: Database session
+            db_factory: Callable that creates async database sessions
             margin_service: Service for getting current margin data
             scheduler: Strategy scheduler service
             margin_calc: Margin calculator service
@@ -71,19 +71,25 @@ class AutoHedgeOrchestrator:
             telegram: Telegram notification service
             config: Hedge configuration
         """
-        self.db = db
+        self.db_factory = db_factory  # Store factory, not session
         self.margin_service = margin_service
-        self.scheduler = scheduler or StrategySchedulerService(db)
+        self.scheduler = scheduler
         self.margin_calc = margin_calc or MarginCalculatorService()
-        self.hedge_selector = hedge_selector or HedgeStrikeSelectorService()
-        self.hedge_executor = hedge_executor or HedgeExecutorService(db)
+        self.hedge_selector = hedge_selector
+        self.hedge_executor = hedge_executor
         self.telegram = telegram or telegram_service
         self.config = config or HEDGE_CONFIG
 
         self._is_running = False
         self._session: Optional[DailySession] = None
+        self._session_cache: Optional[dict] = None  # Cached session data to avoid lazy loading
         self._check_interval = 30  # seconds
         self._dry_run = False  # Set to True for paper trading
+
+        # Simulated margin tracking for dry run mode
+        # Tracks the cumulative margin benefit from simulated hedges
+        self._simulated_margin_reduction: float = 0.0
+        self._simulated_hedges: list = []  # Track simulated hedge details
 
     def _now_ist(self) -> datetime:
         """Get current time in IST."""
@@ -105,10 +111,18 @@ class AutoHedgeOrchestrator:
         self._is_running = True
         self._dry_run = dry_run
 
-        # Load or create today's session
+        # Reset simulated margin tracking at start
+        self._simulated_margin_reduction = 0.0
+        self._simulated_hedges = []
+
+        # Load or create today's session (this also populates _session_cache)
         self._session = await self._get_or_create_session()
 
-        if not self._session:
+        # In dry run mode, load existing dry run transactions to initialize simulated margin
+        if dry_run and self._session_cache:
+            await self._load_existing_dry_run_margin()
+
+        if not self._session_cache:
             logger.warning("[ORCHESTRATOR] No session for today, auto-hedge not available")
             await self.telegram.send_system_status(
                 status="No Session",
@@ -116,7 +130,7 @@ class AutoHedgeOrchestrator:
             )
             return
 
-        if not self._session.auto_hedge_enabled:
+        if not self._session_cache.get('auto_hedge_enabled', False):
             logger.info("[ORCHESTRATOR] Auto-hedge disabled for today")
             await self.telegram.send_system_status(
                 status="Disabled",
@@ -128,28 +142,23 @@ class AutoHedgeOrchestrator:
         mode = "DRY RUN" if dry_run else "LIVE"
         await self.telegram.send_system_status(
             status=f"Started ({mode})",
-            index_name=self._session.index_name,
-            num_baskets=self._session.num_baskets,
-            total_budget=float(self._session.total_budget)
+            index_name=self._session_cache['index'],
+            num_baskets=self._session_cache['baskets'],
+            total_budget=self._session_cache['budget']
         )
 
         logger.info(
             f"[ORCHESTRATOR] Started - {mode} mode, "
-            f"index={self._session.index_name}, "
-            f"baskets={self._session.num_baskets}"
+            f"index={self._session_cache['index']}, "
+            f"baskets={self._session_cache['baskets']}"
         )
 
         # Main monitoring loop
         while self._is_running:
             try:
-                # Rollback any stale state before each cycle
-                # This prevents accumulated stale connections in long-running loops
-                await self.db.rollback()
                 await self._check_and_act()
             except Exception as e:
                 logger.error(f"[ORCHESTRATOR] Error in check cycle: {e}")
-                # Clean up on error
-                await self.db.rollback()
                 await self.telegram.send_message(
                     f"❌ *Auto-hedge error:* {str(e)[:100]}"
                 )
@@ -185,11 +194,42 @@ class AutoHedgeOrchestrator:
             logger.warning("[ORCHESTRATOR] Could not get margin data")
             return
 
-        current_util = margin_data['utilization_pct']
-        current_intraday = margin_data['intraday_margin']
-        total_budget = float(self._session.total_budget)
+        real_util = margin_data['utilization_pct']
+        real_intraday = margin_data.get('intraday_margin', 0)
+        total_budget = self._session_cache['budget']
 
-        # Check if entry is imminent
+        # In dry run mode, calculate simulated utilization
+        if self._dry_run and self._simulated_margin_reduction > 0:
+            simulated_intraday = real_intraday - self._simulated_margin_reduction
+            simulated_util = (simulated_intraday / total_budget) * 100 if total_budget > 0 else 0
+            logger.info(
+                f"[ORCHESTRATOR] Check cycle: real_util={real_util:.1f}%, "
+                f"simulated_util={simulated_util:.1f}% "
+                f"(simulated reduction=₹{self._simulated_margin_reduction:,.0f}), "
+                f"intraday=₹{real_intraday:,.0f}"
+            )
+            # Use simulated values for decision making in dry run
+            current_util = simulated_util
+            current_intraday = simulated_intraday
+        else:
+            current_util = real_util
+            current_intraday = real_intraday
+            logger.info(f"[ORCHESTRATOR] Check cycle: util={current_util:.1f}%, intraday=₹{current_intraday:,.0f}")
+
+        # REACTIVE HEDGING: If current utilization is critically high, hedge immediately
+        critical_threshold = self.config.critical_threshold  # e.g. 95%
+        if current_util >= critical_threshold:
+            logger.warning(
+                f"[ORCHESTRATOR] CRITICAL: Utilization {current_util:.1f}% >= {critical_threshold}% threshold!"
+            )
+            await self._handle_critical_utilization(
+                current_util=current_util,
+                current_intraday=current_intraday,
+                total_budget=total_budget
+            )
+            return
+
+        # PROACTIVE HEDGING: Check if entry is imminent
         is_imminent, upcoming = await self.scheduler.is_entry_imminent()
 
         if is_imminent and upcoming:
@@ -222,7 +262,7 @@ class AutoHedgeOrchestrator:
         entry = upcoming.entry
         index = IndexName(entry.index_name)
         expiry_type = ExpiryType(entry.expiry_type)
-        num_baskets = self._session.num_baskets
+        num_baskets = self._session_cache['baskets']
 
         # Evaluate hedge requirement
         requirement = self.margin_calc.evaluate_hedge_requirement(
@@ -277,8 +317,8 @@ class AutoHedgeOrchestrator:
         """Execute hedge buy before strategy entry."""
         index = IndexName(entry.index_name)
         expiry_type = ExpiryType(entry.expiry_type)
-        num_baskets = self._session.num_baskets
-        expiry_date = self._session.expiry_date.isoformat()
+        num_baskets = self._session_cache['baskets']
+        expiry_date = self._session_cache['expiry_date']
 
         # Get current short positions to determine hedge side
         positions = await self._get_positions()
@@ -311,7 +351,7 @@ class AutoHedgeOrchestrator:
             trigger_reason = f"PRE_STRATEGY:{entry.portfolio_name}"
 
             result = await self.hedge_executor.execute_hedge_buy(
-                session_id=self._session.id,
+                session_id=self._session_cache['id'],
                 candidate=hedge,
                 index=index,
                 expiry_date=expiry_date,
@@ -321,9 +361,124 @@ class AutoHedgeOrchestrator:
                 dry_run=self._dry_run
             )
 
-            if not result.success:
+            if result.success:
+                # In dry run mode, track the simulated margin reduction
+                if self._dry_run:
+                    estimated_benefit = hedge.estimated_margin_benefit or selection.total_margin_benefit / len(selection.selected)
+                    self._simulated_margin_reduction += estimated_benefit
+                    self._simulated_hedges.append({
+                        'strike': hedge.strike,
+                        'option_type': hedge.option_type,
+                        'margin_benefit': estimated_benefit,
+                        'timestamp': self._now_ist().isoformat()
+                    })
+                    logger.info(
+                        f"[ORCHESTRATOR] DRY RUN: Added simulated margin reduction ₹{estimated_benefit:,.0f}, "
+                        f"total simulated reduction=₹{self._simulated_margin_reduction:,.0f}"
+                    )
+            else:
                 logger.error(
                     f"[ORCHESTRATOR] Hedge buy failed: {result.error_message}"
+                )
+
+    async def _handle_critical_utilization(
+        self,
+        current_util: float,
+        current_intraday: float,
+        total_budget: float
+    ):
+        """
+        Handle reactive hedging when utilization is critically high.
+
+        This is different from proactive hedging - we hedge immediately
+        to bring utilization down, regardless of upcoming entries.
+        """
+        index = IndexName(self._session_cache['index'])
+        num_baskets = self._session_cache['baskets']
+        expiry_date = self._session_cache['expiry_date']
+
+        # Calculate how much margin reduction we need
+        target_util = self.config.hedge_threshold  # e.g. 85%
+        margin_reduction_needed = current_intraday - (total_budget * target_util / 100)
+
+        if margin_reduction_needed <= 0:
+            logger.info("[ORCHESTRATOR] No margin reduction needed")
+            return
+
+        logger.warning(
+            f"[ORCHESTRATOR] Reactive hedge needed: "
+            f"current={current_util:.1f}%, target={target_util}%, "
+            f"reduction_needed=₹{margin_reduction_needed:,.0f}"
+        )
+
+        # Send alert
+        await self.telegram.send_message(
+            f"🚨 *CRITICAL UTILIZATION: {current_util:.1f}%*\n\n"
+            f"*Target:* {target_util}%\n"
+            f"*Margin reduction needed:* ₹{margin_reduction_needed:,.0f}\n\n"
+            f"{'📝 DRY RUN - Simulating hedge...' if self._dry_run else '⚡ Placing hedge order...'}"
+        )
+
+        # Get current short positions to determine hedge side
+        positions = await self._get_positions()
+        short_positions = [p for p in positions if p.get('quantity', 0) < 0]
+
+        # Select optimal hedges
+        selection = await self.hedge_selector.select_optimal_hedges(
+            index=index,
+            expiry_type=ExpiryType(self._session_cache.get('expiry_type', '2DTE')),
+            margin_reduction_needed=margin_reduction_needed,
+            short_positions=short_positions,
+            num_baskets=num_baskets
+        )
+
+        if not selection or not selection.selected:
+            logger.warning("[ORCHESTRATOR] No suitable hedge found for critical utilization")
+            await self.telegram.send_message(
+                f"⚠️ *No suitable hedge found!*\n\n"
+                f"*Current util:* {current_util:.1f}%\n"
+                f"*Reduction needed:* ₹{margin_reduction_needed:,.0f}\n\n"
+                f"Manual intervention may be required."
+            )
+            return
+
+        # Execute hedge orders
+        for hedge in selection.selected:
+            trigger_reason = f"CRITICAL_UTIL:{current_util:.1f}%"
+
+            result = await self.hedge_executor.execute_hedge_buy(
+                session_id=self._session_cache['id'],
+                candidate=hedge,
+                index=index,
+                expiry_date=expiry_date,
+                num_baskets=num_baskets,
+                trigger_reason=trigger_reason,
+                utilization_before=current_util,
+                dry_run=self._dry_run
+            )
+
+            if result.success:
+                logger.info(
+                    f"[ORCHESTRATOR] Reactive hedge placed: {hedge.strike} {hedge.option_type}"
+                )
+
+                # In dry run mode, track the simulated margin reduction
+                if self._dry_run:
+                    estimated_benefit = hedge.estimated_margin_benefit or selection.total_margin_benefit / len(selection.selected)
+                    self._simulated_margin_reduction += estimated_benefit
+                    self._simulated_hedges.append({
+                        'strike': hedge.strike,
+                        'option_type': hedge.option_type,
+                        'margin_benefit': estimated_benefit,
+                        'timestamp': self._now_ist().isoformat()
+                    })
+                    logger.info(
+                        f"[ORCHESTRATOR] DRY RUN: Added simulated margin reduction ₹{estimated_benefit:,.0f}, "
+                        f"total simulated reduction=₹{self._simulated_margin_reduction:,.0f}"
+                    )
+            else:
+                logger.error(
+                    f"[ORCHESTRATOR] Reactive hedge failed: {result.error_message}"
                 )
 
     async def _check_hedge_exit(self, current_util: float):
@@ -346,7 +501,7 @@ class AutoHedgeOrchestrator:
 
         # Get active hedges
         active_hedges = await self.hedge_executor.get_active_hedges(
-            self._session.id
+            self._session_cache['id']
         )
 
         if not active_hedges:
@@ -362,7 +517,7 @@ class AutoHedgeOrchestrator:
 
         result = await self.hedge_executor.execute_hedge_exit(
             hedge_id=farthest_hedge.id,
-            session_id=self._session.id,
+            session_id=self._session_cache['id'],
             trigger_reason="EXCESS_MARGIN",
             utilization_before=current_util,
             dry_run=self._dry_run
@@ -377,20 +532,88 @@ class AutoHedgeOrchestrator:
         """Get or create today's session."""
         today = self._now_ist().date()
 
-        result = await self.db.execute(
-            select(DailySession)
-            .where(DailySession.session_date == today)
-        )
-        session = result.scalar_one_or_none()
+        async with self.db_factory() as db:
+            result = await db.execute(
+                select(DailySession)
+                .where(DailySession.session_date == today)
+            )
+            session = result.scalar_one_or_none()
 
-        if session:
-            logger.info(f"[ORCHESTRATOR] Loaded session for {today}")
-            return session
+            if session:
+                logger.info(f"[ORCHESTRATOR] Loaded session for {today}")
+                # Cache the session data immediately while we have the db context
+                self._session_cache = {
+                    'id': session.id,
+                    'date': session.session_date.isoformat(),
+                    'index': session.index_name,
+                    'baskets': session.num_baskets,
+                    'budget': float(session.total_budget),
+                    'auto_hedge_enabled': session.auto_hedge_enabled,
+                    'expiry_date': session.expiry_date.isoformat() if session.expiry_date else None,
+                    'expiry_type': session.expiry_type
+                }
+                return session
 
         # No session exists - could create one based on day of week
         # For now, just return None and let the setup API create it
         logger.info(f"[ORCHESTRATOR] No session found for {today}")
         return None
+
+    async def _load_existing_dry_run_margin(self):
+        """
+        Load existing dry run transactions from DB to initialize simulated margin.
+
+        This ensures the simulated margin reduction is accurate even after server restart.
+        """
+        from app.models.hedge_models import HedgeTransaction
+
+        session_id = self._session_cache['id']
+
+        async with self.db_factory() as db:
+            # Get all dry run BUY transactions for this session
+            # Dry run transactions have order_status = 'DRY_RUN'
+            result = await db.execute(
+                select(HedgeTransaction)
+                .where(HedgeTransaction.session_id == session_id)
+                .where(HedgeTransaction.action == 'BUY')
+                .where(HedgeTransaction.order_status == 'DRY_RUN')
+                .order_by(HedgeTransaction.timestamp.desc())
+            )
+            transactions = result.scalars().all()
+
+            if not transactions:
+                logger.info("[ORCHESTRATOR] No existing dry run transactions to load")
+                return
+
+            # Calculate total margin benefit from existing transactions
+            # Each hedge pair (CE + PE) provides estimated margin benefit
+            # We estimate based on number of transactions
+            num_transactions = len(transactions)
+
+            # Estimate margin benefit per hedge (based on selector's calculation)
+            # This is approximate - in production, we'd store actual margin benefit per transaction
+            estimated_benefit_per_hedge = self.margin_calc.estimate_hedge_margin_benefit(
+                IndexName(self._session_cache['index']),
+                ExpiryType(self._session_cache.get('expiry_type', '2DTE')),
+                self._session_cache['baskets']
+            ) / 2  # Divide by 2 because benefit is for a pair (CE + PE)
+
+            total_benefit = num_transactions * estimated_benefit_per_hedge
+            self._simulated_margin_reduction = total_benefit
+
+            # Load last 10 for display
+            for txn in transactions[:10]:
+                self._simulated_hedges.append({
+                    'strike': txn.strike,
+                    'option_type': txn.option_type,
+                    'margin_benefit': estimated_benefit_per_hedge,
+                    'timestamp': txn.timestamp.isoformat() if txn.timestamp else ''
+                })
+
+            logger.info(
+                f"[ORCHESTRATOR] Loaded {num_transactions} existing dry run transactions, "
+                f"simulated margin reduction=₹{self._simulated_margin_reduction:,.0f}"
+            )
 
     async def _get_current_margin(self) -> Optional[dict]:
         """
@@ -440,16 +663,21 @@ class AutoHedgeOrchestrator:
         hedge_required: bool
     ):
         """Log strategy execution tracking."""
-        execution = StrategyExecution(
-            session_id=self._session.id,
-            portfolio_name=portfolio_name,
-            scheduled_entry_time=entry_time,
-            utilization_before=utilization_before,
-            projected_utilization=projected_utilization,
-            hedge_required=hedge_required
-        )
-        self.db.add(execution)
-        await self.db.commit()
+        if not self._session_cache:
+            logger.warning("[ORCHESTRATOR] Cannot log execution - no session cached")
+            return
+
+        async with self.db_factory() as db:
+            execution = StrategyExecution(
+                session_id=self._session_cache['id'],
+                portfolio_name=portfolio_name,
+                scheduled_entry_time=entry_time,
+                utilization_before=utilization_before,
+                projected_utilization=projected_utilization,
+                hedge_required=hedge_required
+            )
+            db.add(execution)
+            await db.commit()
 
     @property
     def is_running(self) -> bool:
@@ -466,21 +694,22 @@ class AutoHedgeOrchestrator:
         next_entry = await self.scheduler.get_next_entry() if self.scheduler else None
         active_hedges = []
 
-        if self._session:
-            active_hedges = await self.hedge_executor.get_active_hedges(
-                self._session.id
-            )
+        # Use cached session data to avoid SQLAlchemy lazy loading issues
+        session_data = None
+        if self._session_cache:
+            session_data = self._session_cache
+            try:
+                active_hedges = await self.hedge_executor.get_active_hedges(
+                    session_data['id']
+                )
+            except Exception as e:
+                logger.warning(f"[ORCHESTRATOR] Could not get active hedges: {e}")
 
-        return {
+        # Build response with simulated margin info for dry run mode
+        response = {
             'is_running': self._is_running,
             'dry_run': self._dry_run,
-            'session': {
-                'date': self._session.session_date.isoformat() if self._session else None,
-                'index': self._session.index_name if self._session else None,
-                'baskets': self._session.num_baskets if self._session else None,
-                'budget': float(self._session.total_budget) if self._session else None,
-                'auto_hedge_enabled': self._session.auto_hedge_enabled if self._session else None
-            } if self._session else None,
+            'session': session_data,
             'active_hedges': [
                 {
                     'id': h.id,
@@ -500,3 +729,13 @@ class AutoHedgeOrchestrator:
             } if next_entry else None,
             'cooldown_remaining': self.hedge_executor.get_cooldown_remaining()
         }
+
+        # Add simulated margin info for dry run mode
+        if self._dry_run:
+            response['simulated_margin'] = {
+                'total_reduction': self._simulated_margin_reduction,
+                'hedge_count': len(self._simulated_hedges),
+                'hedges': self._simulated_hedges[-10:]  # Last 10 simulated hedges
+            }
+
+        return response

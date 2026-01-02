@@ -131,11 +131,17 @@ class HedgeConfig:
     # THRESHOLDS
     # ================================================================
 
-    # Buy hedge if projected utilization exceeds this
-    entry_trigger_pct: float = 95.0
+    # CRITICAL: Trigger immediate reactive hedging if utilization exceeds this
+    critical_threshold: float = 95.0
+
+    # PROACTIVE: Buy hedge if projected utilization exceeds this (before entries)
+    hedge_threshold: float = 90.0
+
+    # Alias for backward compatibility
+    entry_trigger_pct: float = 90.0
 
     # Target utilization after buying hedge
-    entry_target_pct: float = 85.0
+    entry_target_pct: float = 80.0
 
     # Consider exiting hedge if utilization drops below this
     exit_trigger_pct: float = 70.0
