@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.hedge_models import DailySession, ActiveHedge, StrategyExecution
-from app.models.hedge_constants import IndexName, ExpiryType, HEDGE_CONFIG
+from app.models.hedge_constants import IndexName, ExpiryType, HEDGE_CONFIG, LotSizes
 from app.services.strategy_scheduler import StrategySchedulerService, UpcomingEntry
 from app.services.margin_calculator import MarginCalculatorService
 from app.services.hedge_selector import HedgeStrikeSelectorService
@@ -789,7 +789,17 @@ class AutoHedgeOrchestrator:
         self._simulated_margin_reduction += adjusted_benefit
 
         # Track quantity by option type
-        qty = getattr(hedge, 'quantity', 0) or 0
+        # HedgeCandidate has total_lots, HedgeTransaction has quantity
+        if hasattr(hedge, 'quantity') and hedge.quantity:
+            qty = hedge.quantity
+        elif hasattr(hedge, 'total_lots') and hedge.total_lots:
+            # Calculate quantity from lots * lot_size
+            index = IndexName(self._session_cache.get('index', 'NIFTY'))
+            lot_size = LotSizes.get_lot_size(index)
+            qty = hedge.total_lots * lot_size
+        else:
+            qty = 0
+
         if hedge.option_type == 'CE':
             self._simulated_ce_qty += qty
         else:
