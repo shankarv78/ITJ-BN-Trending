@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy import select, func, case
+from sqlalchemy import select, func, case, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -677,6 +677,122 @@ async def create_session(
         auto_hedge_enabled=session.auto_hedge_enabled,
         created_at=session.created_at
     )
+
+
+@router.delete("/session/{session_date}")
+async def delete_session(
+    session_date: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Delete a session and all its related data.
+
+    WARNING: This will delete all hedge transactions and active hedges for this session.
+
+    Args:
+        session_date: Date string in YYYY-MM-DD format
+
+    Returns:
+        Deletion confirmation
+    """
+    try:
+        target_date = datetime.strptime(session_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD")
+
+    # Find the session
+    result = await db.execute(
+        select(DailySession).where(DailySession.session_date == target_date)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session:
+        raise HTTPException(404, f"No session found for {session_date}")
+
+    session_id = session.id
+
+    # Delete related records first (foreign key constraints)
+    # Delete hedge transactions
+    txn_result = await db.execute(
+        delete(HedgeTransaction).where(HedgeTransaction.session_id == session_id)
+    )
+    txn_count = txn_result.rowcount
+
+    # Delete active hedges
+    hedge_result = await db.execute(
+        delete(ActiveHedge).where(ActiveHedge.session_id == session_id)
+    )
+    hedge_count = hedge_result.rowcount
+
+    # Delete strategy executions
+    exec_result = await db.execute(
+        delete(StrategyExecution).where(StrategyExecution.session_id == session_id)
+    )
+    exec_count = exec_result.rowcount
+
+    # Delete the session itself
+    await db.execute(
+        delete(DailySession).where(DailySession.id == session_id)
+    )
+
+    await db.commit()
+
+    logger.info(
+        f"[HEDGE_API] Deleted session {session_date}: "
+        f"{txn_count} transactions, {hedge_count} hedges, {exec_count} executions"
+    )
+
+    return {
+        "success": True,
+        "message": f"Session {session_date} deleted",
+        "deleted": {
+            "transactions": txn_count,
+            "hedges": hedge_count,
+            "executions": exec_count
+        }
+    }
+
+
+@router.get("/sessions", response_model=list[SessionResponse])
+async def list_sessions(
+    limit: int = 30,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    List recent sessions.
+
+    Args:
+        limit: Maximum number of sessions to return (default 30)
+
+    Returns:
+        List of sessions ordered by date descending
+    """
+    result = await db.execute(
+        select(DailySession)
+        .order_by(DailySession.session_date.desc())
+        .limit(limit)
+    )
+    sessions = result.scalars().all()
+
+    return [
+        SessionResponse(
+            id=s.id,
+            session_date=s.session_date,
+            day_of_week=s.day_of_week,
+            index_name=s.index_name,
+            expiry_type=s.expiry_type,
+            expiry_date=s.expiry_date,
+            num_baskets=s.num_baskets,
+            budget_per_basket=float(s.budget_per_basket),
+            total_budget=float(s.total_budget),
+            baseline_margin=float(s.baseline_margin) if s.baseline_margin else None,
+            excluded_margin=float(s.excluded_margin) if s.excluded_margin else None,
+            excluded_margin_breakdown=_parse_json_or_none(s.excluded_margin_breakdown),
+            auto_hedge_enabled=s.auto_hedge_enabled,
+            created_at=s.created_at
+        )
+        for s in sessions
+    ]
 
 
 @router.patch("/session/baseline")
