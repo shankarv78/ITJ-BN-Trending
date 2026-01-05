@@ -369,6 +369,22 @@ class HedgeExecutorService:
 
             order_id = order_response.get('orderid') or order_response.get('order_id')
 
+            # Validate order was actually placed
+            if not order_id:
+                logger.error(
+                    f"[HEDGE_EXECUTOR] Order response missing orderid: {order_response}"
+                )
+                transaction.order_status = "FAILED"
+                transaction.error_message = "Order response missing orderid"
+                await self.db.commit()
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    executed_price=None,
+                    error_message="Order response missing orderid",
+                    transaction_id=transaction.id
+                )
+
             # Update transaction
             transaction.order_id = order_id
             transaction.order_status = "SUCCESS"
@@ -548,6 +564,22 @@ class HedgeExecutorService:
             )
 
             order_id = order_response.get('orderid') or order_response.get('order_id')
+
+            # Validate order was actually placed
+            if not order_id:
+                logger.error(
+                    f"[HEDGE_EXECUTOR] Exit order response missing orderid: {order_response}"
+                )
+                transaction.order_status = "FAILED"
+                transaction.error_message = "Exit order response missing orderid"
+                await self.db.commit()
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    executed_price=None,
+                    error_message="Exit order response missing orderid",
+                    transaction_id=transaction.id
+                )
 
             # Calculate P&L
             pnl = (current_price - hedge.entry_price) * hedge.quantity

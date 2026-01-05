@@ -115,12 +115,39 @@ async def lifespan(app: FastAPI):
 
                 async def get_current_status(self) -> dict:
                     """
-                    Get current margin status using SAME calculation as main margin monitor.
-                    This ensures auto-hedge sees identical utilization %.
+                    Get current margin status using the ACTUAL margin service.
+                    This ensures auto-hedge sees IDENTICAL utilization % as main UI.
+
+                    Uses margin_service.get_current_margin() which includes:
+                    - Baseline subtraction
+                    - Excluded margin subtraction (PM + long-term positions)
                     """
+                    from app.services.margin_service import margin_service
+
+                    try:
+                        # Use the SAME margin service as the main endpoint
+                        # This ensures identical calculation including excluded margin
+                        margin_data = await margin_service.get_current_margin()
+
+                        if margin_data and margin_data.get('success'):
+                            margin = margin_data.get('margin', {})
+                            config = margin_data.get('config', {})
+
+                            return {
+                                'utilization_pct': margin.get('utilization_pct', 0),
+                                'used_margin': margin.get('total_used', 0),
+                                'available': margin.get('available_cash', 0),
+                                'intraday_margin': margin.get('intraday_used', 0),
+                                'total_budget': config.get('total_budget', 15000000.0),
+                                'baseline': margin.get('baseline', 0),
+                                'excluded': margin.get('excluded', 0)
+                            }
+                    except Exception as e:
+                        logger.warning(f"[HEDGE_ADAPTER] Error using margin service: {e}")
+
+                    # Fallback to basic calculation if margin service fails
                     config = await self._get_today_config()
                     if not config:
-                        # Fallback if no config
                         funds = await self.openalgo.get_funds()
                         used_margin = funds.get('used_margin', 0) or funds.get('marginused', 0) or 0
                         return {
@@ -131,13 +158,12 @@ async def lifespan(app: FastAPI):
                             'total_budget': 15000000.0
                         }
 
-                    # Use same calculation as main margin service
+                    # Basic fallback (no excluded margin)
                     funds = await self.openalgo.get_funds()
                     used_margin = funds.get('used_margin', 0) or funds.get('marginused', 0) or 0
                     baseline = config['baseline']
                     budget = config['budget']
-
-                    intraday = used_margin - baseline
+                    intraday = max(0, used_margin - baseline)
                     utilization = (intraday / budget) * 100 if budget > 0 else 0
 
                     return {
@@ -146,7 +172,8 @@ async def lifespan(app: FastAPI):
                         'available': funds.get('available_margin', 0) or funds.get('availablecash', 0),
                         'intraday_margin': intraday,
                         'total_budget': budget,
-                        'baseline': baseline
+                        'baseline': baseline,
+                        'excluded': 0
                     }
 
                 async def get_filtered_positions(self) -> list:
