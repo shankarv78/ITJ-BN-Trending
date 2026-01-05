@@ -225,7 +225,6 @@ class ActionResponse(BaseModel):
     error: Optional[str] = None
     dry_run: bool = False
     simulated_order: Optional[dict] = None  # Details of simulated order in dry run
-    error: Optional[str] = None
 
 
 # ============================================================

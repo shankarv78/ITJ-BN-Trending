@@ -118,9 +118,9 @@ def set_orchestrator(orchestrator: AutoHedgeOrchestrator):
 # Status Endpoints
 # ============================================================
 
-@router.get("/debug")
+@router.get("/debug", dependencies=[Depends(verify_api_key)])
 async def debug_orchestrator():
-    """Debug endpoint to check orchestrator state."""
+    """Debug endpoint to check orchestrator state. Requires API key."""
     orchestrator = get_orchestrator()
     if not orchestrator:
         return {"error": "orchestrator is None"}
@@ -330,9 +330,12 @@ async def reset_dry_run(db: AsyncSession = Depends(get_db)):
     """
     orchestrator = get_orchestrator()
 
-    # Check if in dry run mode
-    if orchestrator and not orchestrator._dry_run:
-        raise HTTPException(400, "Reset only available in dry run mode")
+    # Check if in dry run mode - must have orchestrator AND it must be in dry run
+    if not orchestrator or not orchestrator._dry_run:
+        raise HTTPException(
+            400,
+            "Reset only available when orchestrator is running in dry run mode"
+        )
 
     # Get the current session
     today = datetime.now(IST).date()
