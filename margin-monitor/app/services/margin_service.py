@@ -121,39 +121,31 @@ class MarginService:
 
     async def get_excluded_margin_breakdown(self) -> Dict[str, Any]:
         """
-        Get full excluded margin breakdown from all sources.
+        Get excluded margin breakdown.
 
-        Sources:
-        1. PM trend-following positions (BN, Gold Mini, Silver Mini)
-        2. Long-term positions (expiry > 30 days)
+        Only PM trend-following positions are excluded from intraday calculation.
+        Long-term positions are NOT excluded here because they're already
+        captured in the baseline margin (captured at market open).
 
         Returns:
-            Dict with pm_excluded, long_term_excluded, total, and breakdowns
+            Dict with pm_excluded and total (same as pm_excluded)
         """
-        # Get PM excluded margin
+        # Get PM excluded margin (BN, Gold Mini, Silver Mini trend-following)
         pm_result = await pm_client.get_excluded_margin()
 
-        # Get all positions to find long-term ones
-        positions = await openalgo_service.get_positions()
-        long_term_result = await self._get_long_term_excluded_margin(
-            positions,
-            datetime.now().strftime("%Y-%m-%d")
-        )
-
-        total = pm_result.total_excluded + long_term_result["total_margin"]
+        # NOTE: Long-term positions (expiry > 30 days) are NOT excluded here
+        # because baseline already captures them. Double-subtracting would
+        # cause intraday margin to be underreported.
 
         return {
             "pm_excluded": pm_result.total_excluded,
             "pm_breakdown": pm_result.breakdown,
             "pm_positions": pm_result.positions,
-            "long_term_excluded": long_term_result["total_margin"],
-            "long_term_breakdown": long_term_result["breakdown"],
-            "long_term_positions": long_term_result["positions"],
-            "total_excluded": total,
-            "combined_breakdown": {
-                **pm_result.breakdown,
-                **{f"LT_{k}": v for k, v in long_term_result["breakdown"].items()}
-            }
+            "long_term_excluded": 0.0,  # Not used - baseline handles this
+            "long_term_breakdown": {},
+            "long_term_positions": [],
+            "total_excluded": pm_result.total_excluded,  # Only PM positions
+            "combined_breakdown": pm_result.breakdown,
         }
 
     async def get_current_margin(
