@@ -64,8 +64,31 @@ class SessionResponse(BaseModel):
     budget_per_basket: float
     total_budget: float
     baseline_margin: Optional[float]
+    excluded_margin: Optional[float] = None
+    excluded_margin_breakdown: Optional[dict] = None
     auto_hedge_enabled: bool
     created_at: datetime
+
+
+class BaselineUpdateRequest(BaseModel):
+    """Request to update baseline margin."""
+    baseline_margin: float = Field(..., description="New baseline margin value")
+
+
+class ExcludedMarginUpdateRequest(BaseModel):
+    """Request to refresh excluded margin calculation."""
+    pass  # No params - just triggers recalculation
+
+
+class AutoSessionRequest(BaseModel):
+    """Request to auto-create session for a date."""
+    session_date: Optional[date] = Field(
+        None,
+        description="Date for session (defaults to today)"
+    )
+    num_baskets: int = Field(15, description="Number of baskets")
+    budget_per_basket: float = Field(1000000.0, description="Budget per basket")
+    auto_hedge_enabled: bool = Field(True, description="Enable auto-hedge")
 
 
 # ============================================================
@@ -90,6 +113,39 @@ class NextEntrySchema(BaseModel):
     seconds_until: int
 
 
+class SimulatedHedgeSchema(BaseModel):
+    """Schema for a simulated hedge in dry run mode."""
+    strike: int
+    option_type: str
+    margin_benefit: float
+    timestamp: str
+
+
+class SimulatedMarginSchema(BaseModel):
+    """Schema for simulated margin info in dry run mode."""
+    total_reduction: float = Field(..., description="Total simulated margin reduction in ₹")
+    max_reduction: float = Field(0, description="Maximum allowed reduction (75% floor)")
+    hedge_count: int = Field(..., description="Number of simulated hedges placed")
+    ce_hedge_count: int = Field(0, description="Number of CE hedges")
+    pe_hedge_count: int = Field(0, description="Number of PE hedges")
+    ce_hedge_qty: int = Field(0, description="Total CE hedge quantity")
+    pe_hedge_qty: int = Field(0, description="Total PE hedge quantity")
+    real_utilization_pct: float = Field(0, description="Real margin utilization %")
+    simulated_utilization_pct: float = Field(0, description="Simulated margin utilization % after hedges")
+    hedges: List[SimulatedHedgeSchema] = Field(default=[], description="Recent simulated hedges")
+
+
+class HedgeCapacitySchema(BaseModel):
+    """Schema for hedge capacity limits - prevents over-hedging."""
+    remaining_ce_capacity: int = Field(..., description="Remaining CE qty that can be hedged")
+    remaining_pe_capacity: int = Field(..., description="Remaining PE qty that can be hedged")
+    short_ce_qty: int = Field(..., description="Total CE options sold")
+    short_pe_qty: int = Field(..., description="Total PE options sold")
+    long_ce_qty: int = Field(..., description="Current CE hedges held")
+    long_pe_qty: int = Field(..., description="Current PE hedges held")
+    is_fully_hedged: bool = Field(..., description="True if no more hedges can provide benefit")
+
+
 class HedgeStatusResponse(BaseModel):
     """Response with current auto-hedge status."""
     status: str = Field(..., description="running, stopped, disabled, no_session")
@@ -98,6 +154,8 @@ class HedgeStatusResponse(BaseModel):
     active_hedges: List[ActiveHedgeSchema] = []
     next_entry: Optional[NextEntrySchema] = None
     cooldown_remaining: int = 0
+    simulated_margin: Optional[SimulatedMarginSchema] = Field(None, description="Simulated margin info (dry run only)")
+    hedge_capacity: Optional[HedgeCapacitySchema] = Field(None, description="Current hedge capacity limits")
 
 
 # ============================================================
@@ -143,13 +201,20 @@ class TransactionsResponse(BaseModel):
 
 class ManualHedgeBuyRequest(BaseModel):
     """Request for manual hedge buy."""
-    strike: int
+    index_name: str = Field("NIFTY", description="Index name: NIFTY or SENSEX")
+    expiry_date: str = Field(..., description="Expiry date in YYYY-MM-DD format")
     option_type: str = Field(..., description="CE or PE")
+    strike_offset: int = Field(500, description="OTM distance in points")
+    lots: int = Field(1, ge=1, le=50, description="Number of lots")
+    reason: Optional[str] = Field(None, description="Reason for manual hedge")
+    dry_run: bool = Field(True, description="Simulate without placing real order")
 
 
 class ManualHedgeExitRequest(BaseModel):
     """Request for manual hedge exit."""
     hedge_id: int
+    reason: Optional[str] = Field(None, description="Reason for exit")
+    dry_run: bool = Field(True, description="Simulate without placing real order")
 
 
 class ActionResponse(BaseModel):
@@ -158,6 +223,8 @@ class ActionResponse(BaseModel):
     message: str
     order_id: Optional[str] = None
     error: Optional[str] = None
+    dry_run: bool = False
+    simulated_order: Optional[dict] = None  # Details of simulated order in dry run
 
 
 # ============================================================

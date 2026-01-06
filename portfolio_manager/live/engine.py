@@ -1374,10 +1374,23 @@ class LiveTradingEngine:
         position_id = f"{signal.instrument}_{signal.position}"
 
         if position_id not in self.portfolio.positions:
+            logger.warning(
+                f"[TV-EXIT] Position {position_id} not found in portfolio. "
+                f"Available: {list(self.portfolio.positions.keys())}"
+            )
             return {'status': 'error', 'reason': 'Position not found'}
 
         # Get position details for announcement
         position = self.portfolio.positions[position_id]
+
+        # ISSUE-001 FIX: Check if position is already closing/closed (prevents double exits)
+        # This matches the logic in _execute_pm_initiated_exit()
+        if position.status in ['closing', 'closed']:
+            logger.info(
+                f"[TV-EXIT] {position_id} already {position.status}, skipping "
+                f"(prevents race with PM-initiated exit)"
+            )
+            return {'status': 'skipped', 'reason': f'already_{position.status}'}
 
         # Voice announcement: Pre-trade (EXIT)
         announcer = get_announcer()

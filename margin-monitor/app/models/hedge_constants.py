@@ -15,6 +15,7 @@ from enum import Enum
 class IndexName(str, Enum):
     """Supported indices."""
     NIFTY = "NIFTY"
+    BANKNIFTY = "BANKNIFTY"
     SENSEX = "SENSEX"
 
 
@@ -131,11 +132,17 @@ class HedgeConfig:
     # THRESHOLDS
     # ================================================================
 
-    # Buy hedge if projected utilization exceeds this
-    entry_trigger_pct: float = 95.0
+    # CRITICAL: Trigger immediate reactive hedging if utilization exceeds this
+    critical_threshold: float = 95.0
+
+    # PROACTIVE: Buy hedge if projected utilization exceeds this (before entries)
+    hedge_threshold: float = 90.0
+
+    # Alias for backward compatibility
+    entry_trigger_pct: float = 90.0
 
     # Target utilization after buying hedge
-    entry_target_pct: float = 85.0
+    entry_target_pct: float = 80.0
 
     # Consider exiting hedge if utilization drops below this
     exit_trigger_pct: float = 70.0
@@ -195,12 +202,14 @@ class HedgeConfig:
 @dataclass
 class LotSizes:
     """Lot sizes for supported indices."""
-    NIFTY: int = 75
-    SENSEX: int = 10
+    NIFTY: int = 65
+    BANKNIFTY: int = 30
+    SENSEX: int = 20
 
     # Baskets typically have multiple lots
     NIFTY_LOTS_PER_BASKET: int = 1
-    SENSEX_LOTS_PER_BASKET: int = 10  # 10 lots × 10 = 100 qty per basket
+    BANKNIFTY_LOTS_PER_BASKET: int = 1
+    SENSEX_LOTS_PER_BASKET: int = 5  # 5 lots × 20 = 100 qty per basket
 
     def get_lot_size(self, index: IndexName) -> int:
         """Get lot size for index."""
@@ -224,13 +233,15 @@ class LotSizes:
             symbol: Trading symbol like 'NIFTY02JAN2524000PE' or 'SENSEX02JAN2584000CE'
 
         Returns:
-            Lot size (75 for Nifty, 10 for Sensex)
+            Lot size (65 for Nifty, 30 for BankNifty, 20 for Sensex)
         """
         symbol_upper = symbol.upper()
         if symbol_upper.startswith("SENSEX"):
             return self.SENSEX
+        elif symbol_upper.startswith("BANKNIFTY"):
+            return self.BANKNIFTY
         else:
-            # Default to NIFTY lot size (75) for NIFTY and any unknown symbols
+            # Default to NIFTY lot size (65) for NIFTY and any unknown symbols
             return self.NIFTY
 
 
@@ -240,6 +251,7 @@ class LotSizes:
 
 INDEX_TO_EXCHANGE = {
     IndexName.NIFTY: "NFO",
+    IndexName.BANKNIFTY: "NFO",
     IndexName.SENSEX: "BFO"
 }
 

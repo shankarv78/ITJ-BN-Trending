@@ -99,9 +99,10 @@ class HedgeStrikeSelectorService:
             Current spot price
         """
         # Map index to spot symbol and exchange
+        # OpenAlgo requires NSE_INDEX exchange for index quotes
         spot_config = {
-            IndexName.NIFTY: {"symbol": "NIFTY 50", "exchange": "NSE"},
-            IndexName.SENSEX: {"symbol": "SENSEX", "exchange": "BSE"}
+            IndexName.NIFTY: {"symbol": "NIFTY", "exchange": "NSE_INDEX"},
+            IndexName.SENSEX: {"symbol": "SENSEX", "exchange": "BSE_INDEX"}
         }
         config = spot_config.get(index, spot_config[IndexName.NIFTY])
 
@@ -118,30 +119,33 @@ class HedgeStrikeSelectorService:
         except Exception as e:
             logger.warning(f"[HEDGE_SELECTOR] Quotes API failed for {index.value}: {e}")
 
-        # Fallback: Infer from positions
+        # Fallback: Infer from SHORT positions only (sold positions)
+        # CRITICAL: Do NOT use LONG positions (hedges) as they may be at very
+        # different strikes and would skew the spot estimate!
         try:
             positions = await self.openalgo.get_positions()
             if positions:
-                # Find positions for this index
-                index_positions = [
+                # Find SHORT positions for this index only (quantity < 0)
+                index_short_positions = [
                     p for p in positions
-                    if index.value in p['symbol'].upper()
+                    if index.value in p['symbol'].upper() and p.get('quantity', 0) < 0
                 ]
 
-                if index_positions:
+                if index_short_positions:
                     # Parse strike from symbol (e.g., NIFTY30DEC2525000PE -> 25000)
-                    from app.utils.symbol_parser import parse_option_symbol
+                    from app.utils.symbol_parser import parse_symbol
 
                     strikes = []
-                    for pos in index_positions:
-                        parsed = parse_option_symbol(pos['symbol'])
-                        if parsed and 'strike_price' in parsed:
-                            strikes.append(parsed['strike_price'])
+                    for pos in index_short_positions:
+                        parsed = parse_symbol(pos['symbol'])
+                        if parsed and parsed.strike:
+                            strikes.append(parsed.strike)
 
                     if strikes:
                         spot = sum(strikes) / len(strikes)
                         logger.info(
-                            f"[HEDGE_SELECTOR] Inferred {index.value} spot from positions: {spot}"
+                            f"[HEDGE_SELECTOR] Inferred {index.value} spot from {len(strikes)} "
+                            f"SHORT positions: {spot:.0f}"
                         )
                         return spot
         except Exception as e:
@@ -415,7 +419,9 @@ class HedgeStrikeSelectorService:
         expiry_type: ExpiryType,
         margin_reduction_needed: float,
         short_positions: List[Dict[str, Any]],
-        num_baskets: int
+        num_baskets: int,
+        hedge_capacity: Optional[Dict[str, Any]] = None,
+        allocation_mode: str = 'proportional'  # 'proportional' or 'equal'
     ) -> HedgeSelection:
         """
         Select optimal hedges to achieve required margin reduction with minimum cost.
@@ -425,24 +431,55 @@ class HedgeStrikeSelectorService:
         2. Sort by MBPR (highest first)
         3. Select hedges until reduction target is met
 
+        IMPORTANT: Respects hedge capacity limits - buying more hedges than sold qty
+        provides NO margin benefit (just adds naked long premium cost).
+
         Args:
             index: NIFTY or SENSEX
             expiry_type: 0DTE, 1DTE, or 2DTE
             margin_reduction_needed: Target margin reduction in INR
             short_positions: Current short positions (to determine which sides need hedging)
             num_baskets: Number of baskets
+            hedge_capacity: Optional dict with remaining_ce_capacity/remaining_pe_capacity
+            allocation_mode: 'proportional' (based on short qty) or 'equal' (50/50)
 
         Returns:
             HedgeSelection with selected candidates
         """
-        # Determine which sides need hedging based on short positions
-        ce_shorts = sum(1 for p in short_positions if 'CE' in p.get('symbol', '').upper())
-        pe_shorts = sum(1 for p in short_positions if 'PE' in p.get('symbol', '').upper())
+        # Calculate short QUANTITIES (not just position count) for proportional hedging
+        ce_short_qty = sum(
+            abs(p.get('quantity', 0)) for p in short_positions
+            if 'CE' in p.get('symbol', '').upper()
+        )
+        pe_short_qty = sum(
+            abs(p.get('quantity', 0)) for p in short_positions
+            if 'PE' in p.get('symbol', '').upper()
+        )
+
+        total_short_qty = ce_short_qty + pe_short_qty
+
+        # Determine allocation ratio based on mode
+        if allocation_mode == 'equal' or total_short_qty == 0:
+            # Equal allocation for proactive hedging (before strategy entry)
+            ce_ratio = 0.5
+            pe_ratio = 0.5
+            logger.info(
+                f"[HEDGE_SELECTOR] EQUAL allocation mode: CE={ce_short_qty}, PE={pe_short_qty}, "
+                f"using 50%:50% split"
+            )
+        else:
+            # Proportional allocation for reactive hedging (critical utilization)
+            ce_ratio = ce_short_qty / total_short_qty
+            pe_ratio = pe_short_qty / total_short_qty
+            logger.info(
+                f"[HEDGE_SELECTOR] PROPORTIONAL allocation: CE={ce_short_qty}, PE={pe_short_qty}, "
+                f"ratio CE:PE = {ce_ratio:.1%}:{pe_ratio:.1%}"
+            )
 
         option_types = []
-        if ce_shorts > 0:
+        if ce_short_qty > 0:
             option_types.append('CE')
-        if pe_shorts > 0:
+        if pe_short_qty > 0:
             option_types.append('PE')
 
         if not option_types:
@@ -455,6 +492,43 @@ class HedgeStrikeSelectorService:
                 margin_reduction_needed=margin_reduction_needed,
                 fully_covered=False
             )
+
+        # Check if we're at capacity (hedge qty already >= sold qty)
+        if hedge_capacity:
+            if hedge_capacity.get('is_fully_hedged'):
+                logger.warning(
+                    "[HEDGE_SELECTOR] Fully hedged! "
+                    f"CE: {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
+                    f"PE: {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']} - "
+                    "no additional hedge benefit possible"
+                )
+                return HedgeSelection(
+                    candidates=[],
+                    selected=[],
+                    total_cost=0,
+                    total_margin_benefit=0,
+                    margin_reduction_needed=margin_reduction_needed,
+                    fully_covered=False
+                )
+
+            # Filter out option types at capacity
+            if hedge_capacity.get('remaining_ce_capacity', 0) == 0 and 'CE' in option_types:
+                logger.info("[HEDGE_SELECTOR] CE at capacity, skipping CE hedges")
+                option_types.remove('CE')
+            if hedge_capacity.get('remaining_pe_capacity', 0) == 0 and 'PE' in option_types:
+                logger.info("[HEDGE_SELECTOR] PE at capacity, skipping PE hedges")
+                option_types.remove('PE')
+
+            if not option_types:
+                logger.warning("[HEDGE_SELECTOR] Both CE and PE at hedge capacity")
+                return HedgeSelection(
+                    candidates=[],
+                    selected=[],
+                    total_cost=0,
+                    total_margin_benefit=0,
+                    margin_reduction_needed=margin_reduction_needed,
+                    fully_covered=False
+                )
 
         # Find candidates
         candidates = await self.find_hedge_candidates(
@@ -475,22 +549,66 @@ class HedgeStrikeSelectorService:
                 fully_covered=False
             )
 
-        # Greedy selection: pick best MBPR until reduction achieved
+        # Proportional selection: allocate hedges based on short qty ratio
+        # If CE:PE ratio is 25%:75%, allocate margin reduction budget accordingly
         selected: List[HedgeCandidate] = []
         total_benefit = 0.0
         total_cost = 0.0
-        selected_types: set = set()
 
+        # Calculate target benefit per side (proportional to exposure)
+        ce_target = margin_reduction_needed * ce_ratio if 'CE' in option_types else 0
+        pe_target = margin_reduction_needed * pe_ratio if 'PE' in option_types else 0
+
+        ce_benefit = 0.0
+        pe_benefit = 0.0
+
+        # Track cumulative quantity per side to respect capacity limits
+        # CRITICAL: Hedge qty must NEVER exceed sold qty - no margin benefit beyond that
+        lot_size = self.lot_sizes.get_lot_size(index)
+        ce_qty_selected = 0
+        pe_qty_selected = 0
+        ce_capacity = hedge_capacity.get('remaining_ce_capacity', float('inf')) if hedge_capacity else float('inf')
+        pe_capacity = hedge_capacity.get('remaining_pe_capacity', float('inf')) if hedge_capacity else float('inf')
+
+        logger.info(
+            f"[HEDGE_SELECTOR] Proportional targets: CE=₹{ce_target:,.0f} ({ce_ratio:.0%}), "
+            f"PE=₹{pe_target:,.0f} ({pe_ratio:.0%}), "
+            f"CE capacity={ce_capacity}, PE capacity={pe_capacity}"
+        )
+
+        # Sort candidates by MBPR and select proportionally
         for candidate in candidates:
             if total_benefit >= margin_reduction_needed:
                 break
 
-            # Only one hedge per side (CE or PE)
-            if candidate.option_type in selected_types:
-                continue
+            opt_type = candidate.option_type
+            candidate_qty = candidate.total_lots * lot_size
+
+            # Check if this side still needs more hedges AND has capacity
+            if opt_type == 'CE':
+                if ce_benefit >= ce_target:
+                    continue  # CE already has enough benefit
+                if ce_qty_selected + candidate_qty > ce_capacity:
+                    logger.info(
+                        f"[HEDGE_SELECTOR] Skipping CE {candidate.strike} - "
+                        f"would exceed capacity ({ce_qty_selected + candidate_qty} > {ce_capacity})"
+                    )
+                    continue  # Would exceed CE capacity
+                ce_benefit += candidate.estimated_margin_benefit
+                ce_qty_selected += candidate_qty
+            else:  # PE
+                if pe_benefit >= pe_target:
+                    continue  # PE already has enough benefit
+                if pe_qty_selected + candidate_qty > pe_capacity:
+                    logger.info(
+                        f"[HEDGE_SELECTOR] Skipping PE {candidate.strike} - "
+                        f"would exceed capacity ({pe_qty_selected + candidate_qty} > {pe_capacity})"
+                    )
+                    continue  # Would exceed PE capacity
+                pe_benefit += candidate.estimated_margin_benefit
+                pe_qty_selected += candidate_qty
 
             selected.append(candidate)
-            selected_types.add(candidate.option_type)
             total_benefit += candidate.estimated_margin_benefit
             total_cost += candidate.total_cost
 

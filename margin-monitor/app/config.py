@@ -25,8 +25,8 @@ class Settings(BaseSettings):
 
     # Trading Defaults
     default_budget_per_basket: float = 1000000.0  # ₹10L per basket
-    lot_size_nifty: int = 75
-    lot_size_sensex: int = 10
+    lot_size_nifty: int = 65
+    lot_size_sensex: int = 20
 
     # Scheduler
     baseline_capture_time: str = "09:15:15"
@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     hedge_cooldown_seconds: int = 120        # Min time between actions
 
     # Auto-hedge toggle (can be disabled globally)
-    auto_hedge_enabled: bool = True
+    auto_hedge_enabled: bool = False  # Disabled by default, enable via AUTO_HEDGE_ENABLED=true
+    auto_hedge_dry_run: bool = True   # Dry run mode (no real orders) by default
 
     @property
     def cors_origins_list(self) -> List[str]:
