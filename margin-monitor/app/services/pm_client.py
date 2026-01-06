@@ -39,11 +39,11 @@ class ExcludedMarginResult:
 
 
 # Approximate margin per lot for trend-following instruments
-# These are estimates based on typical SPAN margin requirements
+# These are estimates based on actual SPAN margin requirements (Jan 2026)
 MARGIN_PER_LOT = {
     "BANK_NIFTY": 130000,    # ~₹1.3L per lot for BN futures/synthetic
-    "GOLD_MINI": 25000,      # ~₹25K per lot for Gold Mini
-    "SILVER_MINI": 35000,    # ~₹35K per lot for Silver Mini
+    "GOLD_MINI": 105000,     # ~₹1.05L per lot for Gold Mini futures
+    "SILVER_MINI": 385000,   # ~₹3.85L per lot for Silver Mini futures (verified Jan 2026)
     "NIFTY": 100000,         # ~₹1L per lot for Nifty futures/synthetic
 }
 
