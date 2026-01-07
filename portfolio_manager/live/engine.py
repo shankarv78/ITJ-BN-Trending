@@ -2344,19 +2344,15 @@ class LiveTradingEngine:
         if self.db_manager:
             self.db_manager.save_position(position)
 
-        # Voice announcement
+        # Get announcer for later use (but don't announce yet - execute first!)
         announcer = get_announcer()
-        if announcer:
-            announcer.announce_error(
-                f"{instrument} PM stop hit for {position_id}. Executing exit.",
-                error_type="pm_stop"
-            )
 
         logger.info(
             f"[PM-EXIT] Executing exit for {position_id}: "
             f"{position.lots} lots @ ₹{exit_price:,.2f}, reason={reason}"
         )
 
+        # EXECUTE ORDER FIRST - don't delay for voice announcement
         # Route to appropriate executor based on instrument
         if instrument == "BANK_NIFTY":
             # BANK_NIFTY uses synthetic futures (2-leg options)
@@ -2364,6 +2360,14 @@ class LiveTradingEngine:
         else:
             # MCX futures (Gold, Silver, Copper) - simple exit
             result = self._execute_pm_exit_mcx(position, exit_price)
+
+        # Voice announcement AFTER order is placed (non-blocking now)
+        # This ensures order execution is not delayed by voice playback
+        if announcer:
+            announcer.announce_error(
+                f"{instrument} PM stop hit for {position_id}. Exit order placed.",
+                error_type="pm_stop"
+            )
 
         if result.get('status') == 'success':
             # Update position as closed
