@@ -162,7 +162,8 @@ class HedgeStrikeSelectorService:
         expiry_type: ExpiryType,
         option_types: List[str],  # ['CE', 'PE'] or ['CE'] or ['PE']
         num_baskets: int,
-        spot_price: float = None
+        spot_price: float = None,
+        sold_strikes: Optional[Dict[str, List[int]]] = None  # {'CE': [84200, 84300], 'PE': [84300]}
     ) -> List[HedgeCandidate]:
         """
         Find all valid hedge strike candidates.
@@ -170,6 +171,7 @@ class HedgeStrikeSelectorService:
         Filters candidates based on:
         - Premium range (min_premium to max_premium)
         - OTM distance (min_otm_distance to max_otm_distance)
+        - NOT at sold strike prices (cannot buy hedge at same strike as short)
 
         Uses option chain API for real LTPs when available,
         falls back to estimation model if API unavailable.
@@ -180,6 +182,7 @@ class HedgeStrikeSelectorService:
             option_types: List of option types to consider
             num_baskets: Number of baskets
             spot_price: Optional spot price (fetched if not provided)
+            sold_strikes: Dict of sold strikes per option type to exclude
 
         Returns:
             List of HedgeCandidate sorted by MBPR (highest first)
@@ -239,6 +242,15 @@ class HedgeStrikeSelectorService:
             end_strike = ((end_strike // strike_step) + 1) * strike_step
 
             for strike in range(start_strike, end_strike, strike_step):
+                # Skip if this strike is already sold (cannot buy hedge at sold strike)
+                if sold_strikes:
+                    sold_list = sold_strikes.get(opt_type, [])
+                    if strike in sold_list:
+                        logger.debug(
+                            f"[HEDGE_SELECTOR] Skipping {strike} {opt_type} - already sold"
+                        )
+                        continue
+
                 # Calculate OTM distance
                 if opt_type == 'CE':
                     otm_distance = strike - int(spot_price)
@@ -530,12 +542,30 @@ class HedgeStrikeSelectorService:
                     fully_covered=False
                 )
 
-        # Find candidates
+        # Extract sold strikes from short positions to exclude from hedge candidates
+        # Cannot buy hedge at same strike as sold position
+        sold_strikes: Dict[str, List[int]] = {'CE': [], 'PE': []}
+        from app.utils.symbol_parser import parse_symbol
+        for pos in short_positions:
+            symbol = pos.get('symbol', '')
+            parsed = parse_symbol(symbol)
+            if parsed and parsed.strike:
+                opt_type = 'CE' if 'CE' in symbol.upper() else 'PE'
+                if parsed.strike not in sold_strikes[opt_type]:
+                    sold_strikes[opt_type].append(parsed.strike)
+
+        if sold_strikes['CE'] or sold_strikes['PE']:
+            logger.info(
+                f"[HEDGE_SELECTOR] Excluding sold strikes: CE={sold_strikes['CE']}, PE={sold_strikes['PE']}"
+            )
+
+        # Find candidates (excluding sold strikes)
         candidates = await self.find_hedge_candidates(
             index=index,
             expiry_type=expiry_type,
             option_types=option_types,
-            num_baskets=num_baskets
+            num_baskets=num_baskets,
+            sold_strikes=sold_strikes
         )
 
         if not candidates:
@@ -588,23 +618,71 @@ class HedgeStrikeSelectorService:
             if opt_type == 'CE':
                 if ce_benefit >= ce_target:
                     continue  # CE already has enough benefit
-                if ce_qty_selected + candidate_qty > ce_capacity:
-                    logger.info(
-                        f"[HEDGE_SELECTOR] Skipping CE {candidate.strike} - "
-                        f"would exceed capacity ({ce_qty_selected + candidate_qty} > {ce_capacity})"
+                remaining_ce = ce_capacity - ce_qty_selected
+                if remaining_ce <= 0:
+                    continue  # No CE capacity left
+
+                # Scale down candidate if it exceeds remaining capacity
+                if candidate_qty > remaining_ce:
+                    scale_factor = remaining_ce / candidate_qty
+                    scaled_lots = int(remaining_ce / lot_size)
+                    if scaled_lots <= 0:
+                        continue  # Can't even fit 1 lot
+
+                    # Create scaled candidate
+                    scaled_candidate = HedgeCandidate(
+                        strike=candidate.strike,
+                        option_type=candidate.option_type,
+                        ltp=candidate.ltp,
+                        otm_distance=candidate.otm_distance,
+                        estimated_margin_benefit=candidate.estimated_margin_benefit * scale_factor,
+                        cost_per_lot=candidate.cost_per_lot,
+                        total_cost=candidate.cost_per_lot * scaled_lots,
+                        total_lots=scaled_lots,
+                        mbpr=candidate.mbpr  # MBPR stays the same
                     )
-                    continue  # Would exceed CE capacity
+                    logger.info(
+                        f"[HEDGE_SELECTOR] Scaling CE {candidate.strike} from {candidate.total_lots} "
+                        f"to {scaled_lots} lots (capacity={remaining_ce})"
+                    )
+                    candidate = scaled_candidate
+                    candidate_qty = scaled_lots * lot_size
+
                 ce_benefit += candidate.estimated_margin_benefit
                 ce_qty_selected += candidate_qty
             else:  # PE
                 if pe_benefit >= pe_target:
                     continue  # PE already has enough benefit
-                if pe_qty_selected + candidate_qty > pe_capacity:
-                    logger.info(
-                        f"[HEDGE_SELECTOR] Skipping PE {candidate.strike} - "
-                        f"would exceed capacity ({pe_qty_selected + candidate_qty} > {pe_capacity})"
+                remaining_pe = pe_capacity - pe_qty_selected
+                if remaining_pe <= 0:
+                    continue  # No PE capacity left
+
+                # Scale down candidate if it exceeds remaining capacity
+                if candidate_qty > remaining_pe:
+                    scale_factor = remaining_pe / candidate_qty
+                    scaled_lots = int(remaining_pe / lot_size)
+                    if scaled_lots <= 0:
+                        continue  # Can't even fit 1 lot
+
+                    # Create scaled candidate
+                    scaled_candidate = HedgeCandidate(
+                        strike=candidate.strike,
+                        option_type=candidate.option_type,
+                        ltp=candidate.ltp,
+                        otm_distance=candidate.otm_distance,
+                        estimated_margin_benefit=candidate.estimated_margin_benefit * scale_factor,
+                        cost_per_lot=candidate.cost_per_lot,
+                        total_cost=candidate.cost_per_lot * scaled_lots,
+                        total_lots=scaled_lots,
+                        mbpr=candidate.mbpr  # MBPR stays the same
                     )
-                    continue  # Would exceed PE capacity
+                    logger.info(
+                        f"[HEDGE_SELECTOR] Scaling PE {candidate.strike} from {candidate.total_lots} "
+                        f"to {scaled_lots} lots (capacity={remaining_pe})"
+                    )
+                    candidate = scaled_candidate
+                    candidate_qty = scaled_lots * lot_size
+
                 pe_benefit += candidate.estimated_margin_benefit
                 pe_qty_selected += candidate_qty
 

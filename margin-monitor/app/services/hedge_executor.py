@@ -280,9 +280,9 @@ class HedgeExecutorService:
             )
 
         # Build order details
+        # Use candidate.total_lots which may be scaled down for capacity
         lot_size = self.lot_sizes.get_lot_size(index)
-        lots_per_basket = self.lot_sizes.get_lots_per_basket(index)
-        total_lots = lots_per_basket * num_baskets
+        total_lots = candidate.total_lots
         quantity = total_lots * lot_size
 
         symbol = self._build_symbol(
