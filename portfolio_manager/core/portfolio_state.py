@@ -286,6 +286,18 @@ class PortfolioStateManager:
         # Update closed equity
         self.closed_equity += pnl
 
+        # Record P&L in equity ledger (single source of truth for equity)
+        if self.db_manager:
+            try:
+                self.db_manager.record_trading_pnl(
+                    position_id=position_id,
+                    instrument=pos.instrument,
+                    pnl=pnl
+                )
+            except Exception as e:
+                logger.error(f"Failed to record trading P&L in ledger: {e}")
+                # Continue even if ledger recording fails - don't break the trade
+
         # Save portfolio state to database if db_manager available
         if self.db_manager:
             state = self.get_current_state(exit_time)
