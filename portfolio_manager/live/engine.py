@@ -2361,14 +2361,6 @@ class LiveTradingEngine:
             # MCX futures (Gold, Silver, Copper) - simple exit
             result = self._execute_pm_exit_mcx(position, exit_price)
 
-        # Voice announcement AFTER order is placed (non-blocking now)
-        # This ensures order execution is not delayed by voice playback
-        if announcer:
-            announcer.announce_error(
-                f"{instrument} PM stop hit for {position_id}. Exit order placed.",
-                error_type="pm_stop"
-            )
-
         if result.get('status') == 'success':
             # Update position as closed
             actual_exit_price = result.get('exit_price', exit_price)
@@ -2383,8 +2375,14 @@ class LiveTradingEngine:
             if position.is_base_position and instrument in self.base_positions:
                 del self.base_positions[instrument]
 
-            # Voice announcement for successful exit
+            # Voice announcement for successful exit (only after confirmed success)
             if announcer:
+                # First announce the stop hit and order placement
+                announcer.announce_error(
+                    f"{instrument} PM stop hit for {position_id}. Exit order placed successfully.",
+                    error_type="pm_stop"
+                )
+                # Then announce the trade details
                 announcer.announce_trade_executed(
                     instrument=instrument,
                     position=position_id.split('_')[-1] if '_' in position_id else 'Long_1',
