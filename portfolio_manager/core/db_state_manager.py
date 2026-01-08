@@ -1058,7 +1058,7 @@ class DatabaseStateManager:
 
         Returns:
             Dictionary with deposit_count, total_deposits, withdraw_count,
-            total_withdrawals, net_capital_change
+            total_withdrawals, trading_pnl_count, total_trading_pnl, net_capital_change
         """
         with self.get_connection() as conn:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -1071,6 +1071,8 @@ class DatabaseStateManager:
                     'total_deposits': float(row['total_deposits'] or 0),
                     'withdraw_count': row['withdraw_count'],
                     'total_withdrawals': float(row['total_withdrawals'] or 0),
+                    'trading_pnl_count': row['trading_pnl_count'],
+                    'total_trading_pnl': float(row['total_trading_pnl'] or 0),
                     'net_capital_change': float(row['net_capital_change'] or 0),
                     'first_transaction': row['first_transaction'].isoformat() if row['first_transaction'] else None,
                     'last_transaction': row['last_transaction'].isoformat() if row['last_transaction'] else None
@@ -1081,6 +1083,8 @@ class DatabaseStateManager:
                 'total_deposits': 0,
                 'withdraw_count': 0,
                 'total_withdrawals': 0,
+                'trading_pnl_count': 0,
+                'total_trading_pnl': 0,
                 'net_capital_change': 0,
                 'first_transaction': None,
                 'last_transaction': None
