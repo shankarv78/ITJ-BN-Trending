@@ -41,6 +41,15 @@ class ConditionValidationResult:
     reason: Optional[str] = None
     signal_age_seconds: Optional[float] = None
 
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for audit trail"""
+        return {
+            "is_valid": self.is_valid,
+            "severity": self.severity.value if isinstance(self.severity, ValidationSeverity) else self.severity,
+            "reason": self.reason,
+            "signal_age_seconds": self.signal_age_seconds
+        }
+
 
 @dataclass
 class ExecutionValidationResult:
@@ -50,6 +59,16 @@ class ExecutionValidationResult:
     divergence_pct: Optional[float] = None
     risk_increase_pct: Optional[float] = None
     direction: Optional[str] = None  # "favorable" or "unfavorable"
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for audit trail"""
+        return {
+            "is_valid": self.is_valid,
+            "reason": self.reason,
+            "divergence_pct": self.divergence_pct,
+            "risk_increase_pct": self.risk_increase_pct,
+            "direction": self.direction
+        }
 
 
 class SignalValidator:
@@ -558,3 +577,30 @@ class SignalValidator:
             return base_threshold * 0.5  # Halve threshold for delayed signals
 
         return base_threshold
+
+    @staticmethod
+    def create_validation_result_for_audit(
+        condition_result: ConditionValidationResult,
+        execution_result: Optional[ExecutionValidationResult] = None
+    ) -> Dict:
+        """
+        Create a combined validation result dictionary for the audit trail.
+
+        Combines condition and execution validation results into a single
+        dictionary suitable for storing in signal_audit.validation_result JSONB.
+
+        Args:
+            condition_result: Result from validate_conditions_with_signal_price()
+            execution_result: Optional result from validate_execution_price()
+
+        Returns:
+            Dictionary with condition_validation and execution_validation keys
+        """
+        result = {
+            "condition_validation": condition_result.to_dict()
+        }
+
+        if execution_result is not None:
+            result["execution_validation"] = execution_result.to_dict()
+
+        return result
