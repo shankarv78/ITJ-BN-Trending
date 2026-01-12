@@ -165,12 +165,12 @@ def update_trailing_stop(self, position, current_price, current_atr):
     initial_risk = position.entry_price - position.initial_stop
     current_profit = current_price - position.entry_price
     r_multiple = current_profit / initial_risk if initial_risk > 0 else 0
-    
+
     # MINERVINI RULE: Move to breakeven at 2R
     if r_multiple >= 2.0 and position.current_stop < position.entry_price:
         position.current_stop = position.entry_price
         logger.info(f"🎯 {position.position_id} moved to BREAKEVEN at 2R")
-    
+
     # Continue with ATR trailing...
 ```
 
@@ -224,5 +224,3 @@ def update_trailing_stop(self, position, current_price, current_atr):
 
 *Last Updated: December 29, 2025*
 *Based on: position_sizer.py, stop_manager.py, config.py*
-
-

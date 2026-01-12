@@ -11,7 +11,7 @@ The main coordination service that:
 
 import logging
 import asyncio
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from typing import Optional
 
 import pytz
@@ -88,7 +88,9 @@ class AutoHedgeOrchestrator:
         self._is_running = False
         self._session: Optional[DailySession] = None
         self._session_cache: Optional[dict] = None  # Cached session data to avoid lazy loading
-        self._check_interval = 30  # seconds
+        self._poll_interval = 30  # Lightweight time check every 30 seconds
+        self._last_full_check: Optional[datetime] = None
+        self._full_check_interval = 300  # Full margin check every 5 mins (for excess hedges)
         self._dry_run = False  # Set to True for paper trading
 
         # Simulated margin tracking for dry run mode
@@ -97,6 +99,11 @@ class AutoHedgeOrchestrator:
         self._simulated_hedges: list = []  # Track simulated hedge details
         self._simulated_ce_qty: int = 0  # Track simulated CE hedge quantity
         self._simulated_pe_qty: int = 0  # Track simulated PE hedge quantity
+
+        # Post-entry reactive check tracking
+        # Maps entry_time -> scheduled_check_time (entry_time + 60s)
+        self._pending_post_entry_checks: dict = {}
+        self._post_entry_delay_seconds: int = 60  # Check 1 minute after entry
 
     def _now_ist(self) -> datetime:
         """Get current time in IST."""
@@ -162,7 +169,7 @@ class AutoHedgeOrchestrator:
             f"baskets={self._session_cache['baskets']}"
         )
 
-        # Main monitoring loop
+        # Main monitoring loop - lightweight 30s poll
         while self._is_running:
             try:
                 await self._check_and_act()
@@ -172,7 +179,7 @@ class AutoHedgeOrchestrator:
                     f"❌ *Auto-hedge error:* {str(e)[:100]}"
                 )
             finally:
-                await asyncio.sleep(self._check_interval)
+                await asyncio.sleep(self._poll_interval)  # 30 seconds
 
     async def stop(self):
         """Stop the auto-hedge monitoring loop."""
@@ -235,14 +242,14 @@ class AutoHedgeOrchestrator:
 
     async def _check_and_act(self):
         """
-        Main check cycle - called every 30 seconds.
+        Main check cycle - lightweight 30-second poll.
 
-        1. Skip if outside market hours
-        2. Check if auto-hedge is still enabled (refresh from DB)
-        3. Get current margin status
-        4. Check if entry is imminent
-        5. If yes, evaluate if hedge is needed
-        6. If no imminent entry, check if hedges should be exited
+        Only fetches margin data (API calls) when:
+        1. Entry is imminent (within 5 mins) - proactive hedging
+        2. Post-entry check is due (1 min after entry) - reactive check
+        3. Full periodic check (every 5 mins) - excess hedges, critical util
+
+        This reduces API calls from every 30s to only when needed.
         """
         # Only run during market hours
         if not self._is_market_hours():
@@ -251,9 +258,41 @@ class AutoHedgeOrchestrator:
         if not self._session:
             return
 
+        now = self._now_ist()
+        total_budget = self._session_cache['budget']
+
+        # Determine what checks are needed this cycle
+        needs_margin_check = False
+        check_reasons = []
+
+        # 1. Check if any post-entry checks are due (1 min after entry)
+        has_pending_post_entry = self._has_pending_post_entry_checks(now)
+        if has_pending_post_entry:
+            needs_margin_check = True
+            check_reasons.append("post-entry")
+
+        # 2. Check if entry is imminent (within lookahead window)
+        is_imminent, upcoming = await self.scheduler.is_entry_imminent()
+        if is_imminent and upcoming:
+            needs_margin_check = True
+            check_reasons.append(f"pre-entry:{upcoming.entry.portfolio_name}")
+
+        # 3. Check if it's time for a full periodic check (every 5 mins)
+        needs_periodic = self._needs_periodic_check(now)
+        if needs_periodic:
+            needs_margin_check = True
+            check_reasons.append("periodic")
+
+        # If no checks needed, just log and return (lightweight poll)
+        if not needs_margin_check:
+            # Silent poll - no logging to reduce noise
+            return
+
         # Re-check if auto-hedge is still enabled (user may have toggled off)
         if not await self._is_auto_hedge_enabled():
             return
+
+        logger.info(f"[ORCHESTRATOR] Running checks: {', '.join(check_reasons)}")
 
         # In dry run mode, sync hedge quantities from DB to ensure accuracy
         # This handles cases where in-memory tracking gets out of sync (e.g., restart)
@@ -268,7 +307,7 @@ class AutoHedgeOrchestrator:
                 self._simulated_ce_qty = db_ce_qty
                 self._simulated_pe_qty = db_pe_qty
 
-        # Get current margin status
+        # Get current margin status (API call)
         margin_data = await self._get_current_margin()
         if not margin_data:
             logger.warning("[ORCHESTRATOR] Could not get margin data")
@@ -276,7 +315,6 @@ class AutoHedgeOrchestrator:
 
         real_util = margin_data['utilization_pct']
         real_intraday = margin_data.get('intraday_margin', 0)
-        total_budget = self._session_cache['budget']
 
         # In dry run mode, calculate simulated utilization based on COVERAGE
         # SPAN margin gives ~56% reduction when fully hedged (from Sensibull: ₹3.13Cr -> ₹1.37Cr)
@@ -312,24 +350,38 @@ class AutoHedgeOrchestrator:
             self._simulated_margin_reduction = real_intraday - simulated_intraday
 
             logger.info(
-                f"[ORCHESTRATOR] Check cycle: real_util={real_util:.1f}%, "
+                f"[ORCHESTRATOR] real_util={real_util:.1f}%, "
                 f"simulated_util={simulated_util:.1f}% "
                 f"(coverage: CE={ce_coverage:.0%}, PE={pe_coverage:.0%}, avg={avg_coverage:.0%}, "
                 f"reduction={reduction_pct:.0%}), intraday=₹{real_intraday:,.0f}"
             )
-            # Use simulated values for decision making in dry run
             current_util = simulated_util
             current_intraday = simulated_intraday
         else:
             current_util = real_util
             current_intraday = real_intraday
-            logger.info(f"[ORCHESTRATOR] Check cycle: util={current_util:.1f}%, intraday=₹{current_intraday:,.0f}")
+            logger.info(f"[ORCHESTRATOR] util={current_util:.1f}%, intraday=₹{current_intraday:,.0f}")
 
-        # REACTIVE HEDGING: If current utilization is critically high, hedge immediately
-        critical_threshold = self.config.critical_threshold  # e.g. 95%
+        # Update last full check time
+        self._last_full_check = now
+
+        # === RUN CHECKS ===
+
+        # 1. Clear any due post-entry checks (just logs which entries triggered)
+        triggered_entries = self._clear_due_post_entry_checks()
+
+        # 2. CHECK EXCESS HEDGES (on periodic checks only)
+        if needs_periodic:
+            await self._check_excess_hedges(current_util=current_util)
+
+        # 3. REACTIVE HEDGING: Critical utilization (runs on EVERY check)
+        # This covers both periodic (every 5 mins) AND post-entry (entry + 1 min)
+        critical_threshold = self.config.critical_threshold
         if current_util >= critical_threshold:
+            trigger_source = f"post-entry ({', '.join(triggered_entries)})" if triggered_entries else "periodic"
             logger.warning(
-                f"[ORCHESTRATOR] CRITICAL: Utilization {current_util:.1f}% >= {critical_threshold}% threshold!"
+                f"[ORCHESTRATOR] CRITICAL ({trigger_source}): "
+                f"Utilization {current_util:.1f}% >= {critical_threshold}%!"
             )
             await self._handle_critical_utilization(
                 current_util=current_util,
@@ -338,9 +390,7 @@ class AutoHedgeOrchestrator:
             )
             return
 
-        # PROACTIVE HEDGING: Check if entry is imminent
-        is_imminent, upcoming = await self.scheduler.is_entry_imminent()
-
+        # 4. PROACTIVE HEDGING: Entry is imminent
         if is_imminent and upcoming:
             await self._handle_imminent_entry(
                 upcoming=upcoming,
@@ -348,11 +398,23 @@ class AutoHedgeOrchestrator:
                 current_intraday=current_intraday,
                 total_budget=total_budget
             )
-        else:
-            # Check if we should exit hedges
-            await self._check_hedge_exit(
-                current_util=current_util
-            )
+        elif needs_periodic:
+            # Only check hedge exit on periodic checks when idle
+            await self._check_hedge_exit(current_util=current_util)
+
+    def _has_pending_post_entry_checks(self, now: datetime) -> bool:
+        """Check if any post-entry checks are due."""
+        for check_info in self._pending_post_entry_checks.values():
+            if now >= check_info['check_time']:
+                return True
+        return False
+
+    def _needs_periodic_check(self, now: datetime) -> bool:
+        """Check if it's time for a full periodic check (every 5 mins)."""
+        if self._last_full_check is None:
+            return True
+        seconds_since_last = (now - self._last_full_check).total_seconds()
+        return seconds_since_last >= self._full_check_interval
 
     async def _handle_imminent_entry(
         self,
@@ -414,6 +476,62 @@ class AutoHedgeOrchestrator:
                     projected_util=requirement.projected_utilization,
                     hedge_required=False
                 )
+
+        # Schedule a post-entry reactive check (1 minute after entry)
+        # This catches cases where entry causes utilization to spike
+        self._schedule_post_entry_check(entry.entry_time, entry.portfolio_name)
+
+    def _schedule_post_entry_check(self, entry_time: time, portfolio_name: str):
+        """Schedule a reactive check 1 minute after entry."""
+        now = self._now_ist()
+        today = now.date()
+
+        # Convert entry time to full datetime
+        entry_datetime = datetime.combine(today, entry_time, tzinfo=IST)
+
+        # Only schedule if entry is in the future or just passed
+        if entry_datetime < now - timedelta(minutes=5):
+            return  # Entry already long past, skip
+
+        # Schedule check for 1 minute after entry
+        check_time = entry_datetime + timedelta(seconds=self._post_entry_delay_seconds)
+
+        # Don't duplicate if already scheduled
+        key = entry_datetime.isoformat()
+        if key not in self._pending_post_entry_checks:
+            self._pending_post_entry_checks[key] = {
+                'check_time': check_time,
+                'portfolio_name': portfolio_name,
+                'entry_time': entry_datetime
+            }
+            logger.info(
+                f"[ORCHESTRATOR] Scheduled post-entry check for {portfolio_name} "
+                f"at {check_time.strftime('%H:%M:%S')} (1 min after entry)"
+            )
+
+    def _clear_due_post_entry_checks(self) -> list:
+        """
+        Clear post-entry checks that are due and return their portfolio names.
+
+        The actual critical util check is done by the main flow - this just
+        marks which entries triggered the check.
+        """
+        if not self._pending_post_entry_checks:
+            return []
+
+        now = self._now_ist()
+        completed = []
+
+        for key, check_info in list(self._pending_post_entry_checks.items()):
+            if now >= check_info['check_time']:
+                portfolio_name = check_info['portfolio_name']
+                logger.info(
+                    f"[ORCHESTRATOR] Post-entry reactive check triggered for {portfolio_name}"
+                )
+                completed.append(portfolio_name)
+                del self._pending_post_entry_checks[key]
+
+        return completed
 
     async def _execute_hedge_entry(
         self,
@@ -486,6 +604,7 @@ class AutoHedgeOrchestrator:
             return
 
         # Execute hedge orders - recheck capacity after each to prevent over-hedging
+        lot_size = LOT_SIZES.get_lot_size(index)
         for hedge in selection.selected:
             # CRITICAL: Recheck capacity before each hedge to prevent over-hedging
             # (previous hedge may have filled remaining capacity)
@@ -497,6 +616,26 @@ class AutoHedgeOrchestrator:
                 break
 
             trigger_reason = f"PRE_STRATEGY:{entry.portfolio_name}"
+
+            # Pre-execution capacity check: verify this hedge won't exceed short qty
+            # This guards against positions changing between selection and execution
+            hedge_qty = hedge.total_lots * lot_size
+            if hedge.option_type == 'CE':
+                new_ce_total = self._simulated_ce_qty + hedge_qty
+                if new_ce_total > hedge_capacity.get('short_ce_qty', 0):
+                    logger.warning(
+                        f"[ORCHESTRATOR] Skipping CE hedge - would exceed capacity: "
+                        f"{new_ce_total} > {hedge_capacity.get('short_ce_qty', 0)}"
+                    )
+                    continue
+            else:  # PE
+                new_pe_total = self._simulated_pe_qty + hedge_qty
+                if new_pe_total > hedge_capacity.get('short_pe_qty', 0):
+                    logger.warning(
+                        f"[ORCHESTRATOR] Skipping PE hedge - would exceed capacity: "
+                        f"{new_pe_total} > {hedge_capacity.get('short_pe_qty', 0)}"
+                    )
+                    continue
 
             result = await self.hedge_executor.execute_hedge_buy(
                 session_id=self._session_cache['id'],
@@ -612,6 +751,7 @@ class AutoHedgeOrchestrator:
             return
 
         # Execute hedge orders - recheck capacity after each to prevent over-hedging
+        lot_size = LOT_SIZES.get_lot_size(index)
         for hedge in selection.selected:
             # CRITICAL: Recheck capacity before each hedge to prevent over-hedging
             # (previous hedge may have filled remaining capacity)
@@ -623,6 +763,25 @@ class AutoHedgeOrchestrator:
                 break
 
             trigger_reason = f"CRITICAL_UTIL:{current_util:.1f}%"
+
+            # Pre-execution capacity check: verify this hedge won't exceed short qty
+            hedge_qty = hedge.total_lots * lot_size
+            if hedge.option_type == 'CE':
+                new_ce_total = self._simulated_ce_qty + hedge_qty
+                if new_ce_total > hedge_capacity.get('short_ce_qty', 0):
+                    logger.warning(
+                        f"[ORCHESTRATOR] Skipping CE hedge - would exceed capacity: "
+                        f"{new_ce_total} > {hedge_capacity.get('short_ce_qty', 0)}"
+                    )
+                    continue
+            else:  # PE
+                new_pe_total = self._simulated_pe_qty + hedge_qty
+                if new_pe_total > hedge_capacity.get('short_pe_qty', 0):
+                    logger.warning(
+                        f"[ORCHESTRATOR] Skipping PE hedge - would exceed capacity: "
+                        f"{new_pe_total} > {hedge_capacity.get('short_pe_qty', 0)}"
+                    )
+                    continue
 
             result = await self.hedge_executor.execute_hedge_buy(
                 session_id=self._session_cache['id'],
@@ -693,6 +852,122 @@ class AutoHedgeOrchestrator:
         if not result.success:
             logger.info(
                 f"[ORCHESTRATOR] Hedge exit skipped: {result.error_message}"
+            )
+
+    async def _check_excess_hedges(self, current_util: float):
+        """
+        Check if hedge quantity exceeds sold quantity and exit excess hedges.
+
+        When short positions decrease (exits, SL hits), hedges may exceed the
+        sold qty. Excess hedges provide NO margin benefit and should be exited
+        to recover premium.
+        """
+        if not self._session_cache:
+            return
+
+        index = IndexName(self._session_cache['index'])
+        expiry_date = self._session_cache.get('expiry_date')
+
+        if not expiry_date:
+            return
+
+        # Get current positions and calculate hedge capacity
+        positions = await self._get_positions()
+        if not positions:
+            return
+
+        filtered = position_service.filter_positions(
+            positions, self._session_cache['index'], expiry_date
+        )
+        summary = position_service.get_summary(filtered)
+
+        # Get current hedge quantities (real positions, not simulated)
+        long_ce_qty = summary.get('long_ce_qty', 0)
+        long_pe_qty = summary.get('long_pe_qty', 0)
+        short_ce_qty = summary.get('short_ce_qty', 0)
+        short_pe_qty = summary.get('short_pe_qty', 0)
+
+        # In dry run, use simulated quantities instead
+        if self._dry_run:
+            long_ce_qty = self._simulated_ce_qty
+            long_pe_qty = self._simulated_pe_qty
+
+        # Check for excess hedges
+        ce_excess = max(0, long_ce_qty - short_ce_qty)
+        pe_excess = max(0, long_pe_qty - short_pe_qty)
+
+        if ce_excess == 0 and pe_excess == 0:
+            return  # No excess hedges
+
+        logger.warning(
+            f"[ORCHESTRATOR] EXCESS HEDGES DETECTED - "
+            f"CE: {long_ce_qty}/{short_ce_qty} (excess: {ce_excess}), "
+            f"PE: {long_pe_qty}/{short_pe_qty} (excess: {pe_excess})"
+        )
+
+        # Get active hedges to exit
+        active_hedges = await self.hedge_executor.get_active_hedges(
+            self._session_cache['id']
+        )
+
+        if not active_hedges:
+            logger.info("[ORCHESTRATOR] No active hedges to exit for excess reduction")
+            return
+
+        # Determine which type has excess and exit that type first
+        # Exit farthest OTM hedge of the excess type
+        target_type = 'CE' if ce_excess > 0 else 'PE'
+        excess_qty = ce_excess if target_type == 'CE' else pe_excess
+
+        # Find hedges of the target type, sorted by OTM distance (farthest first)
+        target_hedges = [h for h in active_hedges if h.option_type == target_type]
+
+        # Sort by OTM distance descending (farthest first) - ensure correct order after filtering
+        target_hedges.sort(key=lambda h: getattr(h, 'otm_distance', 0) or 0, reverse=True)
+
+        if not target_hedges:
+            logger.info(f"[ORCHESTRATOR] No active {target_type} hedges to exit")
+            return
+
+        # Exit farthest OTM hedge first (will be called again in next loop iteration for more)
+        hedge_to_exit = target_hedges[0]
+        lot_size = LOT_SIZES.get_lot_size(index)
+        hedge_qty = (hedge_to_exit.quantity or 0) if hasattr(hedge_to_exit, 'quantity') else lot_size
+
+        logger.info(
+            f"[ORCHESTRATOR] Exiting excess {target_type} hedge: "
+            f"{hedge_to_exit.symbol} (qty={hedge_qty}) to reduce excess"
+        )
+
+        result = await self.hedge_executor.execute_hedge_exit(
+            hedge_id=hedge_to_exit.id,
+            session_id=self._session_cache['id'],
+            trigger_reason=f"EXCESS_{target_type}:{excess_qty}",
+            utilization_before=current_util,
+            dry_run=self._dry_run
+        )
+
+        if result.success:
+            # In dry run, update simulated quantities
+            if self._dry_run:
+                if target_type == 'CE':
+                    self._simulated_ce_qty = max(0, self._simulated_ce_qty - hedge_qty)
+                else:
+                    self._simulated_pe_qty = max(0, self._simulated_pe_qty - hedge_qty)
+                logger.info(
+                    f"[ORCHESTRATOR] DRY RUN - Reduced simulated {target_type} qty to "
+                    f"{self._simulated_ce_qty if target_type == 'CE' else self._simulated_pe_qty}"
+                )
+
+            await self.telegram.send_message(
+                f"🔄 *Excess hedge exited*\n\n"
+                f"*Symbol:* {hedge_to_exit.symbol}\n"
+                f"*Reason:* {target_type} hedge qty exceeded short qty\n"
+                f"*Excess:* {excess_qty} qty"
+            )
+        else:
+            logger.error(
+                f"[ORCHESTRATOR] Failed to exit excess hedge: {result.error_message}"
             )
 
     async def _get_or_create_session(self) -> Optional[DailySession]:
@@ -1088,8 +1363,12 @@ class AutoHedgeOrchestrator:
             ],
             'next_entry': {
                 'portfolio': next_entry.entry.portfolio_name,
-                'entry_time': next_entry.entry.entry_time.isoformat(),
-                'seconds_until': next_entry.seconds_until
+                'portfolio_name': next_entry.entry.portfolio_name,  # Frontend expects this key
+                'entry_time': next_entry.entry_datetime.isoformat() if hasattr(next_entry, 'entry_datetime') else next_entry.entry.entry_time.isoformat(),
+                'seconds_until': next_entry.seconds_until,
+                'minutes_until': max(0, next_entry.seconds_until // 60),  # Frontend expects minutes
+                'num_baskets': self._session_cache.get('baskets', 0) if self._session_cache else 0,
+                'is_imminent': next_entry.seconds_until <= (self.config.lookahead_minutes * 60)
             } if next_entry else None,
             'cooldown_remaining': self.hedge_executor.get_cooldown_remaining()
         }
@@ -1169,6 +1448,27 @@ class AutoHedgeOrchestrator:
                         hedge_capacity = position_service.get_hedge_capacity(summary)
                         hedge_capacity = await self._apply_simulated_hedges_to_capacity(hedge_capacity)
                         response['hedge_capacity'] = hedge_capacity
+
+                # Check for over-hedging and add warnings
+                if 'hedge_capacity' in response and self._dry_run:
+                    hc = response['hedge_capacity']
+                    warnings = []
+                    if self._simulated_ce_qty > hc.get('short_ce_qty', 0):
+                        ce_excess = self._simulated_ce_qty - hc.get('short_ce_qty', 0)
+                        warnings.append(
+                            f"CE OVER-HEDGED: {self._simulated_ce_qty} hedge qty > "
+                            f"{hc.get('short_ce_qty', 0)} short qty (excess: {ce_excess})"
+                        )
+                        logger.warning(f"[ORCHESTRATOR] {warnings[-1]}")
+                    if self._simulated_pe_qty > hc.get('short_pe_qty', 0):
+                        pe_excess = self._simulated_pe_qty - hc.get('short_pe_qty', 0)
+                        warnings.append(
+                            f"PE OVER-HEDGED: {self._simulated_pe_qty} hedge qty > "
+                            f"{hc.get('short_pe_qty', 0)} short qty (excess: {pe_excess})"
+                        )
+                        logger.warning(f"[ORCHESTRATOR] {warnings[-1]}")
+                    if warnings:
+                        response['over_hedge_warnings'] = warnings
         except Exception as e:
             logger.warning(f"[ORCHESTRATOR] Could not get hedge capacity for status: {e}")
 

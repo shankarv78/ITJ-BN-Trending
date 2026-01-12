@@ -795,10 +795,10 @@ class DatabaseStateManager:
 
     # ===== CAPITAL TRANSACTION OPERATIONS =====
 
-    def inject_capital(self, transaction_type: str, amount: float, notes: str = None,
-                       created_by: str = 'API') -> dict:
+    def record_capital_change(self, transaction_type: str, amount: float, notes: str = None,
+                              created_by: str = 'API') -> dict:
         """
-        Record a capital injection (deposit) or withdrawal
+        Record a capital change (deposit or withdrawal) in the ledger
 
         Args:
             transaction_type: 'DEPOSIT' or 'WITHDRAW'
@@ -830,21 +830,24 @@ class DatabaseStateManager:
 
             equity_before = float(row['closed_equity'])
 
-            # Calculate new equity
+            # Calculate new equity and signed amount
+            # Ledger stores signed amounts: positive=add, negative=subtract
             if transaction_type == 'DEPOSIT':
+                signed_amount = amount  # positive
                 equity_after = equity_before + amount
             else:  # WITHDRAW
+                signed_amount = -amount  # negative (withdrawal reduces equity)
                 equity_after = equity_before - amount
                 if equity_after < 0:
                     raise RuntimeError(f"Withdrawal of {amount} would result in negative equity. Current: {equity_before}")
 
-            # Record transaction in ledger
+            # Record transaction in ledger with signed amount
             cursor.execute("""
                 INSERT INTO capital_transactions
                 (transaction_type, amount, notes, equity_before, equity_after, created_by)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at
-            """, (transaction_type, amount, notes, equity_before, equity_after, created_by))
+            """, (transaction_type, signed_amount, notes, equity_before, equity_after, created_by))
             tx_row = cursor.fetchone()
 
             # Update portfolio_state
@@ -871,6 +874,84 @@ class DatabaseStateManager:
             }
 
             logger.info(f"Capital {transaction_type}: {amount:,.2f} | Equity: {equity_before:,.2f} -> {equity_after:,.2f}")
+            return result
+
+    def record_trading_pnl(self, position_id: str, instrument: str, pnl: float,
+                          notes: str = None) -> dict:
+        """
+        Record realized P&L from a closed trade in the equity ledger.
+
+        This ensures the ledger is always in sync with trading activity.
+        Called automatically when a position is closed.
+
+        Args:
+            position_id: The ID of the closed position
+            instrument: The instrument that was traded
+            pnl: Realized P&L (positive or negative)
+            notes: Optional notes (auto-generated if not provided)
+
+        Returns:
+            Dictionary with transaction details including new equity
+        """
+        if not notes:
+            pnl_str = f"+₹{pnl:,.2f}" if pnl >= 0 else f"-₹{abs(pnl):,.2f}"
+            notes = f"{instrument} trade P&L: {pnl_str}"
+
+        with self.transaction() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            # Get current equity from latest ledger entry
+            cursor.execute("""
+                SELECT equity_after FROM capital_transactions
+                ORDER BY created_at DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+
+            if not row:
+                # No transactions yet - this shouldn't happen in normal operation
+                raise RuntimeError(
+                    "No capital transactions found. Cannot record trading P&L "
+                    "without initial capital. Add a DEPOSIT first."
+                )
+
+            equity_before = float(row['equity_after'])
+            equity_after = equity_before + pnl  # pnl can be negative
+
+            # Record transaction in ledger
+            cursor.execute("""
+                INSERT INTO capital_transactions
+                (transaction_type, amount, notes, equity_before, equity_after, created_by, position_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, ('TRADING_PNL', pnl, notes, equity_before, equity_after, 'SYSTEM', position_id))
+            tx_row = cursor.fetchone()
+
+            # Update portfolio_state to stay in sync
+            cursor.execute("""
+                UPDATE portfolio_state
+                SET closed_equity = %s,
+                    version = version + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (equity_after,))
+
+            # Invalidate cache
+            self._portfolio_state_cache = None
+
+            result = {
+                'transaction_id': tx_row['id'],
+                'transaction_type': 'TRADING_PNL',
+                'position_id': position_id,
+                'pnl': pnl,
+                'notes': notes,
+                'equity_before': equity_before,
+                'equity_after': equity_after,
+                'created_at': tx_row['created_at'].isoformat()
+            }
+
+            pnl_str = f"+₹{pnl:,.2f}" if pnl >= 0 else f"-₹{abs(pnl):,.2f}"
+            logger.info(f"Trading P&L recorded: {position_id} {pnl_str} | Equity: {equity_before:,.2f} -> {equity_after:,.2f}")
             return result
 
     def get_capital_transactions(self, limit: int = 50, transaction_type: str = None) -> List[dict]:
@@ -903,13 +984,81 @@ class DatabaseStateManager:
 
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_current_equity_from_ledger(self) -> dict:
+        """
+        Get current equity from the ledger.
+
+        The ledger tracks ALL equity changes:
+        - DEPOSIT: Capital added
+        - WITHDRAW: Capital removed
+        - TRADING_PNL: Realized P&L from closed trades
+
+        The latest equity_after value is always the current equity.
+
+        Returns:
+            Dictionary with:
+                - current_equity: The current equity (latest equity_after)
+                - last_transaction_type: Type of the last transaction
+                - last_transaction_at: When the last transaction occurred
+
+        Raises:
+            ValueError: If no capital transactions exist (ledger is empty)
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            # Get the latest transaction's equity_after (this is current equity)
+            cursor.execute("""
+                SELECT equity_after, transaction_type, created_at
+                FROM capital_transactions
+                ORDER BY created_at DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+
+            if not row:
+                raise ValueError(
+                    "No capital transactions found in ledger. "
+                    "Cannot start PM without initial capital. "
+                    "Add a DEPOSIT via the frontend Operations > Capital tab first."
+                )
+
+            current_equity = float(row['equity_after'])
+
+            # Also get summary for logging
+            # Note: TRADING_PNL amounts are signed (positive=profit, negative=loss)
+            cursor.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN transaction_type = 'DEPOSIT' THEN amount ELSE 0 END), 0) as total_deposits,
+                    COALESCE(SUM(CASE WHEN transaction_type = 'WITHDRAW' THEN amount ELSE 0 END), 0) as total_withdrawals,
+                    COALESCE(SUM(CASE WHEN transaction_type = 'TRADING_PNL' THEN amount ELSE 0 END), 0) as total_trading_pnl
+                FROM capital_transactions
+            """)
+            summary = cursor.fetchone()
+
+            logger.info(
+                f"Equity from ledger: ₹{current_equity:,.2f} | "
+                f"Deposits: ₹{float(summary['total_deposits']):,.2f}, "
+                f"Withdrawals: ₹{float(summary['total_withdrawals']):,.2f}, "
+                f"Trading P&L: ₹{float(summary['total_trading_pnl']):,.2f}"
+            )
+
+            return {
+                'current_equity': current_equity,
+                'total_deposits': float(summary['total_deposits']),
+                'total_withdrawals': float(summary['total_withdrawals']),
+                'total_trading_pnl': float(summary['total_trading_pnl']),
+                'last_transaction_type': row['transaction_type'],
+                'last_transaction_at': row['created_at'].isoformat() if row['created_at'] else None
+            }
+
     def get_capital_summary(self) -> dict:
         """
         Get summary of all capital transactions
 
         Returns:
             Dictionary with deposit_count, total_deposits, withdraw_count,
-            total_withdrawals, net_capital_change
+            total_withdrawals, trading_pnl_count, total_trading_pnl, net_capital_change
         """
         with self.get_connection() as conn:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -922,6 +1071,8 @@ class DatabaseStateManager:
                     'total_deposits': float(row['total_deposits'] or 0),
                     'withdraw_count': row['withdraw_count'],
                     'total_withdrawals': float(row['total_withdrawals'] or 0),
+                    'trading_pnl_count': row['trading_pnl_count'],
+                    'total_trading_pnl': float(row['total_trading_pnl'] or 0),
                     'net_capital_change': float(row['net_capital_change'] or 0),
                     'first_transaction': row['first_transaction'].isoformat() if row['first_transaction'] else None,
                     'last_transaction': row['last_transaction'].isoformat() if row['last_transaction'] else None
@@ -932,6 +1083,8 @@ class DatabaseStateManager:
                 'total_deposits': 0,
                 'withdraw_count': 0,
                 'total_withdrawals': 0,
+                'trading_pnl_count': 0,
+                'total_trading_pnl': 0,
                 'net_capital_change': 0,
                 'first_transaction': None,
                 'last_transaction': None

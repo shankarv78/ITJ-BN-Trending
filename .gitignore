@@ -87,3 +87,4 @@ node_modules/
 *.pid
 *.sql.backup
 backup_*.sql
+Mark Minervini/*.pdf

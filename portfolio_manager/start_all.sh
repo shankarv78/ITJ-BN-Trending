@@ -14,7 +14,9 @@ OPENALGO_URL="http://127.0.0.1:$OPENALGO_PORT"
 PM_PORT=5002
 FRONTEND_PORT=8080
 MARGIN_MONITOR_PORT=5010
+SERVICE_MANAGER_PORT=5003
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVICE_MANAGER_DIR="$SCRIPT_DIR/service_manager"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")/frontend"
 MARGIN_MONITOR_DIR="$(dirname "$SCRIPT_DIR")/margin-monitor"
 LOG_DIR="$SCRIPT_DIR/logs"
@@ -443,6 +445,94 @@ stop_margin_monitor() {
 }
 
 # -----------------------------------------------------------------------------
+# Start Service Manager
+# -----------------------------------------------------------------------------
+
+is_service_manager_running() {
+    lsof -ti:$SERVICE_MANAGER_PORT > /dev/null 2>&1
+}
+
+start_service_manager() {
+    log_info "Checking Service Manager status..."
+
+    if is_service_manager_running; then
+        log_success "Service Manager already running at http://localhost:$SERVICE_MANAGER_PORT"
+        return 0
+    fi
+
+    if [ ! -d "$SERVICE_MANAGER_DIR" ]; then
+        log_warn "Service Manager directory not found at $SERVICE_MANAGER_DIR - skipping"
+        return 1
+    fi
+
+    if [ ! -f "$SERVICE_MANAGER_DIR/app.py" ]; then
+        log_warn "Service Manager app.py not found - skipping"
+        return 1
+    fi
+
+    log_info "Starting Service Manager..."
+
+    # Create logs directory if it doesn't exist
+    mkdir -p "$LOG_DIR"
+
+    cd "$SCRIPT_DIR"
+
+    # Activate PM venv (service_manager uses same dependencies)
+    if [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+        source "$SCRIPT_DIR/venv/bin/activate"
+    fi
+
+    # Start Service Manager in background
+    SM_LOG="$LOG_DIR/service_manager.log"
+    nohup python3 -m service_manager.app >> "$SM_LOG" 2>&1 &
+    SM_PID=$!
+    echo $SM_PID > "$SCRIPT_DIR/.service_manager.pid"
+
+    # Wait for Service Manager to be ready
+    log_info "Waiting for Service Manager to be ready..."
+
+    MAX_RETRIES=15
+    RETRY_COUNT=0
+
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+        if is_service_manager_running; then
+            log_success "Service Manager is ready at http://localhost:$SERVICE_MANAGER_PORT"
+            echo ""
+            echo -e "  ${GREEN}🔧 Service Manager: http://localhost:$SERVICE_MANAGER_PORT${NC}"
+            echo -e "  ${BLUE}📝 Service Manager logs: $SM_LOG${NC}"
+            echo ""
+            return 0
+        fi
+        sleep 1
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        echo -n "."
+    done
+
+    echo ""
+    log_error "Service Manager failed to start after ${MAX_RETRIES}s"
+    log_info "Check logs at: $SM_LOG"
+    return 1
+}
+
+stop_service_manager() {
+    if [ -f "$SCRIPT_DIR/.service_manager.pid" ]; then
+        SM_PID=$(cat "$SCRIPT_DIR/.service_manager.pid")
+        if ps -p $SM_PID > /dev/null 2>&1; then
+            log_info "Stopping Service Manager (PID $SM_PID)..."
+            kill $SM_PID 2>/dev/null || true
+            rm "$SCRIPT_DIR/.service_manager.pid"
+            log_success "Service Manager stopped"
+        fi
+    fi
+
+    # Also try to kill by port
+    SM_PID=$(lsof -ti:$SERVICE_MANAGER_PORT 2>/dev/null || true)
+    if [ ! -z "$SM_PID" ]; then
+        kill $SM_PID 2>/dev/null || true
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Start Frontend
 # -----------------------------------------------------------------------------
 
@@ -639,6 +729,9 @@ start_portfolio_manager() {
 stop_all() {
     log_info "Stopping all services..."
 
+    # Stop Service Manager
+    stop_service_manager
+
     # Stop Margin Monitor
     stop_margin_monitor
 
@@ -757,6 +850,13 @@ show_status() {
         log_success "Margin Monitor: RUNNING at http://localhost:$MARGIN_MONITOR_PORT"
     else
         log_warn "Margin Monitor: NOT RUNNING"
+    fi
+
+    # Service Manager status
+    if is_service_manager_running; then
+        log_success "Service Manager: RUNNING at http://localhost:$SERVICE_MANAGER_PORT"
+    else
+        log_warn "Service Manager: NOT RUNNING"
     fi
 
     # Cloudflare Tunnel status
@@ -883,6 +983,7 @@ case "${1:-start}" in
         check_dependencies
         start_openalgo
         start_tunnel  # Start tunnel in background before PM
+        start_service_manager  # Start service manager early so it can manage other services
         start_portfolio_manager "${@:2}"
         start_frontend
         start_margin_monitor
@@ -894,11 +995,13 @@ case "${1:-start}" in
         echo -e "  ${GREEN}🖥️  Frontend:       http://localhost:$FRONTEND_PORT${NC}"
         echo -e "  ${GREEN}📊 PM API:         http://127.0.0.1:$PM_PORT${NC}"
         echo -e "  ${GREEN}📈 Margin Monitor: http://localhost:$MARGIN_MONITOR_PORT${NC}"
+        echo -e "  ${GREEN}🔧 Service Manager: http://localhost:$SERVICE_MANAGER_PORT${NC}"
         echo -e "  ${GREEN}🔌 OpenAlgo:       $OPENALGO_URL${NC}"
         echo ""
         echo -e "  ${BLUE}📝 View PM logs:             tail -f $LOG_DIR/portfolio_manager.log${NC}"
         echo -e "  ${BLUE}📝 View Frontend logs:       tail -f $LOG_DIR/frontend.log${NC}"
         echo -e "  ${BLUE}📝 View Margin Monitor logs: tail -f $LOG_DIR/margin_monitor.log${NC}"
+        echo -e "  ${BLUE}📝 View Service Manager logs: tail -f $LOG_DIR/service_manager.log${NC}"
         echo ""
         ;;
     stop)
@@ -913,6 +1016,7 @@ case "${1:-start}" in
         check_dependencies
         start_openalgo
         start_tunnel
+        start_service_manager
         start_portfolio_manager "${@:2}"
         start_frontend
         start_margin_monitor
@@ -946,6 +1050,10 @@ case "${1:-start}" in
         # Start only Margin Monitor
         start_margin_monitor
         ;;
+    service-manager)
+        # Start only Service Manager
+        start_service_manager
+        ;;
     logs)
         # Tail all logs
         echo "Tailing logs from: $LOG_DIR"
@@ -954,19 +1062,20 @@ case "${1:-start}" in
         tail -f "$LOG_DIR/portfolio_manager.log" "$LOG_DIR/frontend.log" "$LOG_DIR/margin_monitor.log" 2>/dev/null || tail -f "$LOG_DIR/portfolio_manager.log" 2>/dev/null || echo "No log files found yet"
         ;;
     *)
-        echo "Usage: $0 {start|stop|status|restart|openalgo|tunnel|frontend|pm|margin-monitor|logs} [--test-mode] [--silent]"
+        echo "Usage: $0 {start|stop|status|restart|openalgo|tunnel|frontend|pm|margin-monitor|service-manager|logs} [--test-mode] [--silent]"
         echo ""
         echo "Commands:"
-        echo "  start          - Start all services (OpenAlgo, Tunnel, PM, Frontend, Margin Monitor)"
-        echo "  stop           - Stop all services"
-        echo "  status         - Show status of all services"
-        echo "  restart        - Restart all services"
-        echo "  openalgo       - Start only OpenAlgo"
-        echo "  tunnel         - Start only Cloudflare Tunnel"
-        echo "  frontend       - Start only Frontend"
-        echo "  pm             - Start Portfolio Manager + Tunnel (OpenAlgo must be running)"
-        echo "  margin-monitor - Start only Margin Monitor (auto-hedge system)"
-        echo "  logs           - Tail all log files"
+        echo "  start           - Start all services (OpenAlgo, Tunnel, PM, Frontend, Margin Monitor, Service Manager)"
+        echo "  stop            - Stop all services"
+        echo "  status          - Show status of all services"
+        echo "  restart         - Restart all services"
+        echo "  openalgo        - Start only OpenAlgo"
+        echo "  tunnel          - Start only Cloudflare Tunnel"
+        echo "  frontend        - Start only Frontend"
+        echo "  pm              - Start Portfolio Manager + Tunnel (OpenAlgo must be running)"
+        echo "  margin-monitor  - Start only Margin Monitor (auto-hedge system)"
+        echo "  service-manager - Start only Service Manager (for restarting services via UI)"
+        echo "  logs            - Tail all log files"
         echo ""
         echo "Options:"
         echo "  --test-mode  Enable test mode (1 lot orders only, logged calculated lots)"
