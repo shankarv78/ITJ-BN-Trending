@@ -12,7 +12,6 @@ Designed to integrate with SignalAuditService for complete audit trail.
 """
 
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -77,16 +76,17 @@ class OrderExecutionLogger:
     Logs order execution details to database.
 
     Integrates with SignalAuditService and order executors.
+    Uses DatabaseStateManager for consistent connection handling.
     """
 
-    def __init__(self, db_connection_pool):
+    def __init__(self, db_manager):
         """
         Initialize order execution logger.
 
         Args:
-            db_connection_pool: psycopg2 connection pool
+            db_manager: DatabaseStateManager instance with transaction() and get_connection() methods
         """
-        self.pool = db_connection_pool
+        self.db = db_manager
         logger.info("[OrderExecutionLogger] Initialized")
 
     def log_order(self, entry: OrderLogEntry) -> Optional[int]:
@@ -128,8 +128,7 @@ class OrderExecutionLogger:
         """
 
         try:
-            conn = self.pool.getconn()
-            try:
+            with self.db.transaction() as conn:
                 with conn.cursor() as cur:
                     cur.execute(query, (
                         entry.signal_audit_id, entry.position_id,
@@ -148,8 +147,6 @@ class OrderExecutionLogger:
                     log_id = result[0] if result else None
                     logger.debug(f"[OrderExecutionLogger] Logged order {entry.order_id}, db_id={log_id}")
                     return log_id
-            finally:
-                self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"[OrderExecutionLogger] Failed to log order: {e}")
             return None
@@ -366,8 +363,7 @@ class OrderExecutionLogger:
         """
 
         try:
-            conn = self.pool.getconn()
-            try:
+            with self.db.transaction() as conn:
                 with conn.cursor() as cur:
                     cur.execute(query, (
                         order_status,
@@ -379,8 +375,6 @@ class OrderExecutionLogger:
                     ))
                     conn.commit()
                     return cur.rowcount > 0
-            finally:
-                self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"[OrderExecutionLogger] Failed to update order status: {e}")
             return False
@@ -412,14 +406,11 @@ class OrderExecutionLogger:
         """
 
         try:
-            conn = self.pool.getconn()
-            try:
+            with self.db.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(query, (instrument, instrument, status, status, limit))
                     rows = cur.fetchall()
                     return [dict(row) for row in rows]
-            finally:
-                self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"[OrderExecutionLogger] Failed to get recent orders: {e}")
             return []
@@ -437,14 +428,11 @@ class OrderExecutionLogger:
         query = "SELECT * FROM order_execution_log WHERE id = %s"
 
         try:
-            conn = self.pool.getconn()
-            try:
+            with self.db.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(query, (log_id,))
                     row = cur.fetchone()
                     return dict(row) if row else None
-            finally:
-                self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"[OrderExecutionLogger] Failed to get order: {e}")
             return None
@@ -467,14 +455,11 @@ class OrderExecutionLogger:
         """
 
         try:
-            conn = self.pool.getconn()
-            try:
+            with self.db.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(query, (signal_audit_id,))
                     rows = cur.fetchall()
                     return [dict(row) for row in rows]
-            finally:
-                self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"[OrderExecutionLogger] Failed to get orders by signal: {e}")
             return []
@@ -505,7 +490,7 @@ class OrderExecutionLogger:
                 STDDEV(slippage_pct) as stddev_slippage_pct,
                 AVG(execution_duration_ms) as avg_duration_ms
             FROM order_execution_log
-            WHERE created_at > NOW() - INTERVAL '%s days'
+            WHERE created_at > NOW() - make_interval(days => %s)
               AND order_status = 'COMPLETE'
               AND slippage_pct IS NOT NULL
               AND (%s IS NULL OR instrument = %s)
@@ -514,8 +499,7 @@ class OrderExecutionLogger:
         """
 
         try:
-            conn = self.pool.getconn()
-            try:
+            with self.db.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(query, (days, instrument, instrument))
                     rows = cur.fetchall()
@@ -524,8 +508,6 @@ class OrderExecutionLogger:
                         "instrument_filter": instrument,
                         "statistics": [dict(row) for row in rows]
                     }
-            finally:
-                self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"[OrderExecutionLogger] Failed to get slippage stats: {e}")
             return {"period_days": days, "statistics": []}

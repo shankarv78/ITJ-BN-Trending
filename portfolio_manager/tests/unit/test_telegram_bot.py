@@ -152,8 +152,8 @@ class TestTelegramAlertPublisher:
         assert "Order Filled" in formatted
         assert "10:30:00" in formatted
         assert "Buy 3 lots filled" in formatted
-        # Note: underscore is escaped for Telegram markdown as fill\_price
-        assert "fill" in formatted and "price" in formatted
+        # Using HTML parse mode - underscores don't need escaping
+        assert "fill_price" in formatted
 
     def test_convenience_methods(self):
         """Test convenience alert methods."""

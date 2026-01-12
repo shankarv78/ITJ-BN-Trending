@@ -60,7 +60,8 @@ class PortfolioManagerBot:
         self.audit_service = audit_service
         self.order_logger = order_logger
         self.portfolio_manager = portfolio_manager
-        self.allowed_user_ids = set(allowed_user_ids) if allowed_user_ids else None
+        # Note: None means allow all, empty set means deny all
+        self.allowed_user_ids = set(allowed_user_ids) if allowed_user_ids is not None else None
 
         self.application: Optional[Application] = None
         self._running = False
@@ -71,22 +72,30 @@ class PortfolioManagerBot:
         """
         Check if user is authorized to use the bot.
 
+        Authorization logic:
+        - allowed_user_ids=None: Allow all users (open access)
+        - allowed_user_ids=[]: Deny all users (no access)
+        - allowed_user_ids=[123, 456]: Only allow specified user IDs
+
         Args:
             update: Telegram update
 
         Returns:
             True if authorized
         """
+        # None means no restriction - allow all
         if self.allowed_user_ids is None:
             return True
 
         user_id = update.effective_user.id if update.effective_user else None
-        if user_id in self.allowed_user_ids:
-            return True
 
-        logger.warning(f"[TelegramBot] Unauthorized access attempt: user_id={user_id}")
-        await update.message.reply_text("Unauthorized. Contact admin to get access.")
-        return False
+        # Empty set or user not in set - deny access
+        if not self.allowed_user_ids or user_id not in self.allowed_user_ids:
+            logger.warning(f"[TelegramBot] Unauthorized access attempt: user_id={user_id}")
+            await update.message.reply_text("Unauthorized. Contact admin to get access.")
+            return False
+
+        return True
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start and /help commands."""

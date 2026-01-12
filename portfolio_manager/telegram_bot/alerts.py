@@ -206,12 +206,12 @@ class TelegramAlertPublisher:
             # Format message
             message = self._format_alert(alert)
 
-            # Send via Telegram API
+            # Send via Telegram API using HTML parse mode (safer than Markdown)
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             payload = {
                 "chat_id": self.chat_id,
                 "text": message,
-                "parse_mode": "Markdown"
+                "parse_mode": "HTML"
             }
 
             if self._http_client:
@@ -226,28 +226,31 @@ class TelegramAlertPublisher:
         except Exception as e:
             logger.error(f"[TelegramAlerts] Error sending alert: {e}")
 
-    def _escape_markdown(self, text: str) -> str:
-        """Escape special Markdown characters."""
-        # Escape underscores and asterisks that could break formatting
+    def _escape_html(self, text: str) -> str:
+        """
+        Escape special HTML characters for Telegram HTML parse mode.
+
+        Only need to escape: < > &
+        This is much safer than Markdown which has many special characters.
+        """
         text = str(text)
-        text = text.replace('_', '\\_')
-        text = text.replace('*', '\\*')
-        text = text.replace('[', '\\[')
-        text = text.replace('`', '\\`')
+        text = text.replace('&', '&amp;')  # Must be first
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
         return text
 
     def _format_alert(self, alert: Alert) -> str:
-        """Format alert for Telegram."""
+        """Format alert for Telegram using HTML parse mode."""
         emoji = self._emoji_map.get(alert.alert_type, "")
         timestamp = alert.timestamp.strftime('%H:%M:%S') if alert.timestamp else ""
 
-        # Escape title and message for markdown safety
-        safe_title = self._escape_markdown(alert.title)
-        safe_message = self._escape_markdown(alert.message)
+        # Escape title and message for HTML safety
+        safe_title = self._escape_html(alert.title)
+        safe_message = self._escape_html(alert.message)
 
         lines = [
-            f"{emoji} *{safe_title}*",
-            f"_{timestamp}_",
+            f"{emoji} <b>{safe_title}</b>",
+            f"<i>{timestamp}</i>",
             "",
             safe_message
         ]
@@ -256,8 +259,8 @@ class TelegramAlertPublisher:
         if alert.data:
             lines.append("")
             for key, value in alert.data.items():
-                # Escape key for markdown safety
-                safe_key = self._escape_markdown(key)
+                # Escape key for HTML safety
+                safe_key = self._escape_html(key)
                 # Format numbers nicely
                 if isinstance(value, float):
                     if 'pct' in key.lower() or 'percent' in key.lower():
@@ -267,7 +270,7 @@ class TelegramAlertPublisher:
                     else:
                         value = f"{value:.2f}"
                 else:
-                    value = self._escape_markdown(str(value))
+                    value = self._escape_html(str(value))
                 lines.append(f"{safe_key}: {value}")
 
         return '\n'.join(lines)

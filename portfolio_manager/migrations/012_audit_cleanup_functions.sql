@@ -19,7 +19,7 @@ DECLARE
     rows_deleted BIGINT;
     oldest_record TIMESTAMP;
 BEGIN
-    cutoff_date := NOW() - (retention_days || ' days')::INTERVAL;
+    cutoff_date := NOW() - make_interval(days => retention_days);
 
     -- Delete old records
     DELETE FROM signal_audit
@@ -44,27 +44,34 @@ CREATE OR REPLACE FUNCTION cleanup_old_order_executions(retention_days INTEGER D
 RETURNS TABLE(deleted_count BIGINT, oldest_remaining TIMESTAMP) AS $$
 DECLARE
     cutoff_date TIMESTAMP;
-    rows_deleted BIGINT;
+    child_deleted BIGINT;
+    parent_deleted BIGINT;
     oldest_record TIMESTAMP;
 BEGIN
-    cutoff_date := NOW() - (retention_days || ' days')::INTERVAL;
+    cutoff_date := NOW() - make_interval(days => retention_days);
 
-    -- Delete old records (child records first due to FK)
-    -- Delete child legs first
+    -- Delete old records (child records first due to self-referencing FK)
+    -- Step 1: Delete child legs (records with parent_order_id pointing to old parents)
+    DELETE FROM order_execution_log
+    WHERE parent_order_id IN (
+        SELECT id FROM order_execution_log
+        WHERE created_at < cutoff_date
+        AND parent_order_id IS NULL  -- Only parent records
+    );
+
+    GET DIAGNOSTICS child_deleted = ROW_COUNT;
+
+    -- Step 2: Delete parent records (now safe since children are gone)
     DELETE FROM order_execution_log
     WHERE created_at < cutoff_date
-    AND parent_order_id IS NOT NULL;
+    AND parent_order_id IS NULL;
 
-    -- Then delete parent records
-    DELETE FROM order_execution_log
-    WHERE created_at < cutoff_date;
-
-    GET DIAGNOSTICS rows_deleted = ROW_COUNT;
+    GET DIAGNOSTICS parent_deleted = ROW_COUNT;
 
     -- Get oldest remaining record
     SELECT MIN(created_at) INTO oldest_record FROM order_execution_log;
 
-    RETURN QUERY SELECT rows_deleted, oldest_record;
+    RETURN QUERY SELECT child_deleted + parent_deleted, oldest_record;
 END;
 $$ LANGUAGE plpgsql;
 
