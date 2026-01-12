@@ -109,8 +109,12 @@ class ActiveHedgeSchema(BaseModel):
 class NextEntrySchema(BaseModel):
     """Schema for next scheduled entry."""
     portfolio: str
+    portfolio_name: Optional[str] = None  # Alias for frontend compatibility
     entry_time: str
     seconds_until: int
+    minutes_until: Optional[int] = None
+    num_baskets: Optional[int] = None
+    is_imminent: Optional[bool] = None
 
 
 class SimulatedHedgeSchema(BaseModel):

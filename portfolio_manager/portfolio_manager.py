@@ -305,26 +305,28 @@ def run_live(args):
         except Exception as e:
             logger.warning(f"Failed to initialize strategy manager: {e}")
 
-    # Load capital from database (READ-ONLY)
-    # PM startup NEVER modifies capital/equity - only reads from DB.
-    # Capital changes require admin authentication via /capital/inject API.
+    # Get capital from ledger (REQUIRED - no CLI override allowed)
+    # The capital ledger is the single source of truth
     if not db_manager:
-        logger.critical("Database required for live mode. Use --db-config.")
+        logger.error("=" * 70)
+        logger.error("FATAL: Database connection required for capital ledger")
+        logger.error("PM cannot start without reading capital from the ledger.")
+        logger.error("Please provide --db-config to enable database connection.")
+        logger.error("=" * 70)
         sys.exit(1)
 
-    db_state = db_manager.get_portfolio_state()
-    if db_state and db_state.get('initial_capital'):
-        initial_capital = float(db_state['initial_capital'])
-        closed_equity = float(db_state.get('closed_equity', initial_capital))
-        logger.info(
-            f"✓ Loaded from database (READ-ONLY): "
-            f"capital=₹{initial_capital:,.0f}, equity=₹{closed_equity:,.0f}"
-        )
-    else:
-        logger.critical(
-            "No capital found in database. "
-            "Use /capital/inject API with admin password to add initial capital."
-        )
+    try:
+        equity_data = db_manager.get_current_equity_from_ledger()
+        initial_capital = equity_data['current_equity']
+        logger.info(f"✓ Equity loaded from ledger: ₹{initial_capital:,.0f}")
+        logger.info(f"  Deposits: ₹{equity_data['total_deposits']:,.0f}, "
+                   f"Withdrawals: ₹{equity_data['total_withdrawals']:,.0f}, "
+                   f"Trading P&L: ₹{equity_data['total_trading_pnl']:,.0f}")
+    except ValueError as e:
+        logger.error("=" * 70)
+        logger.error(f"FATAL: {e}")
+        logger.error("Add initial capital via frontend Operations > Capital tab.")
+        logger.error("=" * 70)
         sys.exit(1)
 
     # Initialize broker client using factory
@@ -1141,7 +1143,7 @@ def run_live(args):
                 }), 400
 
             # Execute the capital transaction
-            result = db_manager.inject_capital(
+            result = db_manager.record_capital_change(
                 transaction_type=transaction_type.upper(),
                 amount=float(amount),
                 notes=notes,
@@ -3353,9 +3355,8 @@ def main():
                             help='Broker name (default: zerodha)')
     live_parser.add_argument('--api-key', type=str, required=True,
                             help='OpenAlgo API key')
-    # NOTE: --capital flag REMOVED for live mode.
-    # Capital/equity MUST come from database only.
-    # Use /capital/inject API with admin password to add capital.
+    # NOTE: --capital removed. Capital is ALWAYS read from the ledger (capital_transactions table)
+    # This ensures the ledger is the single source of truth for capital management.
     live_parser.add_argument('--disable-rollover', action='store_true',
                             help='Disable automatic rollover scheduler')
     live_parser.add_argument('--db-config', type=str,
