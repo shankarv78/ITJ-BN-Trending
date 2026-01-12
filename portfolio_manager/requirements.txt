@@ -40,3 +40,7 @@ APScheduler>=3.10.0
 pyttsx3>=2.90  # Text-to-speech
 SpeechRecognition>=3.10.0  # Voice acknowledgment (optional)
 pyaudio>=0.2.14  # Audio input for speech recognition (optional)
+
+# Telegram Bot
+python-telegram-bot>=21.0  # Telegram bot for queries and alerts
+httpx>=0.25.0  # Async HTTP client for alert publisher

@@ -1,0 +1,20 @@
+{
+  "bot_token": "YOUR_BOT_TOKEN_FROM_BOTFATHER",
+  "chat_id": "YOUR_CHAT_ID",
+  "allowed_user_ids": [],
+  "enabled": true,
+  "alerts_enabled": true,
+  "heartbeat_enabled": true,
+  "daily_report_enabled": true,
+  "rate_limit_per_minute": 20,
+  "alert_queue_size": 100,
+  "heartbeat_interval_minutes": 60,
+  "daily_report_hour": 16,
+  "daily_report_minute": 0,
+  "market_open_hour": 9,
+  "market_open_minute": 15,
+  "market_close_hour": 15,
+  "market_close_minute": 30,
+  "mcx_close_hour": 23,
+  "mcx_close_minute": 30
+}

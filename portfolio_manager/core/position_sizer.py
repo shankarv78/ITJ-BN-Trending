@@ -268,3 +268,111 @@ class TomBassoPositionSizer:
             logger.info(f"Peel-off required: {lots_to_peel} lots ({reason})")
 
         return lots_to_peel, reason or ""
+
+    def create_sizing_data_for_audit(
+        self,
+        signal: Signal,
+        equity: float,
+        available_margin: float,
+        constraints: TomBassoConstraints,
+        is_pyramid: bool = False,
+        base_position_size: int = 0,
+        profit_after_base_risk: float = 0.0,
+        pyramid_count: int = 0
+    ) -> dict:
+        """
+        Create sizing calculation data for audit trail.
+
+        Args:
+            signal: The signal being processed
+            equity: Current portfolio equity
+            available_margin: Available margin in Rs
+            constraints: The calculated TomBassoConstraints
+            is_pyramid: True if this is a pyramid calculation
+            base_position_size: For pyramids, the base position size
+            profit_after_base_risk: For pyramids, profit beyond base risk
+            pyramid_count: For pyramids, current pyramid count
+
+        Returns:
+            Dictionary suitable for signal_audit.sizing_calculation JSONB
+        """
+        entry_price = signal.price
+        stop_price = signal.stop
+        stop_distance = entry_price - stop_price
+
+        if is_pyramid:
+            # Pyramid sizing data
+            geometric_multiplier = 0.5 ** (pyramid_count + 1)
+            available_risk_budget = profit_after_base_risk * 0.5
+            risk_per_lot = stop_distance * self.point_value if stop_distance > 0 else 0
+
+            return {
+                "method": "TOM_BASSO_PYRAMID",
+                "inputs": {
+                    "equity": equity,
+                    "available_margin": available_margin,
+                    "entry_price": entry_price,
+                    "stop_price": stop_price,
+                    "stop_distance": stop_distance,
+                    "margin_per_lot": self.margin_per_lot,
+                    "point_value": self.point_value,
+                    "base_position_size": base_position_size,
+                    "profit_after_base_risk": profit_after_base_risk,
+                    "pyramid_count": pyramid_count,
+                    "geometric_multiplier": geometric_multiplier
+                },
+                "calculation": {
+                    "constraint_a_margin": constraints.lot_r,
+                    "constraint_b_discipline": constraints.lot_v,
+                    "constraint_c_risk_budget": constraints.lot_m,
+                    "available_risk_budget": available_risk_budget,
+                    "risk_per_lot": risk_per_lot,
+                    "final_lots": constraints.final_lots
+                },
+                "constraints_applied": [
+                    {"constraint": "MARGIN", "value": constraints.lot_r},
+                    {"constraint": "DISCIPLINE", "value": constraints.lot_v, "geometric": f"0.5^{pyramid_count+1}"},
+                    {"constraint": "RISK_BUDGET", "value": constraints.lot_m}
+                ],
+                "limiter": constraints.limiter.upper()
+            }
+        else:
+            # Base entry sizing data
+            risk_percent = self.config.initial_risk_percent
+            risk_amount = equity * (risk_percent / 100.0)
+            risk_per_lot = stop_distance * self.point_value if stop_distance > 0 else 0
+
+            # Raw lots before ER scaling
+            raw_lots = risk_amount / risk_per_lot if risk_per_lot > 0 else 0
+            er_adjusted_lots = raw_lots * signal.er if signal.er else raw_lots
+
+            return {
+                "method": "TOM_BASSO",
+                "inputs": {
+                    "equity_high": equity,
+                    "risk_percent": risk_percent,
+                    "stop_distance": stop_distance,
+                    "lot_size": self.lot_size,
+                    "point_value": self.point_value,
+                    "efficiency_ratio": signal.er,
+                    "atr": signal.atr,
+                    "margin_per_lot": self.margin_per_lot,
+                    "available_margin": available_margin
+                },
+                "calculation": {
+                    "risk_amount": risk_amount,
+                    "risk_per_lot": risk_per_lot,
+                    "raw_lots": raw_lots,
+                    "er_adjusted_lots": er_adjusted_lots,
+                    "lot_r": constraints.lot_r,
+                    "lot_v": constraints.lot_v,
+                    "lot_m": constraints.lot_m,
+                    "final_lots": constraints.final_lots
+                },
+                "constraints_applied": [
+                    {"constraint": "RISK", "value": constraints.lot_r},
+                    {"constraint": "VOLATILITY", "value": constraints.lot_v, "note": "reference only"},
+                    {"constraint": "MARGIN", "value": constraints.lot_m}
+                ],
+                "limiter": constraints.limiter.upper()
+            }
