@@ -180,27 +180,27 @@ CREATE TABLE margin_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     config_id INTEGER NOT NULL,
     timestamp TIMESTAMP NOT NULL,
-    
+
     -- Raw margin data from Zerodha
     total_margin_used REAL NOT NULL,
     available_margin REAL NOT NULL,
     span_margin REAL,
     exposure_margin REAL,
-    
+
     -- Calculated values
     baseline_margin REAL NOT NULL,
     intraday_margin REAL NOT NULL,          -- total - baseline
     utilization_pct REAL NOT NULL,          -- (intraday / budget) × 100
-    
+
     -- Position summary
     short_positions_count INTEGER,          -- Number of short legs
     short_positions_qty INTEGER,            -- Total short quantity
     long_positions_count INTEGER,           -- Number of long legs (hedges)
     long_positions_qty INTEGER,             -- Total long quantity
-    
+
     -- Cost tracking
     total_hedge_cost REAL,                  -- Premium paid for long positions
-    
+
     FOREIGN KEY (config_id) REFERENCES daily_config(id)
 );
 
@@ -218,7 +218,7 @@ CREATE TABLE position_snapshots (
     position_type TEXT NOT NULL,            -- 'SHORT' or 'LONG'
     option_type TEXT NOT NULL,              -- 'CE' or 'PE'
     strike_price REAL NOT NULL,
-    
+
     FOREIGN KEY (snapshot_id) REFERENCES margin_snapshots(id)
 );
 
@@ -232,26 +232,26 @@ CREATE TABLE daily_summary (
     index_name TEXT NOT NULL,
     num_baskets INTEGER NOT NULL,
     total_budget REAL NOT NULL,
-    
+
     -- Margin metrics
     baseline_margin REAL NOT NULL,
     max_intraday_margin REAL NOT NULL,
     max_utilization_pct REAL NOT NULL,
     avg_utilization_pct REAL,
-    
+
     -- Hedge metrics
     total_hedge_cost REAL NOT NULL,
     max_hedge_positions INTEGER,
-    
+
     -- Position metrics
     max_short_qty INTEGER,
     max_long_qty INTEGER,
-    
+
     -- Timestamps
     first_position_time TIMESTAMP,
     last_position_time TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     FOREIGN KEY (config_id) REFERENCES daily_config(id)
 );
 
@@ -579,33 +579,33 @@ def filter_positions(all_positions, index_name, expiry_date):
     """
     included = []
     excluded = []
-    
+
     for pos in all_positions:
         symbol = pos['tradingsymbol']
-        
+
         # Check index match
         if index_name == 'NIFTY' and not symbol.startswith('NIFTY'):
             excluded.append({**pos, 'reason': 'Wrong index'})
             continue
-            
+
         if index_name == 'SENSEX' and not symbol.startswith('SENSEX'):
             excluded.append({**pos, 'reason': 'Wrong index'})
             continue
-        
+
         # Check product type (should be NRML for this user)
         if pos['product'] != 'NRML':
             excluded.append({**pos, 'reason': f"Product is {pos['product']}, not NRML"})
             continue
-        
+
         # Parse and check expiry
         parsed_expiry = parse_expiry_from_symbol(symbol)
         if parsed_expiry != expiry_date:
             excluded.append({**pos, 'reason': f'Expiry mismatch ({parsed_expiry})'})
             continue
-        
+
         # Position matches - include it
         included.append(pos)
-    
+
     return included, excluded
 
 
@@ -617,13 +617,13 @@ def categorize_positions(filtered_positions):
     """
     shorts = []
     longs = []
-    
+
     for pos in filtered_positions:
         if pos['quantity'] < 0:
             shorts.append(pos)
         else:
             longs.append(pos)
-    
+
     return shorts, longs
 
 
@@ -657,7 +657,7 @@ IST = pytz.timezone('Asia/Kolkata')
 
 def setup_scheduler():
     scheduler = BackgroundScheduler(timezone=IST)
-    
+
     # Baseline capture at 9:16 AM on weekdays
     scheduler.add_job(
         auto_capture_baseline,
@@ -665,7 +665,7 @@ def setup_scheduler():
         id='baseline_capture',
         replace_existing=True
     )
-    
+
     # Regular polling every 5 minutes from 9:20 to 15:30
     scheduler.add_job(
         capture_margin_snapshot,
@@ -677,7 +677,7 @@ def setup_scheduler():
         id='margin_polling',
         replace_existing=True
     )
-    
+
     # EOD summary at 3:35 PM
     scheduler.add_job(
         generate_daily_summary,
@@ -685,7 +685,7 @@ def setup_scheduler():
         id='eod_summary',
         replace_existing=True
     )
-    
+
     return scheduler
 ```
 
@@ -812,25 +812,25 @@ from pathlib import Path
 class Settings:
     # Database
     DB_PATH: Path = Path(__file__).parent.parent / "data" / "margin_monitor.db"
-    
+
     # Kite Connect
     KITE_API_KEY: str = os.getenv("KITE_API_KEY", "")
-    
+
     # OpenAlgo token source (configure based on your setup)
     OPENALGO_TOKEN_FILE: str = os.getenv("OPENALGO_TOKEN_FILE", "")
     OPENALGO_TOKEN_ENDPOINT: str = os.getenv("OPENALGO_TOKEN_ENDPOINT", "")
-    
+
     # Trading parameters
     DEFAULT_BUDGET_PER_BASKET: int = 1000000  # ₹10L
     LOT_SIZE_NIFTY: int = 75
     LOT_SIZE_SENSEX: int = 10
-    
+
     # Scheduler
     POLLING_INTERVAL_MINUTES: int = 5
     BASELINE_CAPTURE_TIME: str = "09:16"
     MARKET_OPEN: str = "09:15"
     MARKET_CLOSE: str = "15:30"
-    
+
     # Timezone
     TIMEZONE: str = "Asia/Kolkata"
 

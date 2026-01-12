@@ -197,5 +197,3 @@ state.latest_signal.position_status.pyramid_count = db_pyramid_count
 | New Pine Scripts | 9 files (+5,319 lines) |
 | Modified Python | 1 file (+72 lines) |
 | Total Changes | 10 files (+5,391 lines) |
-
-

@@ -45,4 +45,3 @@ echo ""
 echo "=========================================="
 echo "Signal sent! Check PM logs for execution."
 echo "=========================================="
-
