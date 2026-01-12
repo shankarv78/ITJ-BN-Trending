@@ -195,16 +195,32 @@ class AutoHedgeOrchestrator:
         self._simulated_pe_qty = 0
         logger.info("[ORCHESTRATOR] Reset simulated margin tracking")
 
-    def _apply_simulated_hedges_to_capacity(self, hedge_capacity: dict) -> dict:
+    async def _apply_simulated_hedges_to_capacity(self, hedge_capacity: dict) -> dict:
         """
         In dry run mode, add simulated hedge quantities to capacity.
         This ensures we don't buy more hedges than short positions.
+
+        CRITICAL: Queries DB directly for accurate quantities to prevent
+        over-buying hedges due to stale in-memory values.
         """
         if not self._dry_run:
             return hedge_capacity
 
-        hedge_capacity['long_ce_qty'] += self._simulated_ce_qty
-        hedge_capacity['long_pe_qty'] += self._simulated_pe_qty
+        # Log incoming values BEFORE modification
+        broker_ce = hedge_capacity.get('long_ce_qty', 0)
+        broker_pe = hedge_capacity.get('long_pe_qty', 0)
+
+        # Query DB for authoritative hedge quantities (not in-memory which can be stale)
+        db_ce_qty, db_pe_qty, db_count = await self._get_db_hedge_totals()
+
+        logger.info(
+            f"[ORCHESTRATOR] Capacity calculation: "
+            f"broker_longs=(CE:{broker_ce}, PE:{broker_pe}), "
+            f"db_simulated=(CE:{db_ce_qty}, PE:{db_pe_qty}, count:{db_count})"
+        )
+
+        hedge_capacity['long_ce_qty'] += db_ce_qty
+        hedge_capacity['long_pe_qty'] += db_pe_qty
         hedge_capacity['remaining_ce_capacity'] = max(
             0, hedge_capacity['short_ce_qty'] - hedge_capacity['long_ce_qty']
         )
@@ -215,6 +231,13 @@ class AutoHedgeOrchestrator:
             hedge_capacity['remaining_ce_capacity'] == 0 and
             hedge_capacity['remaining_pe_capacity'] == 0
         )
+
+        logger.info(
+            f"[ORCHESTRATOR] Final capacity: "
+            f"CE {hedge_capacity['long_ce_qty']}/{hedge_capacity['short_ce_qty']}, "
+            f"PE {hedge_capacity['long_pe_qty']}/{hedge_capacity['short_pe_qty']}"
+        )
+
         return hedge_capacity
 
     async def _check_and_act(self):
@@ -271,6 +294,19 @@ class AutoHedgeOrchestrator:
 
         logger.info(f"[ORCHESTRATOR] Running checks: {', '.join(check_reasons)}")
 
+        # In dry run mode, sync hedge quantities from DB to ensure accuracy
+        # This handles cases where in-memory tracking gets out of sync (e.g., restart)
+        if self._dry_run:
+            db_ce_qty, db_pe_qty, _ = await self._get_db_hedge_totals()
+            if db_ce_qty != self._simulated_ce_qty or db_pe_qty != self._simulated_pe_qty:
+                logger.info(
+                    f"[ORCHESTRATOR] Syncing hedge qty from DB at check cycle: "
+                    f"CE {self._simulated_ce_qty} -> {db_ce_qty}, "
+                    f"PE {self._simulated_pe_qty} -> {db_pe_qty}"
+                )
+                self._simulated_ce_qty = db_ce_qty
+                self._simulated_pe_qty = db_pe_qty
+
         # Get current margin status (API call)
         margin_data = await self._get_current_margin()
         if not margin_data:
@@ -280,14 +316,44 @@ class AutoHedgeOrchestrator:
         real_util = margin_data['utilization_pct']
         real_intraday = margin_data.get('intraday_margin', 0)
 
-        # In dry run mode, calculate simulated utilization
-        if self._dry_run and self._simulated_margin_reduction > 0:
-            simulated_intraday = real_intraday - self._simulated_margin_reduction
+        # In dry run mode, calculate simulated utilization based on COVERAGE
+        # SPAN margin gives ~56% reduction when fully hedged (from Sensibull: ₹3.13Cr -> ₹1.37Cr)
+        if self._dry_run and (self._simulated_ce_qty > 0 or self._simulated_pe_qty > 0):
+            # Get current positions to calculate coverage
+            positions = await self._get_positions()
+            filtered = position_service.filter_positions(
+                positions, self._session_cache['index'], self._session_cache['expiry_date']
+            )
+            summary = position_service.get_summary(filtered)
+
+            # Calculate coverage percentage for each side
+            short_ce = summary.get('short_ce_qty', 0) or 1  # Avoid division by zero
+            short_pe = summary.get('short_pe_qty', 0) or 1
+            ce_coverage = min(1.0, self._simulated_ce_qty / short_ce)
+            pe_coverage = min(1.0, self._simulated_pe_qty / short_pe)
+
+            # Average coverage (weighted by short quantity)
+            total_short = short_ce + short_pe
+            if total_short > 0:
+                avg_coverage = (ce_coverage * short_ce + pe_coverage * short_pe) / total_short
+            else:
+                avg_coverage = 0
+
+            # SPAN margin reduction: ~56% when fully hedged (SENSEX 0DTE empirical)
+            # From Sensibull: ₹3.13Cr -> ₹1.37Cr = 56% reduction at full coverage
+            MAX_REDUCTION_PCT = 0.56
+            reduction_pct = avg_coverage * MAX_REDUCTION_PCT
+            simulated_intraday = real_intraday * (1 - reduction_pct)
             simulated_util = (simulated_intraday / total_budget) * 100 if total_budget > 0 else 0
+
+            # Update stored reduction for status API
+            self._simulated_margin_reduction = real_intraday - simulated_intraday
+
             logger.info(
                 f"[ORCHESTRATOR] real_util={real_util:.1f}%, "
                 f"simulated_util={simulated_util:.1f}% "
-                f"(reduction=₹{self._simulated_margin_reduction:,.0f})"
+                f"(coverage: CE={ce_coverage:.0%}, PE={pe_coverage:.0%}, avg={avg_coverage:.0%}, "
+                f"reduction={reduction_pct:.0%}), intraday=₹{real_intraday:,.0f}"
             )
             current_util = simulated_util
             current_intraday = simulated_intraday
@@ -493,7 +559,7 @@ class AutoHedgeOrchestrator:
         hedge_capacity = position_service.get_hedge_capacity(summary)
 
         # In dry run, add simulated hedges to capacity calculation
-        hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
+        hedge_capacity = await self._apply_simulated_hedges_to_capacity(hedge_capacity)
 
         logger.info(
             f"[ORCHESTRATOR] Hedge capacity: "
@@ -537,9 +603,18 @@ class AutoHedgeOrchestrator:
             )
             return
 
-        # Execute hedge orders with per-hedge capacity validation
+        # Execute hedge orders - recheck capacity after each to prevent over-hedging
         lot_size = LOT_SIZES.get_lot_size(index)
         for hedge in selection.selected:
+            # CRITICAL: Recheck capacity before each hedge to prevent over-hedging
+            # (previous hedge may have filled remaining capacity)
+            current_capacity = await self._apply_simulated_hedges_to_capacity(
+                position_service.get_hedge_capacity(summary)
+            )
+            if current_capacity['is_fully_hedged']:
+                logger.info("[ORCHESTRATOR] Fully hedged after previous hedge - stopping")
+                break
+
             trigger_reason = f"PRE_STRATEGY:{entry.portfolio_name}"
 
             # Pre-execution capacity check: verify this hedge won't exceed short qty
@@ -633,7 +708,7 @@ class AutoHedgeOrchestrator:
         hedge_capacity = position_service.get_hedge_capacity(summary)
 
         # In dry run, add simulated hedges to capacity calculation
-        hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
+        hedge_capacity = await self._apply_simulated_hedges_to_capacity(hedge_capacity)
 
         logger.info(
             f"[ORCHESTRATOR] Hedge capacity: "
@@ -675,9 +750,18 @@ class AutoHedgeOrchestrator:
             )
             return
 
-        # Execute hedge orders with per-hedge capacity validation
+        # Execute hedge orders - recheck capacity after each to prevent over-hedging
         lot_size = LOT_SIZES.get_lot_size(index)
         for hedge in selection.selected:
+            # CRITICAL: Recheck capacity before each hedge to prevent over-hedging
+            # (previous hedge may have filled remaining capacity)
+            current_capacity = await self._apply_simulated_hedges_to_capacity(
+                position_service.get_hedge_capacity(summary)
+            )
+            if current_capacity['is_fully_hedged']:
+                logger.info("[ORCHESTRATOR] Fully hedged after previous hedge - stopping reactive hedging")
+                break
+
             trigger_reason = f"CRITICAL_UTIL:{current_util:.1f}%"
 
             # Pre-execution capacity check: verify this hedge won't exceed short qty
@@ -1148,6 +1232,67 @@ class AutoHedgeOrchestrator:
 
         return []
 
+    async def _get_db_hedge_totals(self) -> tuple:
+        """
+        Query database for actual hedge quantity totals.
+
+        This ensures accuracy even if in-memory tracking gets out of sync.
+
+        Returns:
+            Tuple of (ce_total_qty, pe_total_qty, total_hedge_count)
+        """
+        if not self._session_cache:
+            return 0, 0, 0
+
+        from app.models.hedge_models import HedgeTransaction
+        from sqlalchemy import func, case
+
+        session_id = self._session_cache['id']
+
+        try:
+            async with self.db_factory() as db:
+                # Sum quantities by option type for DRY_RUN BUY transactions
+                result = await db.execute(
+                    select(
+                        func.coalesce(
+                            func.sum(
+                                case(
+                                    (HedgeTransaction.option_type == 'CE', HedgeTransaction.quantity),
+                                    else_=0
+                                )
+                            ), 0
+                        ).label('ce_qty'),
+                        func.coalesce(
+                            func.sum(
+                                case(
+                                    (HedgeTransaction.option_type == 'PE', HedgeTransaction.quantity),
+                                    else_=0
+                                )
+                            ), 0
+                        ).label('pe_qty'),
+                        func.count(HedgeTransaction.id).label('count')
+                    )
+                    .where(HedgeTransaction.session_id == session_id)
+                    .where(HedgeTransaction.action == 'BUY')
+                    .where(HedgeTransaction.order_status == 'DRY_RUN')
+                )
+                row = result.first()
+
+                if row:
+                    ce_qty = int(row.ce_qty)
+                    pe_qty = int(row.pe_qty)
+                    count = int(row.count)
+                    logger.debug(
+                        f"[ORCHESTRATOR] DB hedge totals for session {session_id}: "
+                        f"CE={ce_qty}, PE={pe_qty}, count={count}"
+                    )
+                    return ce_qty, pe_qty, count
+
+        except Exception as e:
+            logger.error(f"[ORCHESTRATOR] Error querying hedge totals: {e}")
+
+        return 0, 0, 0
+
     async def _log_strategy_execution(
         self,
         portfolio_name: str,
@@ -1250,8 +1395,22 @@ class AutoHedgeOrchestrator:
 
             max_reduction = self._session_cache.get('budget', 0) * 0.75 if self._session_cache else 0
 
+            # Query actual hedge quantities from DB to ensure accuracy
+            # (in-memory tracking can get out of sync after restarts)
+            db_ce_qty, db_pe_qty, db_hedge_count = await self._get_db_hedge_totals()
+
+            # Update in-memory values to match DB (self-healing)
+            if db_ce_qty != self._simulated_ce_qty or db_pe_qty != self._simulated_pe_qty:
+                logger.info(
+                    f"[ORCHESTRATOR] Syncing hedge qty from DB: "
+                    f"CE {self._simulated_ce_qty} -> {db_ce_qty}, "
+                    f"PE {self._simulated_pe_qty} -> {db_pe_qty}"
+                )
+                self._simulated_ce_qty = db_ce_qty
+                self._simulated_pe_qty = db_pe_qty
+
             # Sanity check: if no hedges, no reduction
-            hedge_count = len(self._simulated_hedges)
+            hedge_count = db_hedge_count
             total_reduction = self._simulated_margin_reduction if hedge_count > 0 else 0.0
 
             response['simulated_margin'] = {
@@ -1260,8 +1419,8 @@ class AutoHedgeOrchestrator:
                 'hedge_count': hedge_count,
                 'ce_hedge_count': sum(1 for h in self._simulated_hedges if h.get('option_type') == 'CE'),
                 'pe_hedge_count': sum(1 for h in self._simulated_hedges if h.get('option_type') == 'PE'),
-                'ce_hedge_qty': self._simulated_ce_qty,
-                'pe_hedge_qty': self._simulated_pe_qty,
+                'ce_hedge_qty': db_ce_qty,  # Use DB value for accuracy
+                'pe_hedge_qty': db_pe_qty,  # Use DB value for accuracy
                 'real_utilization_pct': round(real_util, 1),
                 'simulated_utilization_pct': round(simulated_util if hedge_count > 0 else real_util, 1),
                 'hedges': self._simulated_hedges[-10:]  # Last 10 simulated hedges
@@ -1275,7 +1434,7 @@ class AutoHedgeOrchestrator:
                 if hasattr(self.margin_service, 'get_position_summary'):
                     summary = await self.margin_service.get_position_summary()
                     hedge_capacity = position_service.get_hedge_capacity(summary)
-                    hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
+                    hedge_capacity = await self._apply_simulated_hedges_to_capacity(hedge_capacity)
                     response['hedge_capacity'] = hedge_capacity
                 else:
                     # Fallback to manual filtering
@@ -1287,7 +1446,7 @@ class AutoHedgeOrchestrator:
                         )
                         summary = position_service.get_summary(filtered)
                         hedge_capacity = position_service.get_hedge_capacity(summary)
-                        hedge_capacity = self._apply_simulated_hedges_to_capacity(hedge_capacity)
+                        hedge_capacity = await self._apply_simulated_hedges_to_capacity(hedge_capacity)
                         response['hedge_capacity'] = hedge_capacity
 
                 # Check for over-hedging and add warnings
