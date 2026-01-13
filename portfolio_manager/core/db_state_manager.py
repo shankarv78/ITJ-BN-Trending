@@ -373,6 +373,26 @@ class DatabaseStateManager:
 
             return pyr_state
 
+    def clear_pyramiding_state(self, instrument: str) -> bool:
+        """
+        Clear pyramiding state for an instrument (e.g., after manual exit)
+
+        Args:
+            instrument: Instrument name (BANK_NIFTY, GOLD_MINI, etc.)
+
+        Returns:
+            True if successful
+        """
+        with self.transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM pyramiding_state
+                WHERE instrument = %s
+            """, (instrument,))
+            deleted = cursor.rowcount
+            logger.info(f"Cleared pyramiding state for {instrument} (rows deleted: {deleted})")
+            return True
+
     # ===== SIGNAL DEDUPLICATION =====
 
     def check_duplicate_signal(self, fingerprint: str) -> bool:
