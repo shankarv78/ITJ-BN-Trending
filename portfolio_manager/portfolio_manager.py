@@ -1244,6 +1244,70 @@ def run_live(args):
                 'message': str(e)
             }), 500
 
+    @app.route('/equity', methods=['GET'])
+    def equity_history():
+        """
+        Get historical equity curve data from capital transactions.
+
+        Each transaction (DEPOSIT, WITHDRAW, TRADING_PNL) records equity_before and equity_after,
+        giving us a complete equity history.
+
+        Query params:
+        - limit: Max data points (default: 100)
+        """
+        if not db_manager:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database persistence not configured',
+                'data': []
+            }), 400
+
+        try:
+            limit = min(int(request.args.get('limit', 100)), 500)
+
+            with db_manager.get_connection() as conn:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+                # Get equity history from capital transactions
+                # Each row gives us the equity at that point in time
+                cursor.execute("""
+                    SELECT
+                        created_at as timestamp,
+                        transaction_type,
+                        amount,
+                        equity_after as equity,
+                        notes
+                    FROM capital_transactions
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                """, (limit,))
+
+                rows = cursor.fetchall()
+
+                data = []
+                for row in rows:
+                    data.append({
+                        'timestamp': row['timestamp'].isoformat(),
+                        'equity': float(row['equity']),
+                        'type': row['transaction_type'],
+                        'amount': float(row['amount']),
+                        'notes': row['notes']
+                    })
+
+                return jsonify({
+                    'status': 'success',
+                    'data': data,
+                    'count': len(data)
+                }), 200
+
+        except Exception as e:
+            logger.error(f"Failed to get equity history: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': str(e),
+                'data': []
+            }), 500
+
     @app.route('/status', methods=['GET'])
     def status():
         """Get current portfolio status with full details (cached for 2 seconds)"""
@@ -1294,14 +1358,33 @@ def run_live(args):
     @app.route('/positions', methods=['GET'])
     def positions():
         """Get all open positions"""
+        from core.config import INSTRUMENT_CONFIGS
+        from core.models import InstrumentType
+
         state = engine.portfolio.get_current_state()
         positions_data = {}
         for pos_id, pos in state.get_open_positions().items():
+            # Get point value for P&L calculation (convert string to enum for lookup)
+            try:
+                instrument_enum = InstrumentType(pos.instrument)
+                inst_config = INSTRUMENT_CONFIGS.get(instrument_enum)
+                point_value = inst_config.point_value if inst_config else 1.0
+            except (ValueError, KeyError):
+                point_value = 1.0
+
+            # Calculate unrealized P&L using highest_close as current price proxy
+            current_price = pos.highest_close if pos.highest_close > 0 else pos.entry_price
+            unrealized_pnl = (current_price - pos.entry_price) * pos.lots * point_value
+
             positions_data[pos_id] = {
                 'instrument': pos.instrument,
                 'lots': pos.lots,
                 'entry_price': pos.entry_price,
                 'current_stop': pos.current_stop,
+                'highest_close': pos.highest_close,
+                'current_price': current_price,
+                'unrealized_pnl': unrealized_pnl,
+                'atr': pos.atr,
                 'expiry': pos.expiry,
                 'strike': pos.strike,
                 'rollover_status': pos.rollover_status,

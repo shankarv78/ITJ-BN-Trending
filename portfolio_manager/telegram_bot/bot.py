@@ -15,10 +15,14 @@ Commands:
 
 import logging
 import asyncio
+import httpx
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+# PM API endpoint
+PM_API_URL = "http://127.0.0.1:5002"
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -66,7 +70,23 @@ class PortfolioManagerBot:
         self.application: Optional[Application] = None
         self._running = False
 
+        # Dual-channel confirmation manager (optional)
+        self.confirmation_manager = None
+
         logger.info("[TelegramBot] Bot initialized")
+
+    def set_confirmation_manager(self, manager):
+        """
+        Set the dual-channel confirmation manager.
+
+        This enables the bot to handle inline keyboard callbacks
+        for confirmation dialogs.
+
+        Args:
+            manager: DualChannelConfirmationManager instance
+        """
+        self.confirmation_manager = manager
+        logger.info("[TelegramBot] Confirmation manager set")
 
     async def _check_authorized(self, update: Update) -> bool:
         """
@@ -162,7 +182,7 @@ Commands:
             await update.message.reply_text(f"Error getting status: {e}")
 
     async def signals_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /signals command - recent signals."""
+        """Handle /signals command - recent signals from audit trail."""
         if not await self._check_authorized(update):
             return
 
@@ -180,24 +200,25 @@ Commands:
                 else:
                     instrument = context.args[0].upper()
 
-            # Get recent signals
+            # Query signal_audit table
+            if not self.audit_service:
+                await update.message.reply_text("Audit service not connected. Use /signalsold for historic signals.")
+                return
+
             signals = self.audit_service.get_recent_signals(
                 limit=limit,
                 instrument=instrument
             )
 
             if not signals:
-                await update.message.reply_text("No signals found.")
+                await update.message.reply_text("No audit records yet. Use /signalsold for historic signals.")
                 return
 
             # Format output
-            lines = [f"**Recent Signals** (last {len(signals)})\n"]
+            lines = [f"**Signal Audit Trail** (last {len(signals)})\n"]
 
             for sig in signals:
                 outcome_emoji = self._get_outcome_emoji(sig.get('outcome', ''))
-                timestamp = sig.get('signal_timestamp', '')
-                if isinstance(timestamp, datetime):
-                    timestamp = timestamp.strftime('%m-%d %H:%M')
 
                 line = (
                     f"{outcome_emoji} #{sig.get('id', '?')} "
@@ -213,6 +234,64 @@ Commands:
 
         except Exception as e:
             logger.error(f"[TelegramBot] Error in signals command: {e}")
+            await update.message.reply_text(f"Error getting signals: {e}")
+
+    async def signalsold_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /signalsold command - historic signals from PM's signal_log."""
+        if not await self._check_authorized(update):
+            return
+
+        try:
+            # Parse arguments
+            limit = 10
+            instrument = None
+
+            if context.args:
+                if context.args[0].isdigit():
+                    limit = min(int(context.args[0]), 50)
+                    if len(context.args) > 1:
+                        instrument = context.args[1].upper()
+                else:
+                    instrument = context.args[0].upper()
+
+            # Query PM API for signals
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                params = {"limit": limit}
+                if instrument:
+                    params["instrument"] = instrument
+                response = await client.get(f"{PM_API_URL}/signals", params=params)
+
+                if response.status_code != 200:
+                    await update.message.reply_text(f"PM API error: {response.status_code}")
+                    return
+
+                data = response.json()
+                signals = data.get("signals", [])
+
+            if not signals:
+                await update.message.reply_text("No signals found.")
+                return
+
+            # Format output
+            lines = [f"**Historic Signals** (last {len(signals)})\n"]
+
+            for sig in signals:
+                status = sig.get('status', 'unknown')
+                status_emoji = {"executed": "✅", "rejected": "❌", "blocked": "🚫", "error": "⚠️"}.get(status, "❓")
+
+                line = (
+                    f"{status_emoji} #{sig.get('id', '?')} "
+                    f"{sig.get('instrument', '?')} {sig.get('signal_type', '?')} "
+                    f"- {status}"
+                )
+                lines.append(line)
+
+            await update.message.reply_text('\n'.join(lines))
+
+        except httpx.ConnectError:
+            await update.message.reply_text("Cannot connect to PM. Is it running?")
+        except Exception as e:
+            logger.error(f"[TelegramBot] Error in signalsold command: {e}")
             await update.message.reply_text(f"Error getting signals: {e}")
 
     async def orders_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,35 +583,48 @@ Commands:
             return
 
         try:
-            if not self.portfolio_manager:
-                await update.message.reply_text("Portfolio manager not connected.")
-                return
+            # Query PM API for positions
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{PM_API_URL}/positions", params={"status": "open"})
 
-            state = self.portfolio_manager.get_current_state()
-            open_positions = [p for p in state.positions.values() if p.status == 'open']
+                if response.status_code != 200:
+                    await update.message.reply_text(f"PM API error: {response.status_code}")
+                    return
 
-            if not open_positions:
+                data = response.json()
+                positions_dict = data.get("positions", {})
+                positions = list(positions_dict.values()) if isinstance(positions_dict, dict) else positions_dict
+
+            if not positions:
                 await update.message.reply_text("No open positions.")
                 return
 
-            lines = [f"**Open Positions** ({len(open_positions)})\n"]
+            lines = [f"**Open Positions** ({len(positions)})\n"]
 
-            for pos in open_positions:
+            for pos in positions:
                 # Calculate unrealized P&L if possible
                 pnl_str = ""
-                if hasattr(pos, 'unrealized_pnl') and pos.unrealized_pnl is not None:
-                    pnl_emoji = "" if pos.unrealized_pnl >= 0 else ""
-                    pnl_str = f" ({pnl_emoji} Rs {abs(pos.unrealized_pnl):,.0f})"
+                unrealized_pnl = pos.get('unrealized_pnl')
+                if unrealized_pnl is not None:
+                    pnl_emoji = "📈" if unrealized_pnl >= 0 else "📉"
+                    pnl_str = f" ({pnl_emoji} Rs {abs(unrealized_pnl):,.0f})"
+
+                instrument = pos.get('instrument', 'Unknown')
+                lots = pos.get('lots', 0)
+                entry_price = pos.get('entry_price', 0)
+                current_stop = pos.get('current_stop', 0)
 
                 line = (
-                    f"**{pos.instrument}** {pos.position}\n"
-                    f"  Lots: {pos.lots} @ Rs {pos.entry_price:,.2f}{pnl_str}\n"
-                    f"  Stop: Rs {pos.current_stop:,.2f}"
+                    f"**{instrument}**\n"
+                    f"  Lots: {lots} @ Rs {entry_price:,.2f}{pnl_str}\n"
+                    f"  Stop: Rs {current_stop:,.2f}"
                 )
                 lines.append(line)
 
             await update.message.reply_text('\n'.join(lines))
 
+        except httpx.ConnectError:
+            await update.message.reply_text("Cannot connect to PM. Is it running?")
         except Exception as e:
             logger.error(f"[TelegramBot] Error in positions command: {e}")
             await update.message.reply_text(f"Error getting positions: {e}")
@@ -573,13 +665,61 @@ Commands:
         self.application.add_handler(CommandHandler(['start', 'help'], self.start_command))
         self.application.add_handler(CommandHandler('status', self.status_command))
         self.application.add_handler(CommandHandler('signals', self.signals_command))
+        self.application.add_handler(CommandHandler('signalsold', self.signalsold_command))
         self.application.add_handler(CommandHandler('orders', self.orders_command))
         self.application.add_handler(CommandHandler('stats', self.stats_command))
         self.application.add_handler(CommandHandler('sizing', self.sizing_command))
         self.application.add_handler(CommandHandler('signal', self.signal_detail_command))
         self.application.add_handler(CommandHandler('positions', self.positions_command))
 
+        # Callback handler for inline keyboard confirmations
+        self.application.add_handler(
+            CallbackQueryHandler(
+                self._handle_confirmation_callback,
+                pattern="^confirm:"
+            )
+        )
+
         logger.info("[TelegramBot] Command handlers registered")
+
+    async def _handle_confirmation_callback(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """
+        Handle callback queries from confirmation inline keyboards.
+
+        Routes callbacks to the confirmation manager if available.
+        """
+        if not update.callback_query:
+            return
+
+        callback_query = update.callback_query
+
+        # Check authorization
+        user_id = callback_query.from_user.id if callback_query.from_user else None
+        if self.allowed_user_ids is not None:
+            if not self.allowed_user_ids or user_id not in self.allowed_user_ids:
+                logger.warning(f"[TelegramBot] Unauthorized callback from user_id={user_id}")
+                await callback_query.answer("Unauthorized")
+                return
+
+        # Route to confirmation manager
+        if self.confirmation_manager:
+            try:
+                handled = await self.confirmation_manager.handle_telegram_callback(
+                    callback_query
+                )
+                if handled:
+                    return
+            except Exception as e:
+                logger.error(f"[TelegramBot] Error handling confirmation callback: {e}")
+                await callback_query.answer("Error processing confirmation")
+                return
+
+        # No confirmation manager or callback not recognized
+        await callback_query.answer("Unknown callback")
 
     async def start(self):
         """Start the bot."""

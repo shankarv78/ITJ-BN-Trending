@@ -142,6 +142,10 @@ class LiveTradingEngine:
             self.audit_service = SignalAuditService(db_manager)
             logger.info("[LIVE] Signal audit service initialized")
 
+        # Dual-channel confirmation manager (set via set_confirmation_manager)
+        # When set, confirmation dialogs will be sent to both macOS AND Telegram
+        self.confirmation_manager = None
+
         # Order executor based on config
         if self.config.execution_strategy == "simple_limit":
             self.order_executor: OrderExecutor = SimpleLimitExecutor(openalgo_client=self.openalgo)
@@ -181,6 +185,29 @@ class LiveTradingEngine:
             f"Execution strategy={self.config.execution_strategy}, "
             f"EOD={'enabled' if self.config.eod_enabled else 'disabled'}"
         )
+
+    def set_confirmation_manager(self, confirmation_manager):
+        """
+        Set the dual-channel confirmation manager.
+
+        When set, confirmation dialogs (e.g., validation failures) will be sent
+        to BOTH macOS dialog AND Telegram simultaneously. First response wins.
+
+        This method also wires the confirmation manager to the VoiceAnnouncer
+        so existing confirmation flows automatically use dual-channel.
+
+        Args:
+            confirmation_manager: SyncConfirmationBridge instance
+        """
+        self.confirmation_manager = confirmation_manager
+
+        # Wire to VoiceAnnouncer so existing flows use dual-channel
+        announcer = get_announcer()
+        if announcer:
+            announcer.set_confirmation_manager(confirmation_manager)
+            logger.info("[LIVE] Dual-channel confirmation manager set (macOS + Telegram)")
+        else:
+            logger.warning("[LIVE] VoiceAnnouncer not available - confirmations will be Telegram only")
 
     def _get_broker_price_with_timeout(
         self,
