@@ -2578,6 +2578,169 @@ def run_live(args):
             'results': results
         }), 200
 
+    @app.route('/manual-exit', methods=['POST'])
+    def manual_exit():
+        """
+        Record positions as closed after manual broker exit (e.g., SL-M order filled)
+
+        This endpoint updates PM records WITHOUT placing any broker orders.
+        Use when positions have been closed directly in the broker (SL-M, manual exit, etc.)
+        and PM needs to be updated to reflect the actual state.
+
+        Required JSON body:
+        {
+            "instrument": "GOLD_MINI",  // or BANK_NIFTY, SILVER_MINI, COPPER
+            "exit_price": 141000.0,     // actual fill price from broker
+            "reason": "sl_m_triggered"  // optional, for audit trail
+        }
+
+        Optional:
+        {
+            "position_ids": ["GOLD_MINI_Long_1"],  // specific positions (default: all open)
+            "exit_time": "2024-01-13T13:30:00"     // ISO format (default: now)
+        }
+        """
+        try:
+            data = request.json
+            if not data:
+                return jsonify({'error': 'JSON body required'}), 400
+
+            # Validate required fields
+            instrument = data.get('instrument')
+            exit_price = data.get('exit_price')
+
+            if not instrument:
+                return jsonify({'error': 'instrument is required'}), 400
+            if exit_price is None:
+                return jsonify({'error': 'exit_price is required'}), 400
+
+            # Validate instrument
+            valid_instruments = ['GOLD_MINI', 'BANK_NIFTY', 'SILVER_MINI', 'COPPER']
+            if instrument not in valid_instruments:
+                return jsonify({
+                    'error': f'Invalid instrument. Must be one of: {valid_instruments}'
+                }), 400
+
+            exit_price = float(exit_price)
+            reason = data.get('reason', 'manual_broker_exit')
+            position_ids = data.get('position_ids')  # Optional: specific positions
+
+            # Parse exit_time or use now
+            exit_time_str = data.get('exit_time')
+            if exit_time_str:
+                exit_time = datetime.fromisoformat(exit_time_str)
+            else:
+                exit_time = datetime.now()
+
+            # Get open positions for this instrument
+            state = engine.portfolio.get_current_state()
+            all_positions = state.get_open_positions()
+
+            # Filter to specified instrument (and position_ids if provided)
+            positions_to_close = {}
+            for pos_id, pos in all_positions.items():
+                if pos.instrument == instrument:
+                    if position_ids is None or pos_id in position_ids:
+                        positions_to_close[pos_id] = pos
+
+            if not positions_to_close:
+                return jsonify({
+                    'success': False,
+                    'message': f'No open positions found for {instrument}',
+                    'closed': []
+                }), 404
+
+            # Close each position (NO BROKER ORDERS - just update PM records)
+            results = []
+            total_pnl = 0.0
+            total_lots = 0
+
+            for pos_id, pos in positions_to_close.items():
+                try:
+                    # Use portfolio.close_position which updates:
+                    # - Position status to 'closed'
+                    # - Calculates and records realized P&L
+                    # - Updates closed_equity
+                    # - Saves to database
+                    pnl = engine.portfolio.close_position(pos_id, exit_price, exit_time)
+                    total_pnl += pnl
+                    total_lots += pos.lots
+
+                    results.append({
+                        'position_id': pos_id,
+                        'lots': pos.lots,
+                        'entry_price': pos.entry_price,
+                        'exit_price': exit_price,
+                        'pnl': pnl,
+                        'status': 'closed'
+                    })
+
+                    logger.info(f"[MANUAL-EXIT] Closed {pos_id}: {pos.lots} lots @ ₹{exit_price:,.2f}, P&L=₹{pnl:,.0f}")
+
+                except Exception as e:
+                    logger.error(f"[MANUAL-EXIT] Failed to close {pos_id}: {e}")
+                    results.append({
+                        'position_id': pos_id,
+                        'lots': pos.lots,
+                        'status': f'error: {str(e)}'
+                    })
+
+            # Clear engine tracking for this instrument so TV EXIT signals are rejected
+            if instrument in engine.base_positions:
+                del engine.base_positions[instrument]
+                logger.info(f"[MANUAL-EXIT] Cleared base_positions for {instrument}")
+
+            if instrument in engine.last_pyramid_price:
+                del engine.last_pyramid_price[instrument]
+                logger.info(f"[MANUAL-EXIT] Cleared last_pyramid_price for {instrument}")
+
+            # Clear pyramiding state in database
+            if db_manager:
+                try:
+                    db_manager.clear_pyramiding_state(instrument)
+                    logger.info(f"[MANUAL-EXIT] Cleared pyramiding state in DB for {instrument}")
+                except Exception as e:
+                    logger.warning(f"[MANUAL-EXIT] Failed to clear pyramiding state: {e}")
+
+            # Send Telegram notification
+            if telegram_notifier:
+                try:
+                    telegram_notifier.send_alert(
+                        f"📋 MANUAL EXIT RECORDED\n"
+                        f"Instrument: {instrument}\n"
+                        f"Exit Price: ₹{exit_price:,.2f}\n"
+                        f"Positions: {len(results)}\n"
+                        f"Total Lots: {total_lots}\n"
+                        f"Total P&L: ₹{total_pnl:,.0f}\n"
+                        f"Reason: {reason}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[MANUAL-EXIT] Telegram notification failed: {e}")
+
+            # Get updated equity
+            new_state = engine.portfolio.get_current_state()
+
+            return jsonify({
+                'success': True,
+                'message': f'Manually closed {len(results)} positions for {instrument}',
+                'instrument': instrument,
+                'exit_price': exit_price,
+                'exit_time': exit_time.isoformat(),
+                'reason': reason,
+                'total_lots': total_lots,
+                'total_pnl': total_pnl,
+                'new_closed_equity': new_state.closed_equity,
+                'results': results,
+                'note': 'NO broker orders placed - PM records updated only'
+            }), 200
+
+        except Exception as e:
+            logger.error(f"[MANUAL-EXIT] Error: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
     @app.route('/safety/status', methods=['GET'])
     def safety_status():
         """Get current safety status"""
