@@ -252,26 +252,32 @@ class DatabaseStateManager:
 
     # ===== PORTFOLIO STATE OPERATIONS =====
 
-    def save_portfolio_state(self, state: PortfolioState, initial_capital: float) -> bool:
+    def save_portfolio_state(self, state: PortfolioState, initial_capital: float, equity_high: float = None) -> bool:
         """
         Save portfolio state (single-row table)
 
         Args:
             state: PortfolioState object
             initial_capital: Initial capital (not stored in PortfolioState model)
+            equity_high: Tom Basso high watermark for position sizing (optional)
 
         Returns:
             True if successful
         """
+        # Default equity_high to closed_equity if not provided
+        if equity_high is None:
+            equity_high = state.closed_equity
+
         with self.transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO portfolio_state
-                (id, initial_capital, closed_equity, total_risk_amount, total_risk_percent,
+                (id, initial_capital, closed_equity, equity_high, total_risk_amount, total_risk_percent,
                  total_vol_amount, margin_used, version)
-                VALUES (1, %s, %s, %s, %s, %s, %s, 1)
+                VALUES (1, %s, %s, %s, %s, %s, %s, %s, 1)
                 ON CONFLICT (id) DO UPDATE SET
                     closed_equity = EXCLUDED.closed_equity,
+                    equity_high = EXCLUDED.equity_high,
                     total_risk_amount = EXCLUDED.total_risk_amount,
                     total_risk_percent = EXCLUDED.total_risk_percent,
                     total_vol_amount = EXCLUDED.total_vol_amount,
@@ -281,6 +287,7 @@ class DatabaseStateManager:
             """, (
                 initial_capital,
                 state.closed_equity,
+                equity_high,
                 state.total_risk_amount,
                 state.total_risk_percent,
                 state.total_vol_amount,
@@ -290,6 +297,7 @@ class DatabaseStateManager:
             self._portfolio_state_cache = {
                 'initial_capital': initial_capital,
                 'closed_equity': state.closed_equity,
+                'equity_high': equity_high,
                 'total_risk_amount': state.total_risk_amount,
                 'total_risk_percent': state.total_risk_percent,
                 'total_vol_amount': state.total_vol_amount,

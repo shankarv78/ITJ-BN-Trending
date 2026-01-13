@@ -34,22 +34,26 @@ class PortfolioStateManager:
         self.db_manager = db_manager
         self.strategy_manager = strategy_manager
 
-        # Load closed_equity from database if available
+        # Load closed_equity and equity_high from database if available
         if self.db_manager:
             db_state = self.db_manager.get_portfolio_state()
             if db_state:
                 self.closed_equity = float(db_state['closed_equity'])
-                logger.info(f"Loaded closed_equity from database: ₹{self.closed_equity:,.0f}")
+                # Load equity_high (Tom Basso high watermark for position sizing)
+                self.equity_high = float(db_state.get('equity_high') or self.closed_equity)
+                logger.info(f"Loaded from database: closed_equity=₹{self.closed_equity:,.0f}, equity_high=₹{self.equity_high:,.0f}")
             else:
                 self.closed_equity = initial_capital
+                self.equity_high = initial_capital
                 logger.info("No portfolio state in database, using initial_capital")
         else:
             self.closed_equity = initial_capital
+            self.equity_high = initial_capital
 
         # Current state
         self.positions: Dict[str, Position] = {}
 
-        logger.info(f"Portfolio initialized: Capital=₹{initial_capital:,.0f}, Closed Equity=₹{self.closed_equity:,.0f}")
+        logger.info(f"Portfolio initialized: Capital=₹{initial_capital:,.0f}, Closed Equity=₹{self.closed_equity:,.0f}, Equity High=₹{self.equity_high:,.0f}")
 
     def get_current_state(self, current_time: datetime = None) -> PortfolioState:
         """
@@ -227,8 +231,10 @@ class PortfolioStateManager:
         db_state = self.db_manager.get_portfolio_state()
         if db_state:
             old_equity = self.closed_equity
+            old_high = self.equity_high
             self.closed_equity = float(db_state['closed_equity'])
-            logger.info(f"Equity reloaded from DB: ₹{old_equity:,.0f} -> ₹{self.closed_equity:,.0f}")
+            self.equity_high = float(db_state.get('equity_high') or self.closed_equity)
+            logger.info(f"Equity reloaded from DB: closed=₹{old_equity:,.0f}->₹{self.closed_equity:,.0f}, high=₹{old_high:,.0f}->₹{self.equity_high:,.0f}")
         else:
             logger.warning("No portfolio state found in database during reload")
 
@@ -243,7 +249,7 @@ class PortfolioStateManager:
         # This ensures risk/margin are persisted for crash recovery
         if self.db_manager:
             state = self.get_current_state()
-            self.db_manager.save_portfolio_state(state, self.initial_capital)
+            self.db_manager.save_portfolio_state(state, self.initial_capital, self.equity_high)
             logger.debug(f"Portfolio state saved after position add")
 
     def close_position(self, position_id: str, exit_price: float, exit_time: datetime) -> float:
@@ -286,6 +292,12 @@ class PortfolioStateManager:
         # Update closed equity
         self.closed_equity += pnl
 
+        # Update equity_high (Tom Basso high watermark) - only ratchets up
+        if self.closed_equity > self.equity_high:
+            old_high = self.equity_high
+            self.equity_high = self.closed_equity
+            logger.info(f"Equity high watermark updated: ₹{old_high:,.0f} -> ₹{self.equity_high:,.0f}")
+
         # Record P&L in equity ledger (single source of truth for equity)
         if self.db_manager:
             try:
@@ -301,7 +313,7 @@ class PortfolioStateManager:
         # Save portfolio state to database if db_manager available
         if self.db_manager:
             state = self.get_current_state(exit_time)
-            self.db_manager.save_portfolio_state(state, self.initial_capital)
+            self.db_manager.save_portfolio_state(state, self.initial_capital, self.equity_high)
             logger.debug(f"Portfolio state saved to database")
 
         # Log trade to strategy trade history for cumulative P&L tracking

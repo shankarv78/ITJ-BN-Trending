@@ -401,9 +401,10 @@ class LiveTradingEngine:
         # live_equity_raw = funds.get('availablecash', self.portfolio.closed_equity)
         # live_equity = float(live_equity_raw) if isinstance(live_equity_raw, str) else live_equity_raw
 
-        # TESTING: Use portfolio equity to test order placement
-        live_equity = self.portfolio.closed_equity
-        logger.info(f"[LIVE] Using portfolio equity for testing: ₹{live_equity:,.2f}")
+        # Use equity_high (Tom Basso high watermark) for position sizing
+        # This maintains consistent position sizes during drawdowns
+        live_equity = self.portfolio.equity_high
+        logger.info(f"[LIVE] Using equity high for sizing: ₹{live_equity:,.2f} (closed: ₹{self.portfolio.closed_equity:,.2f})")
         available_margin = live_equity * 0.6  # Use 60% of equity as margin
 
         # Calculate position size (SAME as backtest)
@@ -955,7 +956,8 @@ class LiveTradingEngine:
 
         # Calculate pyramid size using Tom Basso 3-constraint method
         # (Don't trust signal.suggested_lots from TradingView - PM calculates sizing)
-        live_equity = self.portfolio.closed_equity
+        # Use equity_high for consistent sizing during drawdowns
+        live_equity = self.portfolio.equity_high
         available_margin = live_equity * 0.6  # Use 60% of equity as margin
 
         # Calculate unrealized P&L for profit constraint
@@ -1125,7 +1127,7 @@ class LiveTradingEngine:
 
         # Calculate risk for announcement (variables needed by announcer)
         est_risk = (execution_price - signal.stop) * original_lots * inst_config.point_value
-        live_equity = self.portfolio.closed_equity
+        live_equity = self.portfolio.equity_high  # Use equity_high for consistent risk %
 
         # Voice announcement: Pre-trade (PYRAMID)
         announcer = get_announcer()
