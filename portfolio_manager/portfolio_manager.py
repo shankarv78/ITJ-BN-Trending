@@ -2587,6 +2587,8 @@ def run_live(args):
         Use when positions have been closed directly in the broker (SL-M, manual exit, etc.)
         and PM needs to be updated to reflect the actual state.
 
+        Requires X-API-KEY header matching EMERGENCY_API_KEY env var.
+
         Required JSON body:
         {
             "instrument": "GOLD_MINI",  // or BANK_NIFTY, SILVER_MINI, COPPER
@@ -2600,6 +2602,12 @@ def run_live(args):
             "exit_time": "2024-01-13T13:30:00"     // ISO format (default: now)
         }
         """
+        # Authentication check (same as emergency endpoints)
+        api_key = request.headers.get('X-API-KEY')
+        expected_key = os.environ.get('EMERGENCY_API_KEY')
+        if not expected_key or api_key != expected_key:
+            return jsonify({'error': 'Unauthorized', 'message': 'Valid X-API-KEY header required'}), 401
+
         try:
             data = request.json
             if not data:
