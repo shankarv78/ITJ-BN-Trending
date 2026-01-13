@@ -18,6 +18,10 @@ from core.config import PortfolioConfig, get_instrument_config
 from core.signal_validator import SignalValidator, SignalValidationConfig, ValidationSeverity
 from core.order_executor import OrderExecutor, SimpleLimitExecutor, ProgressiveExecutor, ExecutionStatus, SyntheticFuturesExecutor
 from core.signal_validation_metrics import SignalValidationMetrics
+from core.signal_audit_service import (
+    SignalAuditService, SignalAuditRecord, SignalOutcome,
+    ValidationResultData, SizingCalculationData, RiskAssessmentData, OrderExecutionData
+)
 from live.rollover_scanner import RolloverScanner, RolloverScanResult
 from live.rollover_executor import RolloverExecutor, BatchRolloverResult
 
@@ -131,6 +135,12 @@ class LiveTradingEngine:
 
         # Metrics collection
         self.metrics = SignalValidationMetrics(window_size=1000)
+
+        # Signal audit service for comprehensive signal logging
+        self.audit_service: Optional[SignalAuditService] = None
+        if db_manager:
+            self.audit_service = SignalAuditService(db_manager)
+            logger.info("[LIVE] Signal audit service initialized")
 
         # Order executor based on config
         if self.config.execution_strategy == "simple_limit":
@@ -252,6 +262,121 @@ class LiveTradingEngine:
         # Should never reach here, but safety fallback
         return fallback_price, True
 
+    # ============================================================
+    # Signal Audit Logging
+    # ============================================================
+
+    def _log_signal_audit(
+        self,
+        signal: Signal,
+        outcome: SignalOutcome,
+        outcome_reason: Optional[str] = None,
+        validation_data: Optional[Dict] = None,
+        sizing_data: Optional[Dict] = None,
+        risk_data: Optional[Dict] = None,
+        order_data: Optional[Dict] = None,
+        processing_start_time: Optional[datetime] = None
+    ) -> Optional[int]:
+        """
+        Log signal to audit trail (non-blocking, error-safe).
+
+        Args:
+            signal: The signal being processed
+            outcome: SignalOutcome enum value
+            outcome_reason: Human-readable reason for outcome
+            validation_data: Dict with validation result details
+            sizing_data: Dict with position sizing calculation
+            risk_data: Dict with risk assessment
+            order_data: Dict with order execution details
+            processing_start_time: When processing started (for duration calc)
+
+        Returns:
+            Audit record ID if successful, None if failed or audit disabled
+        """
+        if not self.audit_service:
+            return None
+
+        try:
+            # Calculate processing duration
+            duration_ms = None
+            if processing_start_time:
+                duration_ms = int((datetime.now() - processing_start_time).total_seconds() * 1000)
+
+            # Build structured data objects
+            validation_result = None
+            if validation_data:
+                validation_result = ValidationResultData(
+                    is_valid=validation_data.get('is_valid', False),
+                    severity=validation_data.get('severity', 'NORMAL'),
+                    signal_age_seconds=validation_data.get('signal_age_seconds'),
+                    divergence_pct=validation_data.get('divergence_pct'),
+                    reason=validation_data.get('reason')
+                )
+
+            sizing_calculation = None
+            if sizing_data:
+                sizing_calculation = SizingCalculationData(
+                    equity_high=sizing_data.get('equity_high'),
+                    risk_percent=sizing_data.get('risk_percent'),
+                    stop_distance=sizing_data.get('stop_distance'),
+                    atr=sizing_data.get('atr'),
+                    efficiency_ratio=sizing_data.get('er'),
+                    final_lots=sizing_data.get('lots'),
+                    limiter=sizing_data.get('limiter')
+                )
+
+            risk_assessment = None
+            if risk_data:
+                risk_assessment = RiskAssessmentData(
+                    pre_trade_risk_pct=risk_data.get('pre_trade_risk_pct'),
+                    post_trade_risk_pct=risk_data.get('post_trade_risk_pct'),
+                    margin_available=risk_data.get('margin_available'),
+                    margin_required=risk_data.get('margin_required')
+                )
+
+            order_execution = None
+            if order_data:
+                order_execution = OrderExecutionData(
+                    order_id=order_data.get('order_id'),
+                    order_type=order_data.get('order_type'),
+                    execution_status=order_data.get('status'),
+                    signal_price=order_data.get('signal_price'),
+                    execution_price=order_data.get('execution_price'),
+                    fill_price=order_data.get('fill_price'),
+                    slippage_pct=order_data.get('slippage_pct'),
+                    error_message=order_data.get('error')
+                )
+
+            # Create fingerprint from signal
+            fingerprint = f"{signal.instrument}:{signal.signal_type.value}:{signal.timestamp.isoformat()}"
+
+            # Create audit record
+            record = SignalAuditRecord(
+                signal_fingerprint=fingerprint,
+                instrument=signal.instrument,
+                signal_type=signal.signal_type.value,
+                position=signal.position,
+                signal_timestamp=signal.timestamp,
+                received_at=datetime.now(),
+                outcome=outcome,
+                outcome_reason=outcome_reason,
+                validation_result=validation_result,
+                sizing_calculation=sizing_calculation,
+                risk_assessment=risk_assessment,
+                order_execution=order_execution,
+                processing_duration_ms=duration_ms
+            )
+
+            audit_id = self.audit_service.create_audit_record(record)
+            if audit_id:
+                logger.debug(f"[AUDIT] Signal logged: {outcome.value} - {signal.instrument} {signal.signal_type.value} (id={audit_id})")
+            return audit_id
+
+        except Exception as e:
+            # Non-blocking: log error but don't fail signal processing
+            logger.error(f"[AUDIT] Failed to log signal audit: {e}")
+            return None
+
     def process_signal(self, signal: Signal, coordinator=None) -> Dict:
         """
         Process signal in live mode
@@ -265,10 +390,19 @@ class LiveTradingEngine:
         Returns:
             Dict with execution result
         """
+        # Track processing time for audit
+        processing_start_time = datetime.now()
+
         # Optional: Verify leadership if coordinator provided
         # This provides additional protection if called directly (not via webhook)
         if coordinator and not coordinator.is_leader:
             logger.warning(f"[LIVE] Rejecting signal - not leader (instance: {coordinator.instance_id})")
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.REJECTED_VALIDATION,
+                outcome_reason="not_leader",
+                processing_start_time=processing_start_time
+            )
             return {'status': 'rejected', 'reason': 'not_leader'}
 
         # EOD Deduplication: Check if this signal was already executed at EOD
@@ -286,6 +420,12 @@ class LiveTradingEngine:
                 logger.info(
                     f"[LIVE] Skipping signal - already executed at EOD: "
                     f"{signal.signal_type.value} {signal.instrument}"
+                )
+                self._log_signal_audit(
+                    signal=signal,
+                    outcome=SignalOutcome.REJECTED_DUPLICATE,
+                    outcome_reason="already_executed_at_eod",
+                    processing_start_time=processing_start_time
                 )
                 return {
                     'status': 'skipped',
@@ -344,6 +484,18 @@ class LiveTradingEngine:
 
                 if not execute_anyway:
                     logger.info(f"[LIVE] Signal rejected after user confirmation: {condition_result.reason}")
+                    self._log_signal_audit(
+                        signal=signal,
+                        outcome=SignalOutcome.REJECTED_VALIDATION,
+                        outcome_reason=f"condition_validation_failed: {condition_result.reason}",
+                        validation_data={
+                            'is_valid': False,
+                            'severity': condition_result.severity.value if hasattr(condition_result.severity, 'value') else str(condition_result.severity),
+                            'signal_age_seconds': condition_result.signal_age_seconds,
+                            'reason': condition_result.reason
+                        },
+                        processing_start_time=processing_start_time
+                    )
                     return {
                         'status': 'rejected',
                         'reason': 'validation_failed',
@@ -377,6 +529,7 @@ class LiveTradingEngine:
 
         IDENTICAL sizing logic as backtest, but executes via OpenAlgo
         """
+        processing_start_time = datetime.now()
         instrument = signal.instrument
 
         # Get instrument type
@@ -415,6 +568,20 @@ class LiveTradingEngine:
 
         if constraints.final_lots == 0:
             self.stats['entries_blocked'] += 1
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.REJECTED_RISK,
+                outcome_reason=f"zero_lots_calculated: limited by {constraints.limiter}",
+                sizing_data={
+                    'equity_high': live_equity,
+                    'stop_distance': signal.price - signal.stop if signal.stop else None,
+                    'atr': signal.atr,
+                    'er': signal.efficiency_ratio,
+                    'lots': 0,
+                    'limiter': constraints.limiter
+                },
+                processing_start_time=processing_start_time
+            )
             return {
                 'status': 'blocked',
                 'reason': f'Zero lots (limited by {constraints.limiter})'
@@ -428,6 +595,25 @@ class LiveTradingEngine:
 
         if not gate_allowed:
             self.stats['entries_blocked'] += 1
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.REJECTED_RISK,
+                outcome_reason=f"portfolio_gate_blocked: {gate_reason}",
+                sizing_data={
+                    'equity_high': live_equity,
+                    'stop_distance': signal.price - signal.stop if signal.stop else None,
+                    'atr': signal.atr,
+                    'er': signal.efficiency_ratio,
+                    'lots': constraints.final_lots,
+                    'limiter': constraints.limiter
+                },
+                risk_data={
+                    'margin_available': available_margin,
+                    'margin_required': est_risk,
+                    'reason': gate_reason
+                },
+                processing_start_time=processing_start_time
+            )
             return {'status': 'blocked', 'reason': gate_reason}
 
         # Step 2: Execution validation (uses broker API price)
@@ -775,6 +961,36 @@ class LiveTradingEngine:
                     order_id=execution_result['order_details'].get('order_id')
                 )
 
+            # Log successful base entry audit
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.PROCESSED,
+                outcome_reason="base_entry_executed",
+                sizing_data={
+                    'equity_high': live_equity,
+                    'stop_distance': signal.price - signal.stop if signal.stop else None,
+                    'atr': signal.atr,
+                    'er': signal.efficiency_ratio,
+                    'lots': original_lots,
+                    'limiter': constraints.limiter
+                },
+                risk_data={
+                    'margin_available': available_margin,
+                    'margin_required': est_risk,
+                    'pre_trade_risk_pct': (est_risk / live_equity * 100) if live_equity > 0 else 0
+                },
+                order_data={
+                    'order_id': execution_result['order_details'].get('order_id'),
+                    'order_type': 'BASE_ENTRY',
+                    'status': 'executed',
+                    'signal_price': signal.price,
+                    'execution_price': entry_price,
+                    'fill_price': entry_price,
+                    'slippage_pct': execution_result['order_details'].get('slippage_pct', 0)
+                },
+                processing_start_time=processing_start_time
+            )
+
             return {
                 'status': 'executed',
                 'lots': original_lots,
@@ -919,10 +1135,21 @@ class LiveTradingEngine:
 
     def _handle_pyramid_live(self, signal: Signal) -> Dict:
         """Handle pyramid in live mode (SAME logic as backtest)"""
+        processing_start_time = datetime.now()
         instrument = signal.instrument
 
         if instrument not in self.base_positions:
             self.stats['pyramids_blocked'] += 1
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.REJECTED_VALIDATION,
+                outcome_reason="no_base_position_found",
+                validation_data={
+                    'is_valid': False,
+                    'reason': f"No base position exists for {instrument}"
+                },
+                processing_start_time=processing_start_time
+            )
             return {'status': 'blocked', 'reason': 'No base position'}
 
         base_pos = self.base_positions[instrument]
@@ -938,6 +1165,16 @@ class LiveTradingEngine:
 
             if not gate_check.allowed:
                 self.stats['pyramids_blocked'] += 1
+                self._log_signal_audit(
+                    signal=signal,
+                    outcome=SignalOutcome.REJECTED_RISK,
+                    outcome_reason=f"pyramid_gate_blocked: {gate_check.reason}",
+                    risk_data={
+                        'pre_trade_risk_pct': None,  # Could be calculated if needed
+                        'reason': gate_check.reason
+                    },
+                    processing_start_time=processing_start_time
+                )
                 return {'status': 'blocked', 'reason': gate_check.reason}
 
         # Get instrument type
@@ -993,6 +1230,26 @@ class LiveTradingEngine:
                 f"[LIVE] Pyramid blocked: 0 lots (limited by {constraints.limiter}). "
                 f"Base lots={base_pos.lots}, P&L=₹{unrealized_pnl:,.0f}, "
                 f"Base risk=₹{base_risk:,.0f}, Excess profit=₹{profit_after_base_risk:,.0f}"
+            )
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.REJECTED_RISK,
+                outcome_reason=f"zero_lots_calculated: limited by {constraints.limiter}",
+                sizing_data={
+                    'equity_high': live_equity,
+                    'risk_percent': constraints.risk_percent if hasattr(constraints, 'risk_percent') else None,
+                    'stop_distance': signal.price - signal.stop if signal.stop else None,
+                    'atr': signal.atr,
+                    'er': signal.efficiency_ratio,
+                    'lots': 0,
+                    'limiter': constraints.limiter
+                },
+                risk_data={
+                    'pre_trade_risk_pct': None,
+                    'margin_available': available_margin,
+                    'reason': f"Base lots={base_pos.lots}, P&L={unrealized_pnl:.0f}, Excess profit={profit_after_base_risk:.0f}"
+                },
+                processing_start_time=processing_start_time
             )
             return {
                 'status': 'blocked',
@@ -1353,6 +1610,31 @@ class LiveTradingEngine:
                     price=entry_price,
                     order_id=execution_result['order_details'].get('order_id')
                 )
+
+            # Log successful pyramid audit
+            self._log_signal_audit(
+                signal=signal,
+                outcome=SignalOutcome.PROCESSED,
+                outcome_reason="pyramid_executed",
+                sizing_data={
+                    'equity_high': live_equity,
+                    'stop_distance': signal.price - signal.stop if signal.stop else None,
+                    'atr': signal.atr,
+                    'er': signal.efficiency_ratio,
+                    'lots': original_lots,
+                    'limiter': constraints.limiter
+                },
+                order_data={
+                    'order_id': execution_result['order_details'].get('order_id'),
+                    'order_type': 'PYRAMID',
+                    'status': 'executed',
+                    'signal_price': signal.price,
+                    'execution_price': entry_price,
+                    'fill_price': entry_price,
+                    'slippage_pct': execution_result['order_details'].get('slippage_pct', 0)
+                },
+                processing_start_time=processing_start_time
+            )
 
             return {
                 'status': 'executed',
