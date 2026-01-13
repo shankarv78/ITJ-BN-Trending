@@ -101,6 +101,9 @@ class VoiceAnnouncer:
         # Callbacks
         self._on_error_acknowledged: Optional[Callable] = None
 
+        # Dual-channel confirmation manager (for Telegram + macOS simultaneous confirmations)
+        self._confirmation_manager = None
+
         # Voice recognition
         self._voice_listener_thread: Optional[threading.Thread] = None
         self._stop_voice_listener = threading.Event()
@@ -113,6 +116,19 @@ class VoiceAnnouncer:
             self._start_error_repeat_thread()
         else:
             logger.info("Voice announcer disabled (pyttsx3 not available)")
+
+    def set_confirmation_manager(self, manager):
+        """
+        Set the dual-channel confirmation manager.
+
+        When set, confirmations will be sent to BOTH macOS dialog AND Telegram
+        simultaneously. First response wins, other channel is cancelled.
+
+        Args:
+            manager: SyncConfirmationBridge instance (from telegram_bot.sync_bridge)
+        """
+        self._confirmation_manager = manager
+        logger.info("[VoiceAnnouncer] Dual-channel confirmation manager set")
 
     def _speak(self, text: str, priority: str = "normal", voice: str = None):
         """
@@ -621,6 +637,86 @@ class VoiceAnnouncer:
     # VALIDATION CONFIRMATION (BLOCKING DIALOG)
     # =========================================================================
 
+    def _request_dual_channel_confirmation(
+        self,
+        instrument: str,
+        signal_type: str,
+        rejection_reason: str,
+        details: str
+    ) -> bool:
+        """
+        Request confirmation via dual-channel (macOS dialog + Telegram).
+
+        First response wins, other channel is cancelled.
+
+        Args:
+            instrument: e.g., "GOLD_MINI"
+            signal_type: e.g., "BASE_ENTRY", "PYRAMID"
+            rejection_reason: e.g., "signal_timestamp_in_future"
+            details: Additional context about the rejection
+
+        Returns:
+            True = Execute anyway, False = Reject signal
+        """
+        try:
+            from telegram_bot.confirmations import (
+                ConfirmationType,
+                ConfirmationAction,
+                ConfirmationOption,
+            )
+
+            # Format the reason for display
+            reason_display = rejection_reason.replace('_', ' ').title()
+
+            logger.info(
+                f"[VoiceAnnouncer] Requesting dual-channel confirmation for "
+                f"{instrument} {signal_type}: {rejection_reason}"
+            )
+
+            result = self._confirmation_manager.request_confirmation(
+                confirmation_type=ConfirmationType.VALIDATION_FAILED,
+                context={
+                    'Instrument': instrument,
+                    'Signal': signal_type,
+                    'Reason': reason_display,
+                    'Details': details
+                },
+                options=[
+                    ConfirmationOption(
+                        ConfirmationAction.REJECT,
+                        "Reject Signal",
+                        is_default=True
+                    ),
+                    ConfirmationOption(
+                        ConfirmationAction.EXECUTE_ANYWAY,
+                        "Execute Anyway"
+                    )
+                ],
+                timeout_seconds=300  # 5 minutes
+            )
+
+            execute = result.action == ConfirmationAction.EXECUTE_ANYWAY
+
+            logger.info(
+                f"[VoiceAnnouncer] Confirmation result: "
+                f"action={result.action.value}, source={result.source}, execute={execute}"
+            )
+
+            # Voice feedback based on result
+            if execute:
+                if not self.silent_mode:
+                    self._speak("Executing signal as requested.", priority="high", voice="Samantha")
+            else:
+                if not self.silent_mode:
+                    self._speak("Signal rejected.", priority="high", voice="Samantha")
+
+            return execute
+
+        except Exception as e:
+            logger.error(f"[VoiceAnnouncer] Dual-channel confirmation error: {e}")
+            # On error, reject the signal for safety
+            return False
+
     def request_validation_confirmation(
         self,
         instrument: str,
@@ -631,7 +727,10 @@ class VoiceAnnouncer:
         """
         Show blocking dialog for validation failure confirmation.
 
-        Voice announces the issue every 5 seconds until user responds.
+        If dual-channel confirmation manager is set, sends to BOTH macOS dialog
+        AND Telegram simultaneously. First response wins.
+
+        Otherwise, voice announces the issue every 5 seconds until user responds.
         Returns True if user wants to execute anyway, False to reject.
 
         Args:
@@ -643,6 +742,13 @@ class VoiceAnnouncer:
         Returns:
             True = Execute anyway, False = Reject signal
         """
+        # Check if dual-channel manager is available
+        if self._confirmation_manager:
+            return self._request_dual_channel_confirmation(
+                instrument, signal_type, rejection_reason, details
+            )
+
+        # Fall back to macOS-only dialog
         if not IS_MACOS:
             logger.warning("Confirmation dialog only available on macOS. Auto-rejecting.")
             return False
